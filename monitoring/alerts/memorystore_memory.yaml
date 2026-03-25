@@ -1,0 +1,45 @@
+# Alert: Memorystore (Redis) memory usage > 80%
+#
+# Built-in GCP metric — no log-based metric needed.
+# At 80% Redis starts evicting keys using the configured eviction policy.
+# For RouterV, evicted rate-limit counters = silent rate limit bypass.
+# Evicted key-auth cache entries = extra Postgres load (acceptable but degraded).
+#
+# Apply:
+#   gcloud monitoring policies create --policy-from-file=monitoring/alerts/memorystore_memory.yaml
+
+displayName: "RouterV — Memorystore Memory > 80%"
+documentation:
+  content: |
+    **Memorystore Redis memory usage has exceeded 80%.**
+
+    At this level Redis may begin evicting keys. For RouterV:
+    - Evicted rate-limit counters → silent RPM/RPD bypass
+    - Evicted key-auth cache → increased Cloud SQL query load (fail-safe)
+    - Evicted model cache → increased OpenRouter API calls
+
+    Remediation:
+    1. Increase Memorystore instance memory tier
+    2. Review TTLs: key auth cache (60s), model cache (5min), provider key cache (5min)
+    3. Check for runaway rate-limit key accumulation (many unique key_ids)
+  mimeType: text/markdown
+
+combiner: OR
+conditions:
+  - displayName: "Redis memory ratio > 0.8"
+    conditionThreshold:
+      filter: >
+        metric.type="redis.googleapis.com/stats/memory/usage_ratio"
+        resource.type="redis_instance"
+      aggregations:
+        - alignmentPeriod: 300s
+          perSeriesAligner: ALIGN_MEAN
+      comparison: COMPARISON_GT
+      thresholdValue: 0.8
+      duration: 300s
+
+alertStrategy:
+  autoClose: 3600s
+
+notificationChannels: []
+severity: WARNING

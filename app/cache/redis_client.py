@@ -32,7 +32,11 @@ async def init_redis(url: str) -> aioredis.Redis:
     global _redis
     _redis = aioredis.from_url(url, encoding="utf-8", decode_responses=True)
     await _redis.ping()   # fail fast at startup if Redis is unreachable
-    logger.info("redis_ready", url=url)
+    # Mask credentials in the logged URL (e.g. redis://:password@host → redis://***@host)
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(url)
+    safe_url = urlunparse(parsed._replace(password="***")) if parsed.password else url
+    logger.info("redis_ready", url=safe_url)
     return _redis
 
 

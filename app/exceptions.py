@@ -9,11 +9,21 @@ All errors are serialized to the RouterV wire format:
 
 This overrides FastAPI's default 422 body so clients always get a consistent
 error envelope regardless of where in the stack the error originated.
+
+Logging policy
+--------------
+  5xx             → ERROR   (alerts should fire; operator action required)
+  429             → WARNING (rate limiting working as intended; monitor trends)
+  401 / 403       → WARNING (auth failures; spike may indicate abuse)
+  other 4xx       → INFO    (client errors; not actionable by operator)
 """
 
+import structlog
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+
+logger = structlog.get_logger()
 
 
 # ── Base ─────────────────────────────────────────────────────────────────────
@@ -108,6 +118,36 @@ def _request_id(request: Request) -> str:
 
 
 async def routerv_exception_handler(request: Request, exc: RouterVError) -> JSONResponse:
+    rid = _request_id(request)
+
+    # ── Structured logging by severity ───────────────────────────────────────
+    log_fields: dict = {
+        "error_code": exc.error_code,
+        "status_code": exc.status_code,
+        "path": request.url.path,
+        "method": request.method,
+    }
+
+    if exc.status_code >= 500:
+        # 5xx: operator action likely required — alert should fire.
+        logger.error("request_error", error_message=exc.message, **log_fields)
+
+    elif exc.status_code == 429:
+        # Rate limit: expected under normal load, but a spike means abuse.
+        extra: dict = {}
+        if isinstance(exc, RateLimitError):
+            extra = {"limit_type": exc.limit_type, "retry_after": exc.retry_after}
+        logger.warning("rate_limit_exceeded", **log_fields, **extra)
+
+    elif exc.status_code in (401, 403):
+        # Auth failure: a sustained spike could indicate credential brute-force.
+        logger.warning("auth_error", **log_fields)
+
+    else:
+        # Other 4xx: client error, not actionable by operator.
+        logger.info("client_error", error_message=exc.message, **log_fields)
+
+    # ── Wire response ─────────────────────────────────────────────────────────
     headers: dict[str, str] = {}
     if isinstance(exc, RateLimitError):
         headers["Retry-After"] = str(exc.retry_after)
@@ -119,7 +159,7 @@ async def routerv_exception_handler(request: Request, exc: RouterVError) -> JSON
                 "code": exc.error_code,
                 "message": exc.message,
             },
-            "request_id": _request_id(request),
+            "request_id": rid,
         },
         headers=headers,
     )
@@ -128,6 +168,12 @@ async def routerv_exception_handler(request: Request, exc: RouterVError) -> JSON
 async def validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
+    logger.info(
+        "validation_error",
+        path=request.url.path,
+        method=request.method,
+        detail=exc.errors(),
+    )
     return JSONResponse(
         status_code=422,
         content={

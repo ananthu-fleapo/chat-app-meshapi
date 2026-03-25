@@ -1,0 +1,48 @@
+# Alert: Cloud Run instance count approaching max
+#
+# Built-in GCP metric. Fires when active instance count > 8 (assuming
+# max-instances=10). Sustained near-max scaling means either legitimate
+# traffic growth (good) or a runaway loop / abuse pattern (bad).
+# Also serves as a billing protection alert.
+#
+# Apply:
+#   gcloud monitoring policies create --policy-from-file=monitoring/alerts/cloudrun_instance_count.yaml
+
+displayName: "RouterV — Cloud Run Instance Count > 8"
+documentation:
+  content: |
+    **Cloud Run is running more than 8 instances.**
+
+    This may indicate:
+    - Legitimate traffic growth → consider raising max-instances
+    - Abuse / DDoS bypassing Cloudflare WAF rules
+    - A client in a retry loop sending excessive requests
+    - Slow upstream responses causing request pileup (check p99 latency)
+
+    Investigation:
+    1. Cloud Run metrics: request count by status code
+    2. Cloud Logging: check for single IP or key driving volume
+    3. Cloudflare Analytics: check WAF events and request origin
+    4. Rate limit metrics: routersvc_rate_limit_exceeded spike?
+  mimeType: text/markdown
+
+combiner: OR
+conditions:
+  - displayName: "Active instances > 8"
+    conditionThreshold:
+      filter: >
+        metric.type="run.googleapis.com/container/instance_count"
+        resource.type="cloud_run_revision"
+        metric.label.state="active"
+      aggregations:
+        - alignmentPeriod: 300s
+          perSeriesAligner: ALIGN_MAX
+      comparison: COMPARISON_GT
+      thresholdValue: 8
+      duration: 300s
+
+alertStrategy:
+  autoClose: 1800s
+
+notificationChannels: []
+severity: WARNING

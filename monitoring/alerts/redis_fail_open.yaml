@@ -1,0 +1,49 @@
+# Alert: Redis unavailable (rate limiting disabled)
+#
+# When Redis is unreachable, rate_limiter.py fails open — rate limiting is
+# completely disabled. This is intentional (don't block inference on Redis)
+# but must be fixed immediately in production to prevent abuse.
+#
+# Apply:
+#   gcloud monitoring policies create --policy-from-file=monitoring/alerts/redis_fail_open.yaml
+
+displayName: "RouterV — Redis Unavailable (Rate Limiting Disabled)"
+documentation:
+  content: |
+    **Redis (Memorystore) is unreachable. Rate limiting is DISABLED.**
+
+    All requests are passing through without RPM/RPD enforcement.
+    This exposes you to runaway spend and upstream quota exhaustion.
+
+    Likely causes:
+    - Memorystore instance restarting or in maintenance
+    - VPC connector connectivity issue between Cloud Run and Memorystore
+    - REDIS_URL misconfigured after infrastructure change
+
+    Investigation:
+    1. GCP Console → Memorystore → check instance status
+    2. Cloud Run → check VPC connector is attached
+    3. Cloud Logging: filter `jsonPayload.message="redis_unavailable"`
+    4. Test connectivity: `redis-cli -h <MEMORYSTORE_IP> ping`
+  mimeType: text/markdown
+
+combiner: OR
+conditions:
+  - displayName: "redis_unavailable > 0 in 5 min"
+    conditionThreshold:
+      filter: >
+        metric.type="logging.googleapis.com/user/routersvc_redis_fail_open"
+        resource.type="cloud_run_revision"
+      aggregations:
+        - alignmentPeriod: 300s
+          crossSeriesReducer: REDUCE_SUM
+          perSeriesAligner: ALIGN_DELTA
+      comparison: COMPARISON_GT
+      thresholdValue: 0
+      duration: 0s
+
+alertStrategy:
+  autoClose: 1800s
+
+notificationChannels: []
+severity: CRITICAL

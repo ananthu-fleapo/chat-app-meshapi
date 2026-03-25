@@ -92,7 +92,7 @@ async def get_cached_key(key_hash: str) -> ApiKey | None:
             return None
         return _deserialize(raw)
     except Exception as exc:
-        logger.warning("key_cache_get_error", error=str(exc))
+        logger.warning("redis_unavailable", source="key_cache_get", error=str(exc))
         return None  # fall back to Postgres
 
 
@@ -103,7 +103,7 @@ async def set_cached_key(key: ApiKey) -> None:
     try:
         await get_redis().setex(_rk(key.key_hash), KEY_CACHE_TTL, _serialize(key))
     except Exception as exc:
-        logger.warning("key_cache_set_error", error=str(exc))
+        logger.warning("redis_unavailable", source="key_cache_set", error=str(exc))
 
 
 async def invalidate_cached_key(key_hash: str) -> None:
@@ -115,4 +115,4 @@ async def invalidate_cached_key(key_hash: str) -> None:
         await get_redis().delete(_rk(key_hash))
         logger.debug("key_cache_invalidated", key_hash=key_hash[:16] + "...")
     except Exception as exc:
-        logger.warning("key_cache_invalidate_error", error=str(exc))
+        logger.warning("redis_unavailable", source="key_cache_invalidate", error=str(exc))

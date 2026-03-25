@@ -105,7 +105,7 @@ async def check_rate_limits(
 
     except Exception as exc:
         # Redis unavailable — fail open, log warning.
-        logger.warning("rate_limit_redis_error", key_id=key_id, error=str(exc))
+        logger.warning("redis_unavailable", source="rate_limiter", key_id=key_id, error=str(exc))
         return
 
     if rpm_count > effective_rpm:

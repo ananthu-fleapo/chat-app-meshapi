@@ -146,6 +146,11 @@ async def chat_completions(
             except Exception as exc:
                 status = "error"
                 error_code_val = getattr(exc, "error_code", "upstream_error")
+                log.error(
+                    "stream_error",
+                    error_code=error_code_val,
+                    error=str(exc),
+                )
                 raise
 
             finally:

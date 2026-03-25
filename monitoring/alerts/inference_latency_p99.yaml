@@ -1,0 +1,46 @@
+# Alert: Inference p99 latency > 30s over 5 minutes
+#
+# LLM requests are inherently slow (5–60s is normal). We alert at 30s p99
+# to catch hangs, timeouts, or upstream degradation — not normal slow models.
+# Adjust threshold based on your workload's model mix.
+#
+# Apply:
+#   gcloud monitoring policies create --policy-from-file=monitoring/alerts/inference_latency_p99.yaml
+
+displayName: "RouterV — Inference p99 Latency > 30s"
+documentation:
+  content: |
+    **RouterV inference p99 latency has exceeded 30 seconds.**
+
+    Likely causes:
+    - OpenRouter upstream degraded (specific models slow)
+    - Cloud Run CPU throttling (increase min CPU allocation)
+    - Client sending very large contexts (check prompt_tokens in logs)
+    - openrouter_timeout_s config needs tuning
+
+    Investigation:
+    1. Cloud Logging: filter `jsonPayload.message="inference_complete"`, sort by latency_ms
+    2. Break down by model: `jsonPayload.model`
+    3. Check Cloud Run CPU/memory metrics
+  mimeType: text/markdown
+
+combiner: OR
+conditions:
+  - displayName: "p99 latency > 30000ms"
+    conditionThreshold:
+      filter: >
+        metric.type="logging.googleapis.com/user/routersvc_inference_latency_ms"
+        resource.type="cloud_run_revision"
+      aggregations:
+        - alignmentPeriod: 300s
+          crossSeriesReducer: REDUCE_PERCENTILE_99
+          perSeriesAligner: ALIGN_DELTA
+      comparison: COMPARISON_GT
+      thresholdValue: 30000
+      duration: 300s
+
+alertStrategy:
+  autoClose: 1800s
+
+notificationChannels: []
+severity: WARNING

@@ -1,0 +1,52 @@
+# Alert: Cloud SQL connection count > 80% of max
+#
+# Built-in GCP metric. SQLAlchemy's async pool defaults to 5 connections
+# per instance. With Cloud Run autoscaling to e.g. 10 instances that's
+# 50 connections. Cloud SQL's max_connections default is 100 (db-f1-micro)
+# or higher for larger tiers.
+#
+# Tune thresholdValue to match your Cloud SQL tier's max_connections * 0.8.
+# Default here assumes max_connections=100 → alert at 80.
+#
+# Apply:
+#   gcloud monitoring policies create --policy-from-file=monitoring/alerts/cloudsql_connections.yaml
+
+displayName: "RouterV — Cloud SQL Connections > 80"
+documentation:
+  content: |
+    **Cloud SQL connection count is high.**
+
+    At max_connections, new connections will be refused — Cloud Run instances
+    fail to start DB sessions and all requests requiring DB access will error.
+
+    Likely causes:
+    - Cloud Run scaling up with too many instances × pool_size
+    - Connection leaks (sessions not closed / context managers not exiting)
+    - Long-running transactions blocking connection release
+
+    Remediation:
+    1. Reduce SQLAlchemy pool_size in app/db/engine.py
+    2. Add Cloud SQL Auth Proxy connection pooling (pgbouncer mode)
+    3. Scale down Cloud Run max-instances
+    4. Check for uncommitted transactions in Cloud SQL logs
+  mimeType: text/markdown
+
+combiner: OR
+conditions:
+  - displayName: "Cloud SQL connections > 80"
+    conditionThreshold:
+      filter: >
+        metric.type="cloudsql.googleapis.com/database/postgresql/num_backends"
+        resource.type="cloudsql_database"
+      aggregations:
+        - alignmentPeriod: 300s
+          perSeriesAligner: ALIGN_MAX
+      comparison: COMPARISON_GT
+      thresholdValue: 80
+      duration: 300s
+
+alertStrategy:
+  autoClose: 3600s
+
+notificationChannels: []
+severity: WARNING

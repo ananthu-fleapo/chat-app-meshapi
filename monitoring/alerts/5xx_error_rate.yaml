@@ -1,0 +1,44 @@
+# Alert: HTTP 5xx error rate > 1% over 5 minutes
+#
+# Fires when more than 1% of requests return a 5xx response.
+# This covers upstream errors (502/504) and any unhandled exceptions.
+#
+# Apply:
+#   gcloud monitoring policies create --policy-from-file=monitoring/alerts/5xx_error_rate.yaml
+
+displayName: "RouterV — 5xx Error Rate > 1%"
+documentation:
+  content: |
+    **RouterV is returning HTTP 5xx errors.**
+
+    Likely causes:
+    - OpenRouter upstream is down or returning errors (check routersvc_upstream_errors metric)
+    - Cloud SQL connection pool exhausted
+    - Unhandled exception in route handler (check ERROR logs)
+
+    Investigation:
+    1. Cloud Logging: filter `jsonPayload.message="request_error" severity=ERROR`
+    2. Check OpenRouter status: https://status.openrouter.ai
+    3. Check Cloud SQL metrics for connection spikes
+  mimeType: text/markdown
+
+combiner: OR
+conditions:
+  - displayName: "5xx rate > 1%"
+    conditionThreshold:
+      filter: >
+        metric.type="logging.googleapis.com/user/routersvc_http_5xx"
+        resource.type="cloud_run_revision"
+      aggregations:
+        - alignmentPeriod: 300s
+          crossSeriesReducer: REDUCE_SUM
+          perSeriesAligner: ALIGN_RATE
+      comparison: COMPARISON_GT
+      thresholdValue: 0.01
+      duration: 300s
+
+alertStrategy:
+  autoClose: 1800s  # auto-close if no data for 30 min (e.g. service scaled to 0)
+
+notificationChannels: []  # fill in your channel IDs after creating them
+severity: ERROR

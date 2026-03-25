@@ -1,0 +1,49 @@
+# Alert: Any usage log failure
+#
+# usage_log_failed means a billing/audit event was not persisted to Cloud SQL.
+# This is a fire-and-forget background task that silently fails, so the only
+# signal is this log metric. Even 1 failure in 10 minutes warrants investigation
+# because it represents lost billing data.
+#
+# Apply:
+#   gcloud monitoring policies create --policy-from-file=monitoring/alerts/usage_log_failures.yaml
+
+displayName: "RouterV — Usage Log Failures"
+documentation:
+  content: |
+    **RouterV failed to persist one or more usage events to Cloud SQL.**
+
+    This means billing/audit data was lost. The inference response was still
+    delivered to the client (usage logging never blocks responses).
+
+    Likely causes:
+    - Cloud SQL connection pool exhausted or instance unavailable
+    - asyncpg connection error (network blip to Cloud SQL)
+    - Schema mismatch (migration not applied after deploy)
+
+    Investigation:
+    1. Cloud Logging: `jsonPayload.message="usage_log_failed"` — check error field
+    2. Cloud SQL metrics: connection count, CPU, storage
+    3. Verify alembic migration applied: `alembic current`
+  mimeType: text/markdown
+
+combiner: OR
+conditions:
+  - displayName: "usage_log_failed count > 0 in 10 min"
+    conditionThreshold:
+      filter: >
+        metric.type="logging.googleapis.com/user/routersvc_usage_log_failed"
+        resource.type="cloud_run_revision"
+      aggregations:
+        - alignmentPeriod: 600s
+          crossSeriesReducer: REDUCE_SUM
+          perSeriesAligner: ALIGN_DELTA
+      comparison: COMPARISON_GT
+      thresholdValue: 0
+      duration: 0s  # fire immediately on first occurrence
+
+alertStrategy:
+  autoClose: 3600s
+
+notificationChannels: []
+severity: ERROR
