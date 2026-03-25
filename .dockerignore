@@ -1,0 +1,51 @@
+# Version control
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments — we create the venv inside Docker, not from host
+.venv/
+venv/
+env/
+
+# Dev environment files — never bake secrets into the image
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# Grafana / Prometheus local data
+grafana/
+prometheus.yml
+
+# Documentation
+*.md
+*.txt
+!requirements*.txt
+
+# Docker itself
+Dockerfile
+.dockerignore

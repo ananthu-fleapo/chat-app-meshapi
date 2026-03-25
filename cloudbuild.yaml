@@ -1,0 +1,107 @@
+# Cloud Build pipeline — RouterV
+#
+# Triggered on push to main branch (configure via Cloud Build trigger in GCP Console).
+# Assumes the following substitutions are set in the trigger:
+#   _REGION           GCP region, e.g. "us-central1"
+#   _REPO             Artifact Registry repo, e.g. "routersvc"
+#   _SERVICE          Cloud Run service name, e.g. "routersvc"
+#   _DB_CONNECTION    Cloud SQL connection name, e.g. "project:region:instance"
+#
+# Steps
+# -----
+# 1. Build the Docker image (multi-stage, non-root)
+# 2. Push to Artifact Registry
+# 3. Run Alembic migrations as a one-off Cloud Run job
+# 4. Deploy new Cloud Run revision
+#
+# The migration step (3) runs BEFORE the new revision goes live (4),
+# ensuring the schema is always ahead of or in sync with the code.
+
+substitutions:
+  _REGION: us-central1
+  _REPO: routersvc
+  _SERVICE: routersvc
+  _DB_CONNECTION: ""   # set in trigger: project:region:instance
+
+steps:
+  # ── 1. Build ───────────────────────────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: build
+    args:
+      - build
+      - --tag
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
+      - --tag
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest"
+      - --cache-from
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest"
+      - .
+
+  # ── 2. Push ────────────────────────────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: push
+    args:
+      - push
+      - "--all-tags"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}"
+    waitFor: [build]
+
+  # ── 3. Migrate ─────────────────────────────────────────────────────────────
+  # Run "alembic upgrade head" as a Cloud Run Job so migrations happen before
+  # traffic is shifted to the new revision.  The job inherits the same env vars
+  # and Cloud SQL socket as the main service.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    id: migrate
+    entrypoint: gcloud
+    args:
+      - run
+      - jobs
+      - execute
+      - ${_SERVICE}-migrate
+      - --region=${_REGION}
+      - --wait
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}
+    waitFor: [push]
+    # NOTE: The Cloud Run Job "${_SERVICE}-migrate" must be pre-created.
+    # Its command override: ["alembic", "upgrade", "head"]
+    # See: gcloud run jobs create ${_SERVICE}-migrate \
+    #        --image ... --command alembic --args "upgrade,head" \
+    #        --add-cloudsql-instances ${_DB_CONNECTION} \
+    #        --set-secrets DATABASE_URL=routersvc-db-url:latest \
+    #        --region ${_REGION}
+
+  # ── 4. Deploy ──────────────────────────────────────────────────────────────
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    id: deploy
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      # Traffic: only shift after the new revision passes health checks.
+      - --no-traffic
+    waitFor: [migrate]
+
+  # ── 5. Shift traffic after deploy succeeds ─────────────────────────────────
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    id: shift-traffic
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update-traffic
+      - ${_SERVICE}
+      - --region=${_REGION}
+      - --to-latest
+    waitFor: [deploy]
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_MEDIUM

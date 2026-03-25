@@ -1,0 +1,119 @@
+# Cloud Run service specification — RouterV
+#
+# Apply with:
+#   gcloud run services replace cloudrun-service.yaml --region us-central1
+#
+# Replace all <PLACEHOLDER> values with your actual GCP project details.
+# Secrets referenced here must exist in Secret Manager before first deploy.
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: routersvc
+  annotations:
+    # Artifact Registry image — updated by Cloud Build on each deploy
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    metadata:
+      annotations:
+        # ── Cloud SQL ──────────────────────────────────────────────────────────
+        # Mounts the Cloud SQL Auth Proxy Unix socket inside the container.
+        # The DATABASE_URL should use:
+        #   postgresql+asyncpg://user:pass@/dbname?host=/cloudsql/PROJECT:REGION:INSTANCE
+        run.googleapis.com/cloudsql-instances: "<PROJECT_ID>:<REGION>:<INSTANCE_NAME>"
+
+        # ── Scaling ───────────────────────────────────────────────────────────
+        autoscaling.knative.dev/minScale: "1"   # keep warm — no cold starts in prod
+        autoscaling.knative.dev/maxScale: "20"  # cap horizontal scale
+
+        # ── VPC (Memorystore / Redis) ─────────────────────────────────────────
+        # Required to reach Memorystore which lives on a private VPC IP.
+        run.googleapis.com/vpc-access-connector: "projects/<PROJECT_ID>/locations/<REGION>/connectors/<VPC_CONNECTOR_NAME>"
+        run.googleapis.com/vpc-access-egress: private-ranges-only
+
+    spec:
+      # Service account with roles:
+      #   - roles/cloudsql.client          (Cloud SQL Auth Proxy)
+      #   - roles/secretmanager.secretAccessor (fetch provider key secrets)
+      #   - roles/run.viewer               (optional, for Cloud Run job execution)
+      serviceAccountName: routersvc-sa@<PROJECT_ID>.iam.gserviceaccount.com
+
+      # Cloud Run timeout — must be ≥ OPENROUTER_TIMEOUT_S + buffer
+      timeoutSeconds: 300
+
+      containers:
+        - image: "<REGION>-docker.pkg.dev/<PROJECT_ID>/routersvc/routersvc:latest"
+          name: routersvc
+
+          ports:
+            - name: http1
+              containerPort: 8080
+
+          # ── Resource limits ────────────────────────────────────────────────
+          resources:
+            limits:
+              cpu: "1"        # 1 vCPU — upgrade if P99 latency is CPU-bound
+              memory: "512Mi"
+
+          # ── Environment variables ──────────────────────────────────────────
+          env:
+            - name: ENV
+              value: "prod"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: PORT
+              value: "8080"
+
+            # Non-secret config
+            - name: OPENROUTER_BASE_URL
+              value: "https://openrouter.ai/api/v1"
+            - name: OPENROUTER_TIMEOUT_S
+              value: "120.0"
+            - name: DEFAULT_RPM
+              value: "60"
+            - name: DEFAULT_RPD
+              value: "1000"
+            - name: GCP_PROJECT_ID
+              value: "<PROJECT_ID>"
+
+          # ── Secrets (mounted from Secret Manager) ─────────────────────────
+          # These secrets must be created in Secret Manager before first deploy:
+          #   gcloud secrets create routersvc-openrouter-key --replication-policy=automatic
+          #   echo -n "sk-or-v1-..." | gcloud secrets versions add routersvc-openrouter-key --data-file=-
+          envFrom: []   # see individual env secret refs below
+
+          # Individual secret env vars:
+          # (Cloud Run secret env syntax — each secret maps to one env var)
+          #
+          # OPENROUTER_API_KEY  ← Secret Manager: routersvc-openrouter-key/latest
+          # DATABASE_URL        ← Secret Manager: routersvc-db-url/latest
+          # REDIS_URL           ← Secret Manager: routersvc-redis-url/latest
+          #
+          # Add these by running:
+          #   gcloud run services update routersvc \
+          #     --update-secrets=OPENROUTER_API_KEY=routersvc-openrouter-key:latest \
+          #     --update-secrets=DATABASE_URL=routersvc-db-url:latest \
+          #     --update-secrets=REDIS_URL=routersvc-redis-url:latest \
+          #     --region <REGION>
+
+          # ── Probes ────────────────────────────────────────────────────────
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            failureThreshold: 3
+
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12   # 60s to start (12 × 5s)
+
+  traffic:
+    - percent: 100
+      latestRevision: true
