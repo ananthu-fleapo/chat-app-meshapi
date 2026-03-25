@@ -24,6 +24,7 @@ from app.cache.rate_limiter import check_rate_limits
 from app.config import settings
 from app.db.models import ApiKey
 from app.db.session import get_db_session
+from app.providers.key_resolver import resolve_upstream_key
 from app.providers.registry import get_adapter
 from app.schemas.chat import ChatCompletionRequest
 from app.templates.renderer import render_template
@@ -83,6 +84,9 @@ async def chat_completions(
         key_owner=key.owner,
         template=raw_body.template,
     )
+    # ── Phase 6: Resolve per-owner upstream API key ───────────────────────────
+    upstream_key = await resolve_upstream_key(owner=key.owner, db=db)
+
     adapter = get_adapter(body.model)
     start = time.monotonic()
     template_id = str(template.id) if template else None
@@ -107,7 +111,7 @@ async def chat_completions(
             error_code_val: str | None = None
 
             try:
-                async for chunk in adapter.stream_chat_completion(body):
+                async for chunk in adapter.stream_chat_completion(body, api_key=upstream_key):
                     # Phase 4: early exit on client disconnect
                     if await request.is_disconnected():
                         log.info("stream_client_disconnected", bytes_sent=byte_count)
@@ -181,7 +185,7 @@ async def chat_completions(
     error_code_val: str | None = None
 
     try:
-        response_body = await adapter.chat_completion(body)
+        response_body = await adapter.chat_completion(body, api_key=upstream_key)
     except Exception as exc:
         status = "error"
         error_code_val = getattr(exc, "error_code", "upstream_error")

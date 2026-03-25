@@ -59,6 +59,11 @@ def init_db(database_url: str, *, echo: bool = False) -> None:
     )
 
 
+def get_engine() -> AsyncEngine | None:
+    """Return the engine, or None if DB was not configured (readiness probe uses this)."""
+    return _engine
+
+
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
     if _session_factory is None:
         raise RuntimeError("DB not initialized. Call init_db() in lifespan.")

@@ -5,6 +5,8 @@ Phase 2: api_keys — auth + config defaults.
 Phase 3: adds rpm_limit, rpd_limit, spend_cap_usd to api_keys.
 Phase 4: templates — system prompt + messages with {{variable}} substitution.
 Phase 5: usage_events — append-only per-request log (tokens, cost, latency).
+Phase 6: provider_keys — per-owner upstream API key references (GCP Secret Manager).
+         api_keys.provider_key_id — links a RouterV key to its owner's provider key.
 Future phases add: sessions, organizations.
 """
 
@@ -62,6 +64,12 @@ class ApiKey(Base):
     rpm_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rpd_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     spend_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+
+    # Phase 6 — per-owner upstream provider key.
+    # NULL → system default (settings.openrouter_api_key).
+    # Non-null → look up ProviderKey row for this owner's upstream key.
+    # Not a DB-level FK; integrity enforced at app layer.
+    provider_key_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     # Timestamps — set by the DB; onupdate handled by application layer for now.
     # Phase X: replace onupdate with a Postgres trigger for safety.
@@ -207,4 +215,52 @@ class UsageEvent(Base):
         return (
             f"<UsageEvent id={self.id} key_id={self.key_id} "
             f"model={self.model!r} status={self.status!r}>"
+        )
+
+
+class ProviderKey(Base):
+    """
+    Per-owner upstream API key record.
+
+    The actual key value lives in GCP Secret Manager; this row holds only
+    the resource path (secret_ref) plus metadata.  At request time the
+    resolver fetches the secret, caches it in Redis for ~5 minutes, and
+    passes it to the upstream adapter.
+
+    Columns
+    -------
+    owner        Matches api_key.owner — provider keys are owner-scoped.
+    provider     Upstream provider slug: "openrouter", "openai", etc.
+                 Only "openrouter" is used in the current adapter set.
+    secret_ref   GCP Secret Manager resource name, e.g.:
+                   projects/<project>/secrets/<secret-name>/versions/latest
+                 In local dev this field may be empty — the resolver falls
+                 back to settings.openrouter_api_key in that case.
+    label        Human note: "acme prod", "bob personal", etc.
+    is_active    False = soft-deleted / being rotated.  The resolver only
+                 selects active rows.
+    """
+
+    __tablename__ = "provider_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    owner: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    secret_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ProviderKey id={self.id} owner={self.owner!r} "
+            f"provider={self.provider!r} active={self.is_active}>"
         )

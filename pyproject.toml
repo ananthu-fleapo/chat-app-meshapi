@@ -28,6 +28,15 @@ dev = [
     "pytest-asyncio>=0.23",
     "httpx",
 ]
+
+# Install in GCP/production environments for Secret Manager integration.
+# Not required locally — the resolver falls back to settings.openrouter_api_key
+# when this package is absent.
+gcp = [
+    "google-cloud-secret-manager>=2.20.0",
+]
+
+# Full production set (combine with: pip install -e ".[gcp,observability]")
 # Phase 7 deps:
 # observability = [
 #     "prometheus-fastapi-instrumentator>=7.0.0",

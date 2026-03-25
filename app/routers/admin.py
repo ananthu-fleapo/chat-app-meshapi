@@ -7,15 +7,20 @@ No ADMIN_SECRET needed: the ENV guard is the protection.
 
 Endpoints
 ---------
-POST   /admin/keys                  Create a key (plaintext returned ONCE)
-GET    /admin/keys                  List all keys (no hashes, no plaintext)
-PATCH  /admin/keys/{id}             Update status / defaults / rate limits
-DELETE /admin/keys/{id}             Hard delete (dev clean-up)
-GET    /admin/keys/{id}/usage       Per-key usage summary (Phase 5)
-GET    /admin/usage/summary         System-wide usage summary (Phase 5)
+POST   /admin/keys                       Create a key (plaintext returned ONCE)
+GET    /admin/keys                       List all keys (no hashes, no plaintext)
+PATCH  /admin/keys/{id}                  Update status / defaults / rate limits
+DELETE /admin/keys/{id}                  Hard delete (dev clean-up)
+GET    /admin/keys/{id}/usage            Per-key usage summary (Phase 5)
+GET    /admin/usage/summary              System-wide usage summary (Phase 5)
+
+POST   /admin/provider-keys              Create a provider key record
+GET    /admin/provider-keys              List all provider keys (all owners)
+DELETE /admin/provider-keys/{id}         Hard delete
 
 Phase 3: rpm_limit, rpd_limit, spend_cap_usd on create/update + cache invalidation
 Phase 5: usage reporting endpoints
+Phase 6: admin provider key management
 """
 
 import hashlib
@@ -30,9 +35,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ulid import ULID
 
 from app.cache.key_cache import invalidate_cached_key
-from app.db.models import ApiKey, UsageEvent
+from app.db.models import ApiKey, ProviderKey, UsageEvent
 from app.db.session import get_db_session
 from app.exceptions import NotFoundError
+from app.providers.secret_manager import fetch_secret, invalidate_secret_cache
 
 logger = structlog.get_logger()
 
@@ -321,3 +327,106 @@ def _to_summary(k: ApiKey) -> KeySummary:
         created_at=k.created_at.isoformat(),
         updated_at=k.updated_at.isoformat(),
     )
+
+
+# ── Admin: provider key management ───────────────────────────────────────────
+# Dev-only convenience endpoints — no bearer auth needed here because the
+# entire admin router is gated behind ENV=dev.
+
+class AdminCreateProviderKeyRequest(BaseModel):
+    owner: str
+    provider: str = "openrouter"
+    secret_ref: str
+    label: str | None = None
+
+
+class AdminProviderKeyOut(BaseModel):
+    id: str
+    owner: str
+    provider: str
+    secret_ref: str
+    label: str | None
+    is_active: bool
+    created_at: str
+    secret_reachable: bool | None = None
+
+
+def _to_pk_out(
+    pk: ProviderKey, *, secret_reachable: bool | None = None
+) -> AdminProviderKeyOut:
+    return AdminProviderKeyOut(
+        id=str(pk.id),
+        owner=pk.owner,
+        provider=pk.provider,
+        secret_ref=pk.secret_ref,
+        label=pk.label,
+        is_active=pk.is_active,
+        created_at=pk.created_at.isoformat(),
+        secret_reachable=secret_reachable,
+    )
+
+
+@router.post("/provider-keys", response_model=AdminProviderKeyOut, status_code=201)
+async def admin_create_provider_key(
+    body: AdminCreateProviderKeyRequest,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Create a provider key record for any owner (dev admin convenience).
+    In prod, owners manage their own keys via POST /v1/provider-keys.
+    """
+    pk = ProviderKey(
+        owner=body.owner,
+        provider=body.provider,
+        secret_ref=body.secret_ref,
+        label=body.label,
+    )
+    db.add(pk)
+    await db.flush()
+    await db.refresh(pk)
+    logger.info("admin_provider_key_created", pk_id=str(pk.id), owner=pk.owner)
+    return _to_pk_out(pk)
+
+
+@router.get("/provider-keys", response_model=list[AdminProviderKeyOut])
+async def admin_list_provider_keys(
+    db: AsyncSession = Depends(get_db_session),
+):
+    """List all provider keys across all owners."""
+    result = await db.execute(
+        select(ProviderKey).order_by(ProviderKey.created_at.desc())
+    )
+    return [_to_pk_out(pk) for pk in result.scalars().all()]
+
+
+@router.get("/provider-keys/{pk_id}", response_model=AdminProviderKeyOut)
+async def admin_get_provider_key(
+    pk_id: str,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Get a single provider key by ID and probe its Secret Manager reference."""
+    uid = _parse_uuid(pk_id)
+    result = await db.execute(select(ProviderKey).where(ProviderKey.id == uid))
+    pk = result.scalar_one_or_none()
+    if pk is None:
+        raise NotFoundError("Provider key not found.")
+
+    secret = await fetch_secret(pk.secret_ref)
+    return _to_pk_out(pk, secret_reachable=secret is not None)
+
+
+@router.delete("/provider-keys/{pk_id}", status_code=204)
+async def admin_delete_provider_key(
+    pk_id: str,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Hard-delete a provider key and evict its Secret Manager cache."""
+    uid = _parse_uuid(pk_id)
+    result = await db.execute(select(ProviderKey).where(ProviderKey.id == uid))
+    pk = result.scalar_one_or_none()
+    if pk is None:
+        raise NotFoundError("Provider key not found.")
+
+    await invalidate_secret_cache(pk.secret_ref)
+    await db.delete(pk)
+    logger.info("admin_provider_key_deleted", pk_id=str(pk.id), owner=pk.owner)

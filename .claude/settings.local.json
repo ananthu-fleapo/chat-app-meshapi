@@ -19,7 +19,9 @@
       "Bash(/opt/homebrew/opt/postgresql@16/bin/createdb -O routersvc routersvc)",
       "Bash(/opt/homebrew/opt/postgresql@16/bin/psql -U routersvc -c \"ALTER USER routersvc WITH PASSWORD ''routersvc'';\" routersvc)",
       "Bash(.venv/bin/alembic upgrade:*)",
-      "Bash(redis-cli ping:*)"
+      "Bash(redis-cli ping:*)",
+      "Bash(/opt/homebrew/bin/python3.12 -c \":*)",
+      "Bash(.venv/bin/python -c \":*)"
     ]
   }
 }

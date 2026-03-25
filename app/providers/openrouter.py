@@ -85,12 +85,33 @@ class OpenRouterAdapter(ProviderAdapter):
 
     # ── ProviderAdapter interface ─────────────────────────────────────────────
 
-    async def chat_completion(self, request: ChatCompletionRequest) -> dict:
+    def _auth_headers(self, api_key: str | None) -> dict[str, str]:
+        """
+        Return per-request auth headers.
+
+        When ``api_key`` is provided (owner has their own ProviderKey), it
+        overrides the shared client's Authorization header for this request
+        only.  httpx merges request-level headers over client defaults.
+        """
+        if api_key is not None:
+            return {"Authorization": f"Bearer {api_key}"}
+        return {}
+
+    async def chat_completion(
+        self,
+        request: ChatCompletionRequest,
+        *,
+        api_key: str | None = None,
+    ) -> dict:
         payload = _build_payload(request, stream=False)
         log = logger.bind(model=request.model)
 
         try:
-            response = await self._client.post("/chat/completions", json=payload)
+            response = await self._client.post(
+                "/chat/completions",
+                json=payload,
+                headers=self._auth_headers(api_key),
+            )
             response.raise_for_status()
             return response.json()
 
@@ -106,14 +127,20 @@ class OpenRouterAdapter(ProviderAdapter):
             raise GatewayTimeoutError() from exc
 
     async def stream_chat_completion(
-        self, request: ChatCompletionRequest
+        self,
+        request: ChatCompletionRequest,
+        *,
+        api_key: str | None = None,
     ) -> AsyncGenerator[bytes, None]:
         payload = _build_payload(request, stream=True)
         log = logger.bind(model=request.model)
 
         try:
             async with self._client.stream(
-                "POST", "/chat/completions", json=payload
+                "POST",
+                "/chat/completions",
+                json=payload,
+                headers=self._auth_headers(api_key),
             ) as response:
                 if response.status_code >= 400:
                     # Read error body before the context manager closes the connection.

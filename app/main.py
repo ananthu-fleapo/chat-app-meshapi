@@ -11,7 +11,7 @@ from app.exceptions import RouterVError, routerv_exception_handler, validation_e
 from app.logging_config import configure_logging
 from app.middleware import RequestIdMiddleware
 from app.providers.openrouter import OpenRouterAdapter
-from app.routers import inference
+from app.routers import inference, models
 
 # Configure structlog before any logger is used.
 configure_logging()
@@ -78,6 +78,13 @@ def create_app() -> FastAPI:
     from app.routers import templates
     app.include_router(templates.router)
 
+    # Provider key management: auth-gated, owner-scoped.
+    from app.routers import provider_keys
+    app.include_router(provider_keys.router)
+
+    # Models listing: unauthenticated, public info.
+    app.include_router(models.router)
+
     # Admin router: registered only in dev.
     # In prod, /admin/* routes simply don't exist → 404 from the framework.
     if settings.env == "dev":
@@ -91,8 +98,63 @@ def create_app() -> FastAPI:
         Liveness probe.
         Cloud Run and GKE use this to verify the container is alive.
         Returns 200 as soon as the app is ready to serve traffic.
+        This endpoint intentionally does NOT check DB/Redis — it must
+        succeed even if backing services are temporarily unreachable.
         """
         return {"status": "ok", "env": settings.env}
+
+    @app.get("/readyz", include_in_schema=False)
+    async def readiness():
+        """
+        Readiness probe.
+        Returns 200 only when the app can actually serve traffic:
+        - Postgres is reachable (simple SELECT 1)
+        - Redis is reachable (PING)
+
+        Cloud Run / GKE uses this to gate traffic routing.
+        Until readyz returns 200, the instance receives no traffic.
+        """
+        from app.cache.redis_client import get_redis
+        from app.db.engine import get_engine
+        import sqlalchemy as sa
+
+        checks: dict[str, str] = {}
+        ok = True
+
+        # ── Postgres ──────────────────────────────────────────────────────────
+        try:
+            engine = get_engine()
+            if engine is not None:
+                async with engine.connect() as conn:
+                    await conn.execute(sa.text("SELECT 1"))
+                checks["postgres"] = "ok"
+            else:
+                checks["postgres"] = "not_configured"
+        except Exception as exc:  # noqa: BLE001
+            checks["postgres"] = f"error: {exc}"
+            ok = False
+
+        # ── Redis ─────────────────────────────────────────────────────────────
+        try:
+            redis = get_redis()
+            if redis is not None:
+                await redis.ping()
+                checks["redis"] = "ok"
+            else:
+                checks["redis"] = "not_configured"
+        except Exception as exc:  # noqa: BLE001
+            checks["redis"] = f"error: {exc}"
+            ok = False
+
+        if not ok:
+            from fastapi import Response
+            return Response(
+                content=str({"status": "degraded", "checks": checks}),
+                status_code=503,
+                media_type="application/json",
+            )
+
+        return {"status": "ok", "checks": checks}
 
     return app
 
