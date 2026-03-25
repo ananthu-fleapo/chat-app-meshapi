@@ -50,6 +50,23 @@ class Settings(BaseSettings):
     # ── GCP (Phase 7+) ────────────────────────────────────────────────────────
     gcp_project_id: str = ""
 
+    # ── Supabase / Control plane auth ────────────────────────────────────────
+    # The JWT secret from Supabase → Settings → API → JWT Secret.
+    # Used to verify HS256-signed JWTs on control plane endpoints (templates,
+    # models listing). AuthN is Supabase's responsibility; we only verify sig.
+    #
+    # Leave empty in dev to bypass JWT verification (any token = accepted,
+    # its raw value is used as the owner label for local testing).
+    supabase_jwt_secret: str = ""
+    # Your Supabase project URL: https://<project-ref>.supabase.co
+    # Used to validate the `iss` claim. Optional but recommended in prod.
+    supabase_url: str = ""
+    # Which JWT claim to use as the RouterV owner label.
+    # Checked in order: user_metadata.<claim>, app_metadata.<claim>, <claim>.
+    # Falls back to `sub` (Supabase user UUID) when unset or claim not found.
+    # Example: set to "routerv_owner" and add that field to Supabase user_metadata.
+    supabase_owner_claim: str = ""
+
     # ── Cloudflare origin guard ───────────────────────────────────────────────
     # When set, every inbound request must carry this value in X-CF-Secret.
     # Cloudflare is configured to inject the header; direct hits to the Cloud

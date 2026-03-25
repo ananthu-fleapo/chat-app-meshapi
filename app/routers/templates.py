@@ -1,9 +1,12 @@
 """
 Template management — POST/GET/PATCH/DELETE /v1/templates
 
-First-class production endpoints (not dev-only). Any authenticated key can
-manage templates scoped to its owner namespace. A key owned by "acme-corp"
-can only see, edit, and delete templates where owner == "acme-corp".
+Control plane endpoint — requires a Supabase JWT (dashboard session),
+NOT an inference key.  This keeps the data plane (rsk_ keys / completions)
+cleanly separated from the control plane (templates, configuration).
+
+Auth:    Authorization: Bearer <supabase-jwt>
+Scoping: all operations are restricted to templates owned by identity.owner
 
 Create  POST   /v1/templates
 List    GET    /v1/templates
@@ -21,8 +24,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.dependencies import get_authenticated_key
-from app.db.models import ApiKey, Template
+from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
+from app.db.models import Template
 from app.db.session import get_db_session
 from app.exceptions import NotFoundError
 
@@ -72,13 +75,13 @@ class TemplateSummary(BaseModel):
 @router.post("", response_model=TemplateSummary, status_code=201)
 async def create_template(
     body: CreateTemplateRequest,
-    key: ApiKey = Depends(get_authenticated_key),
+    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Create a template scoped to the calling key's owner."""
+    """Create a template scoped to the authenticated user's owner."""
     template = Template(
         name=body.name,
-        owner=key.owner,
+        owner=identity.owner,
         description=body.description,
         system=body.system,
         messages=body.messages,
@@ -94,7 +97,7 @@ async def create_template(
         await db.rollback()
         raise HTTPException(
             status_code=409,
-            detail=f"A template named '{body.name}' already exists for owner '{key.owner}'.",
+            detail=f"A template named '{body.name}' already exists for owner '{identity.owner}'.",
         )
 
     logger.info(
@@ -108,13 +111,13 @@ async def create_template(
 
 @router.get("", response_model=list[TemplateSummary])
 async def list_templates(
-    key: ApiKey = Depends(get_authenticated_key),
+    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """List all templates belonging to the calling key's owner."""
+    """List all templates belonging to the authenticated user's owner."""
     result = await db.execute(
         select(Template)
-        .where(Template.owner == key.owner)
+        .where(Template.owner == identity.owner)
         .order_by(Template.created_at.desc())
     )
     return [_to_summary(t) for t in result.scalars().all()]
@@ -123,11 +126,11 @@ async def list_templates(
 @router.get("/{template_id}", response_model=TemplateSummary)
 async def get_template(
     template_id: str,
-    key: ApiKey = Depends(get_authenticated_key),
+    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Get a single template by UUID. Must belong to the calling key's owner."""
-    template = await _get_own_or_404(db, template_id, key.owner)
+    """Get a single template by UUID. Must belong to the caller's owner."""
+    template = await _get_own_or_404(db, template_id, identity.owner)
     return _to_summary(template)
 
 
@@ -135,13 +138,12 @@ async def get_template(
 async def update_template(
     template_id: str,
     body: UpdateTemplateRequest,
-    key: ApiKey = Depends(get_authenticated_key),
+    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Update a template. Only the owning key's owner can edit."""
-    template = await _get_own_or_404(db, template_id, key.owner)
+    """Update a template. Only the owning user can edit."""
+    template = await _get_own_or_404(db, template_id, identity.owner)
 
-    # Only update fields explicitly supplied (None means "don't touch")
     if body.name is not None:
         template.name = body.name
     if body.description is not None:
@@ -164,7 +166,7 @@ async def update_template(
         await db.rollback()
         raise HTTPException(
             status_code=409,
-            detail=f"A template named '{body.name}' already exists for owner '{key.owner}'.",
+            detail=f"A template named '{body.name}' already exists for owner '{identity.owner}'.",
         )
 
     logger.info(
@@ -179,11 +181,11 @@ async def update_template(
 @router.delete("/{template_id}", status_code=204)
 async def delete_template(
     template_id: str,
-    key: ApiKey = Depends(get_authenticated_key),
+    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Hard delete. Only the owning key's owner can delete."""
-    template = await _get_own_or_404(db, template_id, key.owner)
+    """Hard delete. Only the owning user can delete."""
+    template = await _get_own_or_404(db, template_id, identity.owner)
     await db.delete(template)
     logger.info(
         "template_deleted",

@@ -24,9 +24,10 @@ from decimal import Decimal, InvalidOperation
 
 import httpx
 import structlog
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
+from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
 from app.cache.redis_client import get_redis
 from app.config import settings
 
@@ -186,13 +187,17 @@ async def list_models(
         default=None,
         description="Filter: true = free models only, false = paid only, omit = all",
     ),
+    # Control plane auth — requires a valid Supabase session JWT.
+    # Keeps model listing off the data plane (rsk_ keys are for inference only).
+    _identity: ControlPlaneIdentity = Depends(get_control_plane_user),
 ):
     """
-    List available models from the upstream provider.
+    List available models.
 
+    Requires a valid dashboard session (Supabase JWT).
     Includes pricing per 1 000 tokens and a convenience ``is_free`` flag.
     Response is cached for 5 minutes — stale data is preferred over
-    returning an error if OpenRouter is temporarily unreachable.
+    returning an error if the upstream provider is temporarily unreachable.
 
     Use ``?free=true`` for free-only models, ``?free=false`` for paid-only.
     """
@@ -207,14 +212,18 @@ async def list_models(
 
 
 @router.get("/v1/models/free", response_model=list[ModelOut])
-async def list_free_models():
+async def list_free_models(
+    _identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+):
     """Shortcut: list only models with zero prompt + completion cost."""
     models = await _get_models()
     return [m for m in models if m.is_free]
 
 
 @router.get("/v1/models/paid", response_model=list[ModelOut])
-async def list_paid_models():
+async def list_paid_models(
+    _identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+):
     """Shortcut: list only models that have a non-zero cost."""
     models = await _get_models()
     return [m for m in models if not m.is_free]
