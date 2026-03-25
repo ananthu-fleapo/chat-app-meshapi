@@ -86,15 +86,19 @@ spec:
           # Individual secret env vars:
           # (Cloud Run secret env syntax — each secret maps to one env var)
           #
-          # OPENROUTER_API_KEY  ← Secret Manager: routersvc-openrouter-key/latest
-          # DATABASE_URL        ← Secret Manager: routersvc-db-url/latest
-          # REDIS_URL           ← Secret Manager: routersvc-redis-url/latest
+          # OPENROUTER_API_KEY         ← Secret Manager: routersvc-openrouter-key/latest
+          # OPENROUTER_MANAGEMENT_KEY  ← Secret Manager: routersvc-openrouter-mgmt-key/latest
+          # DATABASE_URL               ← Secret Manager: routersvc-db-url/latest
+          # REDIS_URL                  ← Secret Manager: routersvc-redis-url/latest
+          # CF_SECRET                  ← Secret Manager: routersvc-cf-secret/latest
           #
           # Add these by running:
           #   gcloud run services update routersvc \
           #     --update-secrets=OPENROUTER_API_KEY=routersvc-openrouter-key:latest \
+          #     --update-secrets=OPENROUTER_MANAGEMENT_KEY=routersvc-openrouter-mgmt-key:latest \
           #     --update-secrets=DATABASE_URL=routersvc-db-url:latest \
           #     --update-secrets=REDIS_URL=routersvc-redis-url:latest \
+          #     --update-secrets=CF_SECRET=routersvc-cf-secret:latest \
           #     --region <REGION>
 
           # ── Probes ────────────────────────────────────────────────────────

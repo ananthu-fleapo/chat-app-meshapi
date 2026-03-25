@@ -108,6 +108,16 @@ async def _fetch_from_openrouter() -> list[dict]:
         return data.get("data", [])
 
 
+def _is_internal_model(model_id: str) -> bool:
+    """
+    Return True for models that reveal our upstream provider identity.
+
+    Users should not see openrouter/* routing shortcuts (openrouter/auto,
+    openrouter/free) — these would expose that OpenRouter is our backend.
+    """
+    return model_id.startswith("openrouter/")
+
+
 async def _get_models() -> list[ModelOut]:
     """
     Return the parsed model list, using Redis cache when available.
@@ -115,6 +125,9 @@ async def _get_models() -> list[ModelOut]:
     Cache miss or Redis unavailable → fetch from OpenRouter → populate cache.
     On OpenRouter failure with a warm cache → return cached data (stale-while-error).
     On total failure → return empty list (never 500 the caller for a models listing).
+
+    Internal OpenRouter routing models (openrouter/*) are filtered out so
+    they are never exposed to RouterV users.
     """
     redis = get_redis()
 
@@ -124,7 +137,10 @@ async def _get_models() -> list[ModelOut]:
             cached = await redis.get(_MODELS_CACHE_KEY)
             if cached is not None:
                 raw_list = json.loads(cached)
-                return [_parse_model(m) for m in raw_list]
+                return [
+                    _parse_model(m) for m in raw_list
+                    if not _is_internal_model(m.get("id", ""))
+                ]
         except Exception as exc:  # noqa: BLE001
             logger.warning("models_cache_read_failed", error=str(exc))
 
@@ -133,7 +149,8 @@ async def _get_models() -> list[ModelOut]:
         raw_list = await _fetch_from_openrouter()
         logger.info("models_fetched_from_upstream", count=len(raw_list))
 
-        # Populate cache
+        # Populate cache with the full list (filter at read time so cache
+        # stays complete in case the filter logic changes).
         if redis is not None:
             try:
                 await redis.setex(
@@ -144,7 +161,10 @@ async def _get_models() -> list[ModelOut]:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("models_cache_write_failed", error=str(exc))
 
-        return [_parse_model(m) for m in raw_list]
+        return [
+            _parse_model(m) for m in raw_list
+            if not _is_internal_model(m.get("id", ""))
+        ]
 
     except httpx.HTTPStatusError as exc:
         logger.warning(

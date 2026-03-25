@@ -9,17 +9,28 @@ Design principles
 3. Silently swallows all errors — usage logging must never take the API down.
    Failed events are logged at ERROR level for manual recovery if needed.
 
+Cost resolution (Phase 6 update)
+---------------------------------
+The primary cost source is now ``upstream_cost`` — the ``usage.cost`` field
+returned directly by OpenRouter in every response.  This is the actual USD
+amount charged, including any cache discounts or surcharges applied by the
+upstream provider.
+
+The static pricing table (``app/usage/pricing.py``) is kept as a fallback
+for cases where the upstream omits the cost field (older model versions or
+non-OpenRouter adapters).
+
 fire_usage_log(**kwargs)
     The only call-site function. Schedules log_usage_event() as a background
     task in the running event loop.
 
 log_usage_event(**kwargs)
-    Async coroutine: calculates cost, writes one UsageEvent row, commits.
+    Async coroutine: resolves cost, writes one UsageEvent row, commits.
 """
 
 import asyncio
 import uuid
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import structlog
 
@@ -39,16 +50,29 @@ async def log_usage_event(
     stream: bool,
     prompt_tokens: int | None,
     completion_tokens: int | None,
+    cached_tokens: int | None = None,
+    upstream_cost: float | None = None,   # usage.cost from upstream response
     latency_ms: int,
-    status: str,                  # "success" | "error"
+    status: str,                           # "success" | "error"
     error_code: str | None = None,
 ) -> None:
     cost: Decimal | None = None
     total_tokens: int | None = None
 
     if prompt_tokens is not None and completion_tokens is not None:
-        cost = calculate_cost(model, prompt_tokens, completion_tokens)
         total_tokens = prompt_tokens + completion_tokens
+
+    # ── Cost resolution ───────────────────────────────────────────────────────
+    # 1. Use upstream_cost (usage.cost) — actual charged amount from OpenRouter.
+    # 2. Fall back to static pricing table for unknown models / other adapters.
+    if upstream_cost is not None:
+        try:
+            cost = Decimal(str(upstream_cost)).quantize(Decimal("0.00000001"))
+        except (InvalidOperation, ValueError):
+            pass
+
+    if cost is None and prompt_tokens is not None and completion_tokens is not None:
+        cost = calculate_cost(model, prompt_tokens, completion_tokens)
 
     try:
         async with get_session_factory()() as session:
@@ -61,6 +85,7 @@ async def log_usage_event(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
+                cached_tokens=cached_tokens,
                 cost_usd=cost,
                 latency_ms=latency_ms,
                 status=status,
@@ -75,6 +100,7 @@ async def log_usage_event(
             model=model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
             cost_usd=str(cost) if cost is not None else None,
             latency_ms=latency_ms,
             status=status,

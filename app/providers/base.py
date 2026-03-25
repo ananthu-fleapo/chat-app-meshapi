@@ -14,23 +14,37 @@ from app.schemas.chat import ChatCompletionRequest
 
 class ProviderAdapter(ABC):
     @abstractmethod
-    async def chat_completion(self, request: ChatCompletionRequest) -> dict:
+    async def chat_completion(
+        self,
+        request: ChatCompletionRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+    ) -> dict:
         """
         Non-streaming completion.
         Returns the upstream response as a parsed dict (forwarded as-is to client).
         Raises UpstreamError or GatewayTimeoutError on failure.
+        api_key: per-request auth override (owner's provisioned key).
+        owner:   stable identifier forwarded as the `user` field for abuse detection.
         """
         ...
 
     @abstractmethod
     async def stream_chat_completion(
-        self, request: ChatCompletionRequest
+        self,
+        request: ChatCompletionRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
     ) -> AsyncGenerator[bytes, None]:
         """
         Streaming completion.
         Yields raw SSE byte chunks from the upstream provider.
         The caller is responsible for forwarding these to the client via StreamingResponse.
         Raises UpstreamError before yielding if the upstream returns a non-2xx status.
+        api_key: per-request auth override (owner's provisioned key).
+        owner:   stable identifier forwarded as the `user` field for abuse detection.
         """
         ...
         yield b""  # make the type-checker treat this as an async generator

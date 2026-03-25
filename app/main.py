@@ -9,7 +9,7 @@ from app.config import settings
 from app.db.engine import close_db, init_db
 from app.exceptions import RouterVError, routerv_exception_handler, validation_exception_handler
 from app.logging_config import configure_logging
-from app.middleware import RequestIdMiddleware
+from app.middleware import CloudflareOriginGuard, RequestIdMiddleware
 from app.providers.openrouter import OpenRouterAdapter
 from app.routers import inference, models
 
@@ -65,7 +65,11 @@ def create_app() -> FastAPI:
     )
 
     # ── Middleware ────────────────────────────────────────────────────────────
+    # Order matters: middleware is applied last-registered-first (LIFO).
+    # CloudflareOriginGuard must run BEFORE RequestIdMiddleware so blocked
+    # requests never allocate a request ID or touch any handler logic.
     app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(CloudflareOriginGuard)
 
     # ── Exception handlers ────────────────────────────────────────────────────
     app.add_exception_handler(RouterVError, routerv_exception_handler)
@@ -78,9 +82,10 @@ def create_app() -> FastAPI:
     from app.routers import templates
     app.include_router(templates.router)
 
-    # Provider key management: auth-gated, owner-scoped.
-    from app.routers import provider_keys
-    app.include_router(provider_keys.router)
+    # NOTE: /v1/provider-keys is intentionally NOT registered here.
+    # Provider key management is operator-only — handled via /admin/provider-keys
+    # (dev-only admin router below).  RouterV users never see or manage the
+    # upstream keys that back their requests.
 
     # Models listing: unauthenticated, public info.
     app.include_router(models.router)

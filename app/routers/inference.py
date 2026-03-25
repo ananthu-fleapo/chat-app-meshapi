@@ -111,7 +111,9 @@ async def chat_completions(
             error_code_val: str | None = None
 
             try:
-                async for chunk in adapter.stream_chat_completion(body, api_key=upstream_key):
+                async for chunk in adapter.stream_chat_completion(
+                    body, api_key=upstream_key, owner=key.owner
+                ):
                     # Phase 4: early exit on client disconnect
                     if await request.is_disconnected():
                         log.info("stream_client_disconnected", bytes_sent=byte_count)
@@ -164,6 +166,11 @@ async def chat_completions(
                     stream=True,
                     prompt_tokens=usage_data.get("prompt_tokens") if usage_data else None,
                     completion_tokens=usage_data.get("completion_tokens") if usage_data else None,
+                    cached_tokens=(
+                        (usage_data.get("prompt_tokens_details") or {}).get("cached_tokens")
+                        if usage_data else None
+                    ),
+                    upstream_cost=usage_data.get("cost") if usage_data else None,
                     latency_ms=latency_ms,
                     status=status,
                     error_code=error_code_val,
@@ -185,7 +192,7 @@ async def chat_completions(
     error_code_val: str | None = None
 
     try:
-        response_body = await adapter.chat_completion(body, api_key=upstream_key)
+        response_body = await adapter.chat_completion(body, api_key=upstream_key, owner=key.owner)
     except Exception as exc:
         status = "error"
         error_code_val = getattr(exc, "error_code", "upstream_error")
@@ -201,6 +208,8 @@ async def chat_completions(
             stream=False,
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
+            cached_tokens=(usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
+            upstream_cost=usage.get("cost"),
             latency_ms=latency_ms,
             status=status,
             error_code=error_code_val,

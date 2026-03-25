@@ -110,6 +110,66 @@ async def fetch_secret(secret_ref: str) -> str | None:
         return None
 
 
+async def store_secret(secret_id: str, value: str, project_id: str) -> str | None:
+    """
+    Create or update a secret in GCP Secret Manager and return the resource name
+    of the new version (e.g. ``projects/<project>/secrets/<id>/versions/1``).
+
+    If the secret does not exist it is created first (labels it as RouterV-managed).
+    If it already exists a new version is added (zero-downtime rotation).
+
+    Parameters
+    ----------
+    secret_id:
+        Short name for the secret, e.g. ``openrouter-acme-corp``.
+    value:
+        Plaintext secret value to store.
+    project_id:
+        GCP project ID (from settings.gcp_project_id).
+
+    Returns
+    -------
+    str | None
+        Full resource name of the secret version, or None on failure.
+    """
+    if not _SM_AVAILABLE:
+        logger.debug("sm_store_skipped_no_client")
+        return None
+    if not project_id:
+        logger.debug("sm_store_skipped_no_project")
+        return None
+
+    parent = f"projects/{project_id}"
+    secret_name = f"{parent}/secrets/{secret_id}"
+
+    try:
+        client = _secretmanager.SecretManagerServiceAsyncClient()
+
+        # Ensure the secret container exists (idempotent).
+        try:
+            await client.get_secret(name=secret_name)
+        except Exception:  # noqa: BLE001
+            # Secret doesn't exist — create it.
+            await client.create_secret(
+                parent=parent,
+                secret_id=secret_id,
+                secret={"replication": {"automatic": {}}, "labels": {"managed-by": "routerv"}},
+            )
+
+        # Add a new version with the plaintext payload.
+        version = await client.add_secret_version(
+            parent=secret_name,
+            payload={"data": value.encode("utf-8")},
+        )
+        resource_name = version.name  # e.g. .../versions/3
+        logger.info("sm_secret_stored", secret_id=secret_id, version=resource_name.split("/")[-1])
+        return resource_name
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sm_store_failed", secret_id=secret_id, error=str(exc))
+        return None
+
+
 async def invalidate_secret_cache(secret_ref: str) -> None:
     """Remove a cached secret (call after key rotation)."""
     from app.cache.redis_client import get_redis

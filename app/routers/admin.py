@@ -35,10 +35,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ulid import ULID
 
 from app.cache.key_cache import invalidate_cached_key
+from app.config import settings
 from app.db.models import ApiKey, ProviderKey, UsageEvent
 from app.db.session import get_db_session
 from app.exceptions import NotFoundError
-from app.providers.secret_manager import fetch_secret, invalidate_secret_cache
+from app.providers.provisioner import (
+    ProvisionedKey,
+    create_or_key,
+    delete_or_key,
+    disable_or_key,
+)
+from app.providers.secret_manager import fetch_secret, invalidate_secret_cache, store_secret
 
 logger = structlog.get_logger()
 
@@ -109,6 +116,81 @@ class UpdateKeyRequest(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+async def _auto_provision_for_owner(
+    owner: str,
+    spend_cap_usd: Decimal | None,
+    db: AsyncSession,
+) -> ProviderKey | None:
+    """
+    Provision a dedicated OpenRouter key for an owner if one doesn't exist yet.
+
+    Steps:
+      1. Check if the owner already has an active provider_keys row — skip if so.
+      2. Call OpenRouter Management API to create a key.
+      3. Store plaintext in GCP Secret Manager → get secret_ref.
+      4. Write a ProviderKey row and return it.
+
+    Returns the new ProviderKey on success, or None when provisioning is
+    unavailable (dev environment / management key not configured).
+    """
+    # Skip if owner already has a provider key configured.
+    existing = await db.execute(
+        select(ProviderKey).where(
+            ProviderKey.owner == owner,
+            ProviderKey.provider == "openrouter",
+            ProviderKey.is_active.is_(True),
+        ).limit(1)
+    )
+    if existing.scalar_one_or_none() is not None:
+        logger.debug("auto_provision_skipped_existing", owner=owner)
+        return None
+
+    # Create key on OpenRouter.
+    provisioned: ProvisionedKey | None = await create_or_key(
+        owner,
+        limit_usd=float(spend_cap_usd) if spend_cap_usd is not None else None,
+    )
+    if provisioned is None:
+        # Provisioner disabled or failed — key will use system default.
+        return None
+
+    # Store plaintext in Secret Manager.
+    secret_id = f"openrouter-{owner.lower().replace(' ', '-').replace('_', '-')}"
+    version_ref = await store_secret(
+        secret_id=secret_id,
+        value=provisioned.plaintext,
+        project_id=settings.gcp_project_id,
+    )
+
+    if version_ref is None:
+        # Secret Manager unavailable (local dev) — store a placeholder so the
+        # ProviderKey row exists but resolver falls back to system default.
+        # In a real GCP environment this path means SM is misconfigured.
+        logger.warning(
+            "auto_provision_sm_unavailable",
+            owner=owner,
+            hint="Secret Manager not configured — using system default key",
+        )
+        # Use a sentinel value that the resolver recognises as "no secret".
+        secret_ref = ""
+    else:
+        # Always point to /versions/latest so future rotations are automatic.
+        secret_ref = f"projects/{settings.gcp_project_id}/secrets/{secret_id}/versions/latest"
+
+    pk = ProviderKey(
+        owner=owner,
+        provider="openrouter",
+        secret_ref=secret_ref,
+        or_key_hash=provisioned.or_hash,
+        label=f"auto-provisioned for {owner}",
+    )
+    db.add(pk)
+    await db.flush()
+    await db.refresh(pk)
+    logger.info("auto_provision_complete", owner=owner, pk_id=str(pk.id))
+    return pk
+
+
 @router.post("/keys", response_model=CreateKeyResponse, status_code=201)
 async def create_key(
     body: CreateKeyRequest,
@@ -116,8 +198,16 @@ async def create_key(
 ):
     """
     Create a new RouterV API key.
-    The plaintext key is returned exactly once — store it securely.
+
+    On first key creation for an owner, auto-provisions a dedicated upstream
+    provider key via the OpenRouter Management API (if configured).
+    The plaintext RouterV key is returned exactly once — store it securely.
     """
+    spend_cap = Decimal(str(body.spend_cap_usd)) if body.spend_cap_usd is not None else None
+
+    # Auto-provision an upstream provider key for this owner if needed.
+    provider_key = await _auto_provision_for_owner(body.owner, spend_cap, db)
+
     raw_key = _generate_key()
     key = ApiKey(
         key_hash=_hash_key(raw_key),
@@ -127,13 +217,19 @@ async def create_key(
         meta=body.meta,
         rpm_limit=body.rpm_limit,
         rpd_limit=body.rpd_limit,
-        spend_cap_usd=Decimal(str(body.spend_cap_usd)) if body.spend_cap_usd is not None else None,
+        spend_cap_usd=spend_cap,
+        provider_key_id=provider_key.id if provider_key else None,
     )
     db.add(key)
     await db.flush()
     await db.refresh(key)
 
-    logger.info("admin_key_created", key_id=str(key.id), owner=key.owner)
+    logger.info(
+        "admin_key_created",
+        key_id=str(key.id),
+        owner=key.owner,
+        provisioned=provider_key is not None,
+    )
 
     return CreateKeyResponse(
         id=str(key.id),
@@ -430,3 +526,68 @@ async def admin_delete_provider_key(
     await invalidate_secret_cache(pk.secret_ref)
     await db.delete(pk)
     logger.info("admin_provider_key_deleted", pk_id=str(pk.id), owner=pk.owner)
+
+
+@router.post("/provider-keys/{pk_id}/rotate", response_model=AdminProviderKeyOut)
+async def admin_rotate_provider_key(
+    pk_id: str,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Zero-downtime rotation of a provider key.
+
+    Steps:
+      1. Create a new key on OpenRouter (Management API).
+      2. Store new plaintext in GCP Secret Manager (new version).
+      3. Update provider_keys.secret_ref to point to new version.
+      4. Evict Redis cache for old secret_ref.
+      5. Delete old key from OpenRouter.
+
+    The Secret Manager path uses /versions/latest, so step 3 is only needed
+    when the secret_id changes.  If you just add a new SM version under the
+    same secret name, existing requests will pick it up at next TTL expiry.
+    """
+    uid = _parse_uuid(pk_id)
+    result = await db.execute(select(ProviderKey).where(ProviderKey.id == uid))
+    pk = result.scalar_one_or_none()
+    if pk is None:
+        raise NotFoundError("Provider key not found.")
+
+    # 1. Create replacement key on OpenRouter.
+    new_provisioned = await create_or_key(pk.owner)
+    if new_provisioned is None:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenRouter provisioning unavailable — management key not configured.",
+        )
+
+    # 2. Store new plaintext in Secret Manager.
+    secret_id = f"openrouter-{pk.owner.lower().replace(' ', '-').replace('_', '-')}"
+    new_version_ref = await store_secret(
+        secret_id=secret_id,
+        value=new_provisioned.plaintext,
+        project_id=settings.gcp_project_id,
+    )
+
+    old_secret_ref = pk.secret_ref
+    old_or_hash = pk.or_key_hash
+
+    # 3. Update the row — /versions/latest always resolves to newest version.
+    if new_version_ref:
+        pk.secret_ref = (
+            f"projects/{settings.gcp_project_id}/secrets/{secret_id}/versions/latest"
+        )
+    pk.or_key_hash = new_provisioned.or_hash
+
+    await db.flush()
+    await db.refresh(pk)
+
+    # 4. Evict old cached secret so next request fetches the new version.
+    await invalidate_secret_cache(old_secret_ref)
+
+    # 5. Delete old OpenRouter key (fire-and-forget — failure is non-fatal).
+    if old_or_hash:
+        await delete_or_key(old_or_hash)
+
+    logger.info("admin_provider_key_rotated", pk_id=str(pk.id), owner=pk.owner)
+    return _to_pk_out(pk)

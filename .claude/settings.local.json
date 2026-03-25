@@ -21,7 +21,11 @@
       "Bash(.venv/bin/alembic upgrade:*)",
       "Bash(redis-cli ping:*)",
       "Bash(/opt/homebrew/bin/python3.12 -c \":*)",
-      "Bash(.venv/bin/python -c \":*)"
+      "Bash(.venv/bin/python -c \":*)",
+      "WebFetch(domain:openrouter.ai)",
+      "WebSearch",
+      "Bash(ls /Users/aifiesta/Downloads/code/routersvc/*.yaml /Users/aifiesta/Downloads/code/routersvc/*.yml)",
+      "Bash(.venv/bin/python -c \"from app.main import app; print\\(''OK''\\)\")"
     ]
   }
 }

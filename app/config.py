@@ -21,9 +21,15 @@ class Settings(BaseSettings):
     port: int = 8000
 
     # ── OpenRouter ────────────────────────────────────────────────────────────
+    # Default system key — used when no per-owner provider key is configured.
     openrouter_api_key: str
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_timeout_s: float = 120.0
+    # Management key — separate credential used ONLY for provisioning per-owner
+    # keys via the OpenRouter key management API. Cannot be used for completions.
+    # Create at: https://openrouter.ai/settings/management-keys
+    # Leave empty to disable auto-provisioning (keys fall back to system default).
+    openrouter_management_key: str = ""
 
     # ── Database (Phase 2) ────────────────────────────────────────────────────
     # Local:  postgresql+asyncpg://routersvc:routersvc@localhost:5432/routersvc
@@ -43,6 +49,13 @@ class Settings(BaseSettings):
 
     # ── GCP (Phase 7+) ────────────────────────────────────────────────────────
     gcp_project_id: str = ""
+
+    # ── Cloudflare origin guard ───────────────────────────────────────────────
+    # When set, every inbound request must carry this value in X-CF-Secret.
+    # Cloudflare is configured to inject the header; direct hits to the Cloud
+    # Run URL (bypassing Cloudflare) will be rejected with 403.
+    # Leave empty in dev — the check is skipped when unset.
+    cf_secret: str = ""
 
 
 settings = Settings()

@@ -25,13 +25,19 @@ from app.schemas.chat import ROUTERV_ONLY_FIELDS, ChatCompletionRequest
 logger = structlog.get_logger()
 
 
-def _build_payload(request: ChatCompletionRequest, *, stream: bool) -> dict:
+def _build_payload(
+    request: ChatCompletionRequest,
+    *,
+    stream: bool,
+    owner: str | None = None,
+) -> dict:
     """
     Serialize the request for the upstream API.
     - Excludes None fields (avoids overriding upstream defaults with null).
     - Strips RouterV-only fields that must not reach the provider.
     - Forces stream=True/False explicitly.
     - Requests usage metadata in the final streaming chunk.
+    - Sets user=owner:<label> for OpenRouter abuse-detection and analytics.
     """
     payload = request.model_dump(
         exclude_none=True,
@@ -41,6 +47,10 @@ def _build_payload(request: ChatCompletionRequest, *, stream: bool) -> dict:
     if stream:
         # OpenRouter / OpenAI: include token counts in the final SSE chunk.
         payload.setdefault("stream_options", {})["include_usage"] = True
+    # Stable per-owner identifier — OpenRouter uses this for abuse detection.
+    # We use owner label (not key ID) so all keys for an owner share one bucket.
+    if owner is not None:
+        payload.setdefault("user", f"owner:{owner}")
     return payload
 
 
@@ -102,8 +112,9 @@ class OpenRouterAdapter(ProviderAdapter):
         request: ChatCompletionRequest,
         *,
         api_key: str | None = None,
+        owner: str | None = None,
     ) -> dict:
-        payload = _build_payload(request, stream=False)
+        payload = _build_payload(request, stream=False, owner=owner)
         log = logger.bind(model=request.model)
 
         try:
@@ -131,8 +142,9 @@ class OpenRouterAdapter(ProviderAdapter):
         request: ChatCompletionRequest,
         *,
         api_key: str | None = None,
+        owner: str | None = None,
     ) -> AsyncGenerator[bytes, None]:
-        payload = _build_payload(request, stream=True)
+        payload = _build_payload(request, stream=True, owner=owner)
         log = logger.bind(model=request.model)
 
         try:
