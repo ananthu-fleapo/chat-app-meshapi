@@ -1,0 +1,67 @@
+# Local development stack.
+#
+# Production (GCP) equivalents:
+#   db       → Cloud SQL for PostgreSQL (connect via Cloud SQL Auth Proxy or Unix socket)
+#   redis    → Memorystore for Redis (private VPC IP)
+#   app      → Cloud Run (deploy image from Artifact Registry)
+#   ingress  → Cloud Load Balancing (HTTPS) + Cloud DNS
+#   logs     → Cloud Logging (structured JSON, automatic from Cloud Run)
+#   metrics  → Cloud Monitoring (prometheus sidecar or custom metrics API)
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: routersvc
+      POSTGRES_USER: routersvc
+      POSTGRES_PASSWORD: routersvc
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U routersvc -d routersvc"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Monitoring profile ────────────────────────────────────────────────────
+  # Start with: docker compose --profile monitoring up -d
+  # In prod: Cloud Monitoring + Cloud Logging replace Prometheus/Grafana.
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    profiles: ["monitoring"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # so it can scrape the host app
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    profiles: ["monitoring"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres_data:
+  grafana_data:

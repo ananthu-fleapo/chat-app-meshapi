@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m venv .venv)",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(python3 -m venv .venv)",
+      "Bash(python3 -c \":*)",
+      "Bash(brew install:*)",
+      "Bash(ls /opt/homebrew/bin/python3*)",
+      "Bash(ls /usr/local/bin/python3*)",
+      "Bash(/opt/homebrew/bin/python3.12 -m venv .venv)",
+      "Bash(docker compose:*)",
+      "Bash(sed -i '' 's/OPENROUTER_API_KEY=sk-or-v1-.../OPENROUTER_API_KEY=test-key-invalid/' .env)",
+      "Bash(sed -i '' '/^OPENROUTER_API_KEY=test-key-invalid$/{ N; /\\\\nOPENROUTER_API_KEY=test-key-invalid$/d; }' .env)",
+      "Bash(.venv/bin/python3.12 -c \":*)",
+      "Bash(pg_isready -h localhost -p 5432)",
+      "Bash(brew services:*)",
+      "Bash(/opt/homebrew/opt/postgresql@16/bin/createuser -s routersvc)",
+      "Bash(/opt/homebrew/opt/postgresql@16/bin/createdb -O routersvc routersvc)",
+      "Bash(/opt/homebrew/opt/postgresql@16/bin/psql -U routersvc -c \"ALTER USER routersvc WITH PASSWORD ''routersvc'';\" routersvc)",
+      "Bash(.venv/bin/alembic upgrade:*)",
+      "Bash(redis-cli ping:*)"
+    ]
+  }
+}
