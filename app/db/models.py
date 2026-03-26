@@ -272,3 +272,42 @@ class ProviderKey(Base):
             f"<ProviderKey id={self.id} owner={self.owner!r} "
             f"provider={self.provider!r} active={self.is_active}>"
         )
+
+
+class PaymentEvent(Base):
+    """
+    Append-only log of inbound payment webhook events.
+
+    Columns
+    -------
+    user_id          External user identifier from the payment provider.
+    payment_id       Unique payment / transaction identifier.
+    provider         Payment provider slug: "stripe", "paddle", etc.
+    addon_product_id External product identifier for the purchased add-on.
+    quantity         Number of units purchased.
+    """
+
+    __tablename__ = "payment_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    payment_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    addon_product_id: Mapped[str] = mapped_column(Text, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PaymentEvent id={self.id} user_id={self.user_id!r} "
+            f"payment_id={self.payment_id!r} provider={self.provider!r}>"
+        )

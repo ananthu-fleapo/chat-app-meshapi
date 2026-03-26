@@ -171,7 +171,16 @@ async def get_control_plane_user(
             "control_plane_auth_bypass",
             hint="SUPABASE_JWT_SECRET not set — JWT verification skipped",
         )
-        return ControlPlaneIdentity(sub=token, owner=token, email=None)
+        try:
+            claims = jwt.decode(token, options={"verify_signature": False})
+            sub = claims.get("sub", token)
+            owner = _resolve_owner(claims) if claims.get("sub") else token
+            email = claims.get("email")
+        except jwt.DecodeError:
+            sub = token
+            owner = token
+            email = None
+        return ControlPlaneIdentity(sub=sub, owner=owner, email=email)
 
     # ── Production: verify JWT ────────────────────────────────────────────────
     claims = _verify_jwt(token)

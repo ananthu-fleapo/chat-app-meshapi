@@ -11,7 +11,7 @@ from app.exceptions import RouterVError, routerv_exception_handler, validation_e
 from app.logging_config import configure_logging
 from app.middleware import CloudflareOriginGuard, RequestIdMiddleware
 from app.providers.openrouter import OpenRouterAdapter
-from app.routers import inference, models
+from app.routers import inference, models, payments
 
 # Configure structlog before any logger is used.
 configure_logging()
@@ -77,6 +77,7 @@ def create_app() -> FastAPI:
 
     # ── Routers ───────────────────────────────────────────────────────────────
     app.include_router(inference.router)
+    app.include_router(payments.router)
 
     # Template management: production endpoint, auth-gated, owner-scoped.
     from app.routers import templates
