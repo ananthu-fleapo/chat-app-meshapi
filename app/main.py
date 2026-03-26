@@ -13,6 +13,8 @@ from app.middleware import CloudflareOriginGuard, RequestIdMiddleware
 from app.providers.openrouter import OpenRouterAdapter
 from app.routers import inference, models, payments
 
+from fastapi.middleware.cors import CORSMiddleware 
+
 # Configure structlog before any logger is used.
 configure_logging()
 logger = structlog.get_logger()
@@ -70,6 +72,14 @@ def create_app() -> FastAPI:
     # requests never allocate a request ID or touch any handler logic.
     app.add_middleware(RequestIdMiddleware)
     app.add_middleware(CloudflareOriginGuard)
+    app.add_middleware(
+    CORSMiddleware,                                                                                                                        
+    allow_origins=["*"],        # or specific origins from settings
+    allow_credentials=True,                                                                                                                
+    allow_methods=["*"],
+    allow_headers=["*"],                                                                                                                   
+)                       
+
 
     # ── Exception handlers ────────────────────────────────────────────────────
     app.add_exception_handler(RouterVError, routerv_exception_handler)
