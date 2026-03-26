@@ -33,8 +33,6 @@ class PaymentRequest(BaseModel):
     userId: str
     paymentId: str
     provider: str
-    addonProductId: str
-    quantity: int
     orderId: str | None = None
     currency: str | None = None
     amount: int | None = None
@@ -45,8 +43,6 @@ class PaymentEventOut(BaseModel):
     userId: str
     paymentId: str
     provider: str
-    addonProductId: str
-    quantity: int
     orderId: str | None
     currency: str | None
     amount: int | None
@@ -65,8 +61,6 @@ def _to_out(event: PaymentEvent) -> PaymentEventOut:
         userId=event.user_id,
         paymentId=event.payment_id,
         provider=event.provider,
-        addonProductId=event.addon_product_id,
-        quantity=event.quantity,
         orderId=event.order_id,
         currency=event.currency,
         amount=event.amount,
@@ -93,16 +87,12 @@ async def create_payment(
         user_id=body.userId,
         payment_id=body.paymentId,
         provider=body.provider,
-        addon_product_id=body.addonProductId,
-        quantity=body.quantity,
     )
 
     event = PaymentEvent(
         user_id=body.userId,
         payment_id=body.paymentId,
         provider=body.provider,
-        addon_product_id=body.addonProductId,
-        quantity=body.quantity,
         order_id=body.orderId,
         currency=body.currency,
         amount=body.amount,
