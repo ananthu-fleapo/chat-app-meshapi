@@ -35,6 +35,9 @@ class PaymentRequest(BaseModel):
     provider: str
     addonProductId: str
     quantity: int
+    orderId: str | None = None
+    currency: str | None = None
+    amount: int | None = None
 
 
 class PaymentEventOut(BaseModel):
@@ -44,6 +47,9 @@ class PaymentEventOut(BaseModel):
     provider: str
     addonProductId: str
     quantity: int
+    orderId: str | None
+    currency: str | None
+    amount: int | None
     createdAt: str
 
 
@@ -61,6 +67,9 @@ def _to_out(event: PaymentEvent) -> PaymentEventOut:
         provider=event.provider,
         addonProductId=event.addon_product_id,
         quantity=event.quantity,
+        orderId=event.order_id,
+        currency=event.currency,
+        amount=event.amount,
         createdAt=event.created_at.isoformat(),
     )
 
@@ -78,7 +87,7 @@ async def create_payment(
 
     Auth: Authorization: Bearer <WEBHOOK_API_KEY>
     """
-    print(f"Received paymentId: {body.paymentId}")
+
     logger.info(
         "payment_received",
         user_id=body.userId,
@@ -94,6 +103,9 @@ async def create_payment(
         provider=body.provider,
         addon_product_id=body.addonProductId,
         quantity=body.quantity,
+        order_id=body.orderId,
+        currency=body.currency,
+        amount=body.amount,
     )
     db.add(event)
     await db.flush()

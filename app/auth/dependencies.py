@@ -22,6 +22,7 @@ propagate in < 1 request. The 60s TTL is a safety net only.
 """
 
 import hashlib
+import hmac
 
 import structlog
 from fastapi import Depends, Header
@@ -112,7 +113,7 @@ async def verify_webhook_key(
 
     token = _extract_bearer(authorization)
 
-    if token != settings.webhook_api_key:
+    if not hmac.compare_digest(token, settings.webhook_api_key):
         logger.warning("webhook_auth_invalid_key")
         raise UnauthorizedError("Invalid webhook API key.")
 

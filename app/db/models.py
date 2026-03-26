@@ -285,6 +285,9 @@ class PaymentEvent(Base):
     provider         Payment provider slug: "stripe", "paddle", etc.
     addon_product_id External product identifier for the purchased add-on.
     quantity         Number of units purchased.
+    order_id         Provider-side order / invoice identifier.
+    currency         ISO 4217 currency code (e.g. "USD", "EUR").
+    amount           Charged amount in the smallest currency unit (e.g. cents).
     """
 
     __tablename__ = "payment_events"
@@ -299,6 +302,9 @@ class PaymentEvent(Base):
     provider: Mapped[str] = mapped_column(Text, nullable=False)
     addon_product_id: Mapped[str] = mapped_column(Text, nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    order_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    currency: Mapped[str | None] = mapped_column(Text, nullable=True)
+    amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
