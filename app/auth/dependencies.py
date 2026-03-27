@@ -22,6 +22,7 @@ propagate in < 1 request. The 60s TTL is a safety net only.
 """
 
 import hashlib
+import hmac
 
 import structlog
 from fastapi import Depends, Header
@@ -32,6 +33,8 @@ from app.cache.key_cache import get_cached_key, set_cached_key
 from app.db.models import ApiKey
 from app.db.session import get_db_session
 from app.exceptions import ForbiddenError, UnauthorizedError
+
+from app.config import settings
 
 logger = structlog.get_logger()
 
@@ -90,3 +93,28 @@ async def get_authenticated_key(
     logger.debug("auth_cache_miss_populated", key_id=str(key.id), owner=key.owner)
 
     return key
+
+
+async def verify_webhook_key(
+    authorization: str = Header(..., alias="Authorization"),
+) -> None:
+    """
+    Validates inbound webhook requests against the static WEBHOOK_API_KEY setting.
+
+    Expects: Authorization: Bearer <WEBHOOK_API_KEY>
+
+    Returns nothing on success.
+    Raises UnauthorizedError (401) if the header is missing, malformed, or wrong.
+    Raises ForbiddenError   (403) if WEBHOOK_API_KEY is not configured on the server.
+    """
+    if not settings.webhook_api_key:
+        logger.error("webhook_auth_not_configured")
+        raise ForbiddenError("Webhook auth is not configured.")
+
+    token = _extract_bearer(authorization)
+
+    if not hmac.compare_digest(token, settings.webhook_api_key):
+        logger.warning("webhook_auth_invalid_key")
+        raise UnauthorizedError("Invalid webhook API key.")
+
+    logger.debug("webhook_auth_ok")

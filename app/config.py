@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     # Example: set to "routerv_owner" and add that field to Supabase user_metadata.
     supabase_owner_claim: str = ""
 
+    # ── Webhook auth ─────────────────────────────────────────────────────────
+    # Static secret for inbound webhook calls (e.g. payment provider callbacks).
+    # Set WEBHOOK_API_KEY in .env. Requests must pass it as: Bearer <key>.
+    # Leave empty in dev to disable the check.
+    webhook_api_key: str = ""
+
     # ── Cloudflare origin guard ───────────────────────────────────────────────
     # When set, every inbound request must carry this value in X-CF-Secret.
     # Cloudflare is configured to inject the header; direct hits to the Cloud
