@@ -92,10 +92,13 @@ class CloudflareOriginGuard(BaseHTTPMiddleware):
     """
     Rejects requests that bypass Cloudflare and hit Cloud Run directly.
 
-    Cloudflare is configured to inject `X-CF-Secret: <token>` on every
-    proxied request.  Any request arriving without this header (i.e. someone
-    hitting the Cloud Run URL directly) is returned a 403 before it reaches
-    any route handler.
+    Cloudflare is configured to inject `X-Origin-Secret: <token>` on every
+    proxied request via a Request Header Transform rule.  Any request arriving
+    without this header (i.e. someone hitting the Cloud Run URL directly) is
+    returned a 403 before it reaches any route handler.
+
+    Note: X-CF-* headers are reserved by Cloudflare and cannot be set via
+    transform rules — hence X-Origin-Secret is used instead.
 
     Only active when `settings.cf_secret` is non-empty — in dev the check
     is skipped entirely so local testing is unaffected.
@@ -108,7 +111,7 @@ class CloudflareOriginGuard(BaseHTTPMiddleware):
         from app.config import settings  # local import avoids circular dependency
 
         if settings.cf_secret and request.url.path not in _CF_EXEMPT_PATHS:
-            incoming = request.headers.get("X-CF-Secret", "")
+            incoming = request.headers.get("X-Origin-Secret", "")
             if incoming != settings.cf_secret:
                 logger.warning(
                     "cf_origin_guard_blocked",
