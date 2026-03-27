@@ -22,6 +22,7 @@ substitutions:
   _REPO: routersvc
   _SERVICE: routersvc
   _DB_CONNECTION: ""   # set in trigger: project:region:instance
+  _DATABASE_URL: ""    # set in trigger: full asyncpg DATABASE_URL
 
 steps:
   # ── 1. Build ───────────────────────────────────────────────────────────────
@@ -65,7 +66,7 @@ steps:
             --command=alembic \
             --args="upgrade,head" \
             --set-cloudsql-instances=${_DB_CONNECTION} \
-            --set-secrets=DATABASE_URL=routersvc-db-url:latest \
+            --set-env-vars=DATABASE_URL=${_DATABASE_URL} \
             --region=${_REGION} \
             --max-retries=0
         fi
