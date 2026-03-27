@@ -15,7 +15,7 @@ GET   /v1/payments/{user_id}     List all payment events for a given user.
 import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
@@ -51,6 +51,10 @@ class PaymentEventOut(BaseModel):
 
 class PaymentOut(BaseModel):
     received: bool
+
+
+class BillingDataOut(BaseModel):
+    totalSpent: int
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -125,3 +129,24 @@ async def list_payments(
 
     logger.info("payments_listed", user_id=identity.sub, count=len(events))
     return [_to_out(e) for e in events]
+
+
+@router.get("/billing", response_model=BillingDataOut)
+async def get_billing_data(
+    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Return the sum of all payment amounts for the authenticated user.
+
+    Auth: Authorization: Bearer <Supabase JWT>
+    """
+    result = await db.execute(
+        select(func.coalesce(func.sum(PaymentEvent.amount), 0)).where(
+            PaymentEvent.user_id == identity.sub
+        )
+    )
+    total = result.scalar_one()
+
+    logger.info("billing_data_fetched", user_id=identity.sub, total_spent=total)
+    return BillingDataOut(totalSpent=total)
