@@ -73,12 +73,13 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIdMiddleware)
     app.add_middleware(CloudflareOriginGuard)
     app.add_middleware(
-    CORSMiddleware,                                                                                                                        
-    allow_origins=["*"],        # or specific origins from settings
-    allow_credentials=True,                                                                                                                
-    allow_methods=["*"],
-    allow_headers=["*"],                                                                                                                   
-)                       
+        CORSMiddleware,
+        allow_origins=settings.cors_origins_list,
+        # allow_credentials requires explicit origins — cannot be used with "*"
+        allow_credentials=settings.cors_origins != "*",
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )                       
 
 
     # ── Exception handlers ────────────────────────────────────────────────────

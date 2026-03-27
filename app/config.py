@@ -73,8 +73,19 @@ class Settings(BaseSettings):
     # Leave empty in dev to disable the check.
     webhook_api_key: str = ""
 
+    # ── CORS ─────────────────────────────────────────────────────────────────
+    # Comma-separated list of allowed origins for browser requests.
+    # Dev default "*" — in prod set to your exact frontend URL(s), e.g.:
+    #   CORS_ORIGINS=https://app.yourdomain.com,https://yourdomain.com
+    # Cannot use "*" when allow_credentials=True (CORS spec violation).
+    cors_origins: str = "*"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
     # ── Cloudflare origin guard ───────────────────────────────────────────────
-    # When set, every inbound request must carry this value in X-CF-Secret.
+    # When set, every inbound request must carry this value in X-Origin-Secret.
     # Cloudflare is configured to inject the header; direct hits to the Cloud
     # Run URL (bypassing Cloudflare) will be rejected with 403.
     # Leave empty in dev — the check is skipped when unset.
