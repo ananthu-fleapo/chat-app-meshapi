@@ -64,7 +64,7 @@ steps:
             --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA} \
             --command=alembic \
             --args="upgrade,head" \
-            --add-cloudsql-instances=${_DB_CONNECTION} \
+            --set-cloudsql-instances=${_DB_CONNECTION} \
             --set-secrets=DATABASE_URL=routersvc-db-url:latest \
             --region=${_REGION} \
             --max-retries=0
