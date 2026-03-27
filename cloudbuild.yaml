@@ -1,6 +1,6 @@
 # Cloud Build pipeline — RouterV
 #
-# Triggered on push to main branch (configure via Cloud Build trigger in GCP Console).
+# Triggered on push to main branch 
 # Assumes the following substitutions are set in the trigger:
 #   _REGION           GCP region, e.g. "us-central1"
 #   _REPO             Artifact Registry repo, e.g. "routersvc"
