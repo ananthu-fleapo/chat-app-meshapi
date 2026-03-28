@@ -11,7 +11,7 @@ from app.exceptions import RouterVError, routerv_exception_handler, validation_e
 from app.logging_config import configure_logging
 from app.middleware import CloudflareOriginGuard, RequestIdMiddleware
 from app.providers.openrouter import OpenRouterAdapter
-from app.routers import inference, models, payments
+from app.routers import inference, keys, models, payments
 
 from fastapi.middleware.cors import CORSMiddleware 
 
@@ -88,6 +88,7 @@ def create_app() -> FastAPI:
 
     # ── Routers ───────────────────────────────────────────────────────────────
     app.include_router(inference.router)
+    app.include_router(keys.router)
     app.include_router(payments.router)
 
     # Template management: production endpoint, auth-gated, owner-scoped.
