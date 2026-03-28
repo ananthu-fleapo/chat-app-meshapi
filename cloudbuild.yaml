@@ -20,6 +20,7 @@ substitutions:
   _REGION: us-central1
   _REPO: routersvc
   _SERVICE: routersvc
+  _DB_CONNECTION: "fair-myth-471110-j2:asia-south1:api-prod-pg"
   _DATABASE_URL: ""    # set in trigger: full asyncpg DATABASE_URL
 
 steps:
@@ -59,6 +60,7 @@ steps:
           --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA} \
           --command=alembic \
           --args="upgrade,head" \
+          --set-cloudsql-instances=${_DB_CONNECTION} \
           --set-env-vars=DATABASE_URL=${_DATABASE_URL} \
           --region=${_REGION} \
           --max-retries=0
