@@ -274,6 +274,71 @@ class ProviderKey(Base):
         )
 
 
+class UserBalance(Base):
+    """
+    Account-level credit balance for a RouterV user.
+
+    One row per user (upserted on payment). Balance is decremented after
+    each paid inference request and incremented on payment.
+
+    Columns
+    -------
+    user_id      Supabase user UUID (sub claim). Matches ApiKey.owner when
+                 SUPABASE_OWNER_CLAIM is unset.
+    balance_usd  Current credit balance in USD. Can go slightly negative
+                 due to post-deduction model (last request overshoots).
+    """
+
+    __tablename__ = "user_balances"
+
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    balance_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, server_default="0"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return f"<UserBalance user_id={self.user_id!r} balance={self.balance_usd}>"
+
+
+class ModelPrice(Base):
+    """
+    Admin-managed pricing for each model.
+
+    Columns
+    -------
+    model_id               Exact model identifier, e.g. "openai/gpt-4o-mini".
+    prompt_usd_per_1k      Our charge per 1 000 prompt tokens.
+    completion_usd_per_1k  Our charge per 1 000 completion tokens.
+    is_free                When True, requests are never billed regardless of
+                           token counts. Used for free-tier models.
+    """
+
+    __tablename__ = "model_prices"
+
+    model_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    prompt_usd_per_1k: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False)
+    completion_usd_per_1k: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False)
+    is_free: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ModelPrice model_id={self.model_id!r} "
+            f"prompt={self.prompt_usd_per_1k} free={self.is_free}>"
+        )
+
+
 class PaymentEvent(Base):
     """
     Append-only log of inbound payment webhook events.

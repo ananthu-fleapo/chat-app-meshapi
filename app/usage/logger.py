@@ -33,17 +33,49 @@ import uuid
 from decimal import Decimal, InvalidOperation
 
 import structlog
+from sqlalchemy import select
 
 from app.db.engine import get_session_factory
-from app.db.models import UsageEvent
+from app.db.models import ModelPrice, UsageEvent
 from app.usage.pricing import calculate_cost
 
 logger = structlog.get_logger()
 
 
+async def _our_cost(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> Decimal | None:
+    """
+    Resolve cost using our model_prices table (what we charge the user).
+    Falls back to static pricing table, then None.
+    """
+    try:
+        async with get_session_factory()() as session:
+            result = await session.execute(
+                select(ModelPrice.prompt_usd_per_1k, ModelPrice.completion_usd_per_1k, ModelPrice.is_free)
+                .where(ModelPrice.model_id == model)
+            )
+            row = result.one_or_none()
+
+        if row is not None:
+            if row[2]:  # is_free
+                return Decimal("0")
+            prompt_cost = Decimal(str(row[0])) * prompt_tokens / 1000
+            completion_cost = Decimal(str(row[1])) * completion_tokens / 1000
+            return (prompt_cost + completion_cost).quantize(Decimal("0.00000001"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("our_cost_lookup_failed", model=model, error=str(exc))
+
+    # Static table fallback
+    return calculate_cost(model, prompt_tokens, completion_tokens)
+
+
 async def log_usage_event(
     *,
     key_id: str,
+    owner: str,
     request_id: str,
     model: str,
     template_id: str | None,
@@ -51,7 +83,7 @@ async def log_usage_event(
     prompt_tokens: int | None,
     completion_tokens: int | None,
     cached_tokens: int | None = None,
-    upstream_cost: float | None = None,   # usage.cost from upstream response
+    upstream_cost: float | None = None,   # usage.cost from upstream — internal reference only
     latency_ms: int,
     status: str,                           # "success" | "error"
     error_code: str | None = None,
@@ -62,17 +94,10 @@ async def log_usage_event(
     if prompt_tokens is not None and completion_tokens is not None:
         total_tokens = prompt_tokens + completion_tokens
 
-    # ── Cost resolution ───────────────────────────────────────────────────────
-    # 1. Use upstream_cost (usage.cost) — actual charged amount from OpenRouter.
-    # 2. Fall back to static pricing table for unknown models / other adapters.
-    if upstream_cost is not None:
-        try:
-            cost = Decimal(str(upstream_cost)).quantize(Decimal("0.00000001"))
-        except (InvalidOperation, ValueError):
-            pass
-
-    if cost is None and prompt_tokens is not None and completion_tokens is not None:
-        cost = calculate_cost(model, prompt_tokens, completion_tokens)
+    # ── Cost resolution — use our model_prices (what we charge the user) ──────
+    # Falls back to static table, then None.
+    if prompt_tokens is not None and completion_tokens is not None:
+        cost = await _our_cost(model, prompt_tokens, completion_tokens)
 
     try:
         async with get_session_factory()() as session:
@@ -115,11 +140,32 @@ async def log_usage_event(
             request_id=request_id,
             model=model,
         )
+        return
+
+    # ── Prometheus metrics ────────────────────────────────────────────────────
+    try:
+        from app.metrics import record_inference
+        record_inference(
+            model=model,
+            status=status,
+            latency_ms=latency_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=float(cost) if cost is not None else None,
+        )
+    except Exception:  # noqa: BLE001
+        pass  # metrics must never affect the response path
+
+    # ── Deduct from user balance (post-deduction model) ───────────────────────
+    # Only deduct on success with a known cost. Errors are not billed.
+    if status == "success" and cost is not None and cost > 0:
+        from app.usage.balance import deduct_balance
+        await deduct_balance(owner, cost)
 
 
-def fire_usage_log(**kwargs) -> None:
+def fire_usage_log(*, owner: str, **kwargs) -> None:
     """
     Schedule log_usage_event as a fire-and-forget background task.
     Safe to call from inside async generators and route handlers.
     """
-    asyncio.create_task(log_usage_event(**kwargs))
+    asyncio.create_task(log_usage_event(owner=owner, **kwargs))

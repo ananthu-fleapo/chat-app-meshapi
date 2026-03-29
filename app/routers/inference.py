@@ -29,6 +29,7 @@ from app.providers.registry import get_adapter
 from app.schemas.chat import ChatCompletionRequest
 from app.templates.renderer import render_template
 from app.templates.resolver import resolve_template
+from app.usage.balance import check_balance
 from app.usage.logger import fire_usage_log
 from app.usage.spend_cap import check_spend_cap
 
@@ -63,9 +64,12 @@ async def chat_completions(
         default_rpd=settings.default_rpd,
     )
 
-    # ── Phase 5: Spend cap ────────────────────────────────────────────────────
+    # ── Phase 5: Spend cap (per-key hard limit, optional) ────────────────────
     if key.spend_cap_usd is not None:
         await check_spend_cap(str(key.id), key.spend_cap_usd, db)
+
+    # ── Balance check (account-level, paid models only) ───────────────────────
+    await check_balance(key.owner, raw_body.model or "", db)
 
     # ── Phase 4: Template resolution + rendering ──────────────────────────────
     template = None
@@ -164,6 +168,7 @@ async def chat_completions(
                     completion_tokens=usage_data.get("completion_tokens") if usage_data else None,
                 )
                 fire_usage_log(
+                    owner=key.owner,
                     key_id=str(key.id),
                     request_id=request_id,
                     model=body.model,
@@ -206,6 +211,7 @@ async def chat_completions(
         latency_ms = int((time.monotonic() - start) * 1000)
         usage = (response_body or {}).get("usage") or {}
         fire_usage_log(
+            owner=key.owner,
             key_id=str(key.id),
             request_id=request_id,
             model=(response_body or {}).get("model", body.model),

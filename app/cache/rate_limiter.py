@@ -117,6 +117,8 @@ async def check_rate_limits(
             limit=effective_rpm,
             retry_after=retry,
         )
+        from app.metrics import RATE_LIMIT_HITS
+        RATE_LIMIT_HITS.labels(limit_type="rpm").inc()
         raise RateLimitError(
             f"RPM limit of {effective_rpm} req/min exceeded.",
             limit_type="rpm",
@@ -132,6 +134,8 @@ async def check_rate_limits(
             limit=effective_rpd,
             retry_after=retry,
         )
+        from app.metrics import RATE_LIMIT_HITS
+        RATE_LIMIT_HITS.labels(limit_type="rpd").inc()
         raise RateLimitError(
             f"RPD limit of {effective_rpd} req/day exceeded.",
             limit_type="rpd",

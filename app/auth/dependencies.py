@@ -55,6 +55,8 @@ def _hash_key(raw: str) -> str:
 def _check_active(key: ApiKey, raw_key: str) -> None:
     if key.status != "active":
         logger.warning("auth_suspended_key", key_id=str(key.id), owner=key.owner)
+        from app.metrics import AUTH_FAILURES
+        AUTH_FAILURES.labels(reason="suspended").inc()
         raise ForbiddenError("API key is suspended.")
 
 
@@ -84,6 +86,8 @@ async def get_authenticated_key(
 
     if key is None:
         logger.warning("auth_invalid_key", key_prefix=raw_key[:8] + "...")
+        from app.metrics import AUTH_FAILURES
+        AUTH_FAILURES.labels(reason="invalid_key").inc()
         raise UnauthorizedError()
 
     _check_active(key, raw_key)

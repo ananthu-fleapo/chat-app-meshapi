@@ -18,10 +18,13 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from decimal import Decimal
+
 from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
 from app.auth.dependencies import verify_webhook_key
 from app.db.models import PaymentEvent
 from app.db.session import get_db_session
+from app.usage.balance import credit_balance
 
 router = APIRouter(prefix="/v1/payments", tags=["payments"])
 logger = structlog.get_logger()
@@ -99,6 +102,11 @@ async def create_payment(
     )
     db.add(event)
     await db.flush()
+
+    # Credit user balance — amount is in cents (USD), normalize to dollars.
+    if body.amount and body.amount > 0:
+        amount_usd = Decimal(body.amount) / 100
+        await credit_balance(body.userId, amount_usd, db)
 
     return {"received": True}
 

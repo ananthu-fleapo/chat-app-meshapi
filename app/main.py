@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Header
 from fastapi.exceptions import RequestValidationError
 
 from app.cache.redis_client import close_redis, init_redis
@@ -11,7 +11,9 @@ from app.exceptions import RouterVError, routerv_exception_handler, validation_e
 from app.logging_config import configure_logging
 from app.middleware import CloudflareOriginGuard, RequestIdMiddleware
 from app.providers.openrouter import OpenRouterAdapter
-from app.routers import inference, keys, models, payments
+from prometheus_fastapi_instrumentator import Instrumentator
+
+from app.routers import balance, inference, keys, models, payments, usage
 
 from fastapi.middleware.cors import CORSMiddleware 
 
@@ -89,6 +91,8 @@ def create_app() -> FastAPI:
     # ── Routers ───────────────────────────────────────────────────────────────
     app.include_router(inference.router)
     app.include_router(keys.router)
+    app.include_router(balance.router)
+    app.include_router(usage.router)
     app.include_router(payments.router)
 
     # Template management: production endpoint, auth-gated, owner-scoped.
@@ -108,6 +112,32 @@ def create_app() -> FastAPI:
     if settings.env == "dev":
         from app.routers import admin
         app.include_router(admin.router)
+
+    # ── Prometheus metrics ────────────────────────────────────────────────────
+    # Instruments HTTP metrics. Endpoint is registered manually below so we
+    # can gate it behind a bearer token for Grafana Cloud scraping.
+    Instrumentator(excluded_handlers=["/metrics", "/healthz", "/readyz"]).instrument(app)
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics(authorization: str = Header(default="")):
+        """
+        Prometheus metrics endpoint.
+        Requires: Authorization: Bearer <METRICS_TOKEN> when METRICS_TOKEN is set.
+        Configure this token in the Grafana Cloud scrape job.
+        """
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+        if settings.metrics_token:
+            if authorization != f"Bearer {settings.metrics_token}":
+                from fastapi.responses import Response as FR
+                return FR(
+                    content='{"error":{"code":"unauthorized","message":"Invalid metrics token."}}',
+                    status_code=401,
+                    media_type="application/json",
+                )
+
+        from fastapi.responses import Response as FR
+        return FR(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     # ── Utility endpoints ─────────────────────────────────────────────────────
     @app.get("/healthz", include_in_schema=False)

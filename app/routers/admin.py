@@ -36,7 +36,7 @@ from ulid import ULID
 
 from app.cache.key_cache import invalidate_cached_key
 from app.config import settings
-from app.db.models import ApiKey, ProviderKey, UsageEvent
+from app.db.models import ApiKey, ModelPrice, ProviderKey, UsageEvent
 from app.db.session import get_db_session
 from app.exceptions import NotFoundError
 from app.providers.provisioner import (
@@ -591,3 +591,114 @@ async def admin_rotate_provider_key(
 
     logger.info("admin_provider_key_rotated", pk_id=str(pk.id), owner=pk.owner)
     return _to_pk_out(pk)
+
+
+# ── Admin: model pricing ──────────────────────────────────────────────────────
+
+class ModelPriceIn(BaseModel):
+    model_id: str
+    prompt_usd_per_1k: float
+    completion_usd_per_1k: float
+    is_free: bool = False
+
+
+class ModelPriceUpdateIn(BaseModel):
+    prompt_usd_per_1k: float | None = None
+    completion_usd_per_1k: float | None = None
+    is_free: bool | None = None
+
+
+class ModelPriceOut(BaseModel):
+    model_id: str
+    prompt_usd_per_1k: str
+    completion_usd_per_1k: str
+    is_free: bool
+    updated_at: str
+
+
+def _to_price_out(p: ModelPrice) -> ModelPriceOut:
+    return ModelPriceOut(
+        model_id=p.model_id,
+        prompt_usd_per_1k=str(p.prompt_usd_per_1k),
+        completion_usd_per_1k=str(p.completion_usd_per_1k),
+        is_free=p.is_free,
+        updated_at=p.updated_at.isoformat(),
+    )
+
+
+@router.post("/model-prices", response_model=ModelPriceOut, status_code=201)
+async def create_model_price(
+    body: ModelPriceIn,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Set pricing for a model. Replaces existing entry if model_id already exists."""
+    from decimal import Decimal
+    existing = await db.execute(select(ModelPrice).where(ModelPrice.model_id == body.model_id))
+    price = existing.scalar_one_or_none()
+
+    if price is None:
+        price = ModelPrice(
+            model_id=body.model_id,
+            prompt_usd_per_1k=Decimal(str(body.prompt_usd_per_1k)),
+            completion_usd_per_1k=Decimal(str(body.completion_usd_per_1k)),
+            is_free=body.is_free,
+        )
+        db.add(price)
+    else:
+        price.prompt_usd_per_1k = Decimal(str(body.prompt_usd_per_1k))
+        price.completion_usd_per_1k = Decimal(str(body.completion_usd_per_1k))
+        price.is_free = body.is_free
+
+    await db.flush()
+    await db.refresh(price)
+    logger.info("model_price_set", model_id=body.model_id, is_free=body.is_free)
+    return _to_price_out(price)
+
+
+@router.get("/model-prices", response_model=list[ModelPriceOut])
+async def list_model_prices(
+    db: AsyncSession = Depends(get_db_session),
+):
+    """List all model prices."""
+    result = await db.execute(select(ModelPrice).order_by(ModelPrice.model_id))
+    return [_to_price_out(p) for p in result.scalars().all()]
+
+
+@router.patch("/model-prices/{model_id}", response_model=ModelPriceOut)
+async def update_model_price(
+    model_id: str,
+    body: ModelPriceUpdateIn,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Update pricing fields for an existing model."""
+    from decimal import Decimal
+    result = await db.execute(select(ModelPrice).where(ModelPrice.model_id == model_id))
+    price = result.scalar_one_or_none()
+    if price is None:
+        raise NotFoundError(f"Model price for '{model_id}' not found.")
+
+    if body.prompt_usd_per_1k is not None:
+        price.prompt_usd_per_1k = Decimal(str(body.prompt_usd_per_1k))
+    if body.completion_usd_per_1k is not None:
+        price.completion_usd_per_1k = Decimal(str(body.completion_usd_per_1k))
+    if body.is_free is not None:
+        price.is_free = body.is_free
+
+    await db.flush()
+    await db.refresh(price)
+    logger.info("model_price_updated", model_id=model_id)
+    return _to_price_out(price)
+
+
+@router.delete("/model-prices/{model_id}", status_code=204)
+async def delete_model_price(
+    model_id: str,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Remove a model from the price table."""
+    result = await db.execute(select(ModelPrice).where(ModelPrice.model_id == model_id))
+    price = result.scalar_one_or_none()
+    if price is None:
+        raise NotFoundError(f"Model price for '{model_id}' not found.")
+    await db.delete(price)
+    logger.info("model_price_deleted", model_id=model_id)

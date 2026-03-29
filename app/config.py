@@ -91,5 +91,11 @@ class Settings(BaseSettings):
     # Leave empty in dev — the check is skipped when unset.
     cf_secret: str = ""
 
+    # ── Metrics scrape auth ───────────────────────────────────────────────────
+    # Bearer token required to scrape GET /metrics.
+    # Set in Grafana Cloud scrape job as: Authorization: Bearer <token>
+    # Leave empty in dev to allow unauthenticated scraping.
+    metrics_token: str = ""
+
 
 settings = Settings()
