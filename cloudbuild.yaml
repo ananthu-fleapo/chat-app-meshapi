@@ -17,7 +17,7 @@
 # ensuring the schema is always ahead of or in sync with the code.
 
 substitutions:
-  _REGION: us-central1
+  _REGION: asia-southeast1
   _REPO: routersvc
   _SERVICE: routersvc
   _DB_CONNECTION: "fair-myth-471110-j2:asia-south1:api-prod-pg"
@@ -55,55 +55,52 @@ steps:
     args:
       - -c
       - |
-        gcloud run jobs delete ${_SERVICE}-migrate --region=${_REGION} --quiet 2>/dev/null || true
+        REGION="${_REGION:-asia-southeast1}"
+        gcloud run jobs delete ${_SERVICE}-migrate --region="$REGION" --quiet 2>/dev/null || true
         gcloud run jobs create ${_SERVICE}-migrate \
-          --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA} \
+          --image="$REGION-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}" \
           --command=alembic \
           --args="upgrade,head" \
-          --set-cloudsql-instances=${_DB_CONNECTION} \
-          --set-env-vars=DATABASE_URL=${_DATABASE_URL} \
-          --region=${_REGION} \
+          --set-cloudsql-instances="${_DB_CONNECTION}" \
+          --set-env-vars="DATABASE_URL=${_DATABASE_URL}" \
+          --region="$REGION" \
           --max-retries=0
     waitFor: [push]
 
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
     id: migrate
-    entrypoint: gcloud
+    entrypoint: bash
     args:
-      - run
-      - jobs
-      - execute
-      - ${_SERVICE}-migrate
-      - --region=${_REGION}
-      - --wait
+      - -c
+      - |
+        REGION="${_REGION:-asia-southeast1}"
+        gcloud run jobs execute ${_SERVICE}-migrate --region="$REGION" --wait
     waitFor: [migrate-update]
 
   # ── 4. Deploy ──────────────────────────────────────────────────────────────
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
     id: deploy
-    entrypoint: gcloud
+    entrypoint: bash
     args:
-      - run
-      - deploy
-      - ${_SERVICE}
-      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}
-      - --region=${_REGION}
-      - --platform=managed
-      # Traffic: only shift after the new revision passes health checks.
-      - --no-traffic
+      - -c
+      - |
+        REGION="${_REGION:-asia-southeast1}"
+        gcloud run deploy ${_SERVICE} \
+          --image="$REGION-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}" \
+          --region="$REGION" \
+          --platform=managed \
+          --no-traffic
     waitFor: [migrate]
 
   # ── 5. Shift traffic after deploy succeeds ─────────────────────────────────
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
     id: shift-traffic
-    entrypoint: gcloud
+    entrypoint: bash
     args:
-      - run
-      - services
-      - update-traffic
-      - ${_SERVICE}
-      - --region=${_REGION}
-      - --to-latest
+      - -c
+      - |
+        REGION="${_REGION:-asia-southeast1}"
+        gcloud run services update-traffic ${_SERVICE} --region="$REGION" --to-latest
     waitFor: [deploy]
 
 images:
