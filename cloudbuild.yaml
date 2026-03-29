@@ -1,6 +1,6 @@
 # Cloud Build pipeline — RouterV
 #
-# Triggered on push to main branch 
+# Triggered on push to main branch
 # Assumes the following substitutions are set in the trigger:
 #   _REGION           GCP region, e.g. "us-central1"
 #   _REPO             Artifact Registry repo, e.g. "routersvc"
@@ -47,23 +47,22 @@ steps:
     waitFor: [build]
 
   # ── 3. Migrate ─────────────────────────────────────────────────────────────
-  # Create the migration job on first run, or update its image on subsequent runs.
-  # gcloud run jobs execute does not accept --image; the job must be updated first.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
     id: migrate-update
     entrypoint: bash
     args:
       - -c
       - |
-        REGION="${_REGION:-asia-southeast1}"
-        gcloud run jobs delete ${_SERVICE}-migrate --region="$REGION" --quiet 2>/dev/null || true
+        REGION=${_REGION}
+        [ -z "$$REGION" ] && REGION=asia-southeast1
+        gcloud run jobs delete ${_SERVICE}-migrate --region="$$REGION" --quiet 2>/dev/null || true
         gcloud run jobs create ${_SERVICE}-migrate \
-          --image="$REGION-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}" \
+          --image="$$REGION-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}" \
           --command=alembic \
           --args="upgrade,head" \
           --set-cloudsql-instances="${_DB_CONNECTION}" \
           --set-env-vars="DATABASE_URL=${_DATABASE_URL}" \
-          --region="$REGION" \
+          --region="$$REGION" \
           --max-retries=0
     waitFor: [push]
 
@@ -73,8 +72,9 @@ steps:
     args:
       - -c
       - |
-        REGION="${_REGION:-asia-southeast1}"
-        gcloud run jobs execute ${_SERVICE}-migrate --region="$REGION" --wait
+        REGION=${_REGION}
+        [ -z "$$REGION" ] && REGION=asia-southeast1
+        gcloud run jobs execute ${_SERVICE}-migrate --region="$$REGION" --wait
     waitFor: [migrate-update]
 
   # ── 4. Deploy ──────────────────────────────────────────────────────────────
@@ -84,10 +84,11 @@ steps:
     args:
       - -c
       - |
-        REGION="${_REGION:-asia-southeast1}"
+        REGION=${_REGION}
+        [ -z "$$REGION" ] && REGION=asia-southeast1
         gcloud run deploy ${_SERVICE} \
-          --image="$REGION-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}" \
-          --region="$REGION" \
+          --image="$$REGION-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}" \
+          --region="$$REGION" \
           --platform=managed \
           --no-traffic
     waitFor: [migrate]
@@ -99,8 +100,9 @@ steps:
     args:
       - -c
       - |
-        REGION="${_REGION:-asia-southeast1}"
-        gcloud run services update-traffic ${_SERVICE} --region="$REGION" --to-latest
+        REGION=${_REGION}
+        [ -z "$$REGION" ] && REGION=asia-southeast1
+        gcloud run services update-traffic ${_SERVICE} --region="$$REGION" --to-latest
     waitFor: [deploy]
 
 images:
