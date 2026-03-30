@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # ── OpenRouter ────────────────────────────────────────────────────────────
     # Default system key — used when no per-owner provider key is configured.
-    openrouter_api_key: str
+    openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_timeout_s: float = 120.0
     # Management key — separate credential used ONLY for provisioning per-owner

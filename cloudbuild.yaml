@@ -21,6 +21,7 @@ substitutions:
   _REPO: routersvc
   _SERVICE: routersvc
   _DB_CONNECTION: "fair-myth-471110-j2:asia-south1:api-prod-pg"
+  _SERVICE_ACCOUNT: "api-routersvc-sa@fair-myth-471110-j2.iam.gserviceaccount.com"
   _DATABASE_URL: ""    # set in trigger: full asyncpg DATABASE_URL
 
 steps:
@@ -62,6 +63,7 @@ steps:
           --args="upgrade,head" \
           --set-cloudsql-instances="${_DB_CONNECTION}" \
           --set-env-vars="DATABASE_URL=${_DATABASE_URL}" \
+          --service-account="${_SERVICE_ACCOUNT}" \
           --region="$$REGION" \
           --max-retries=0
     waitFor: [push]
