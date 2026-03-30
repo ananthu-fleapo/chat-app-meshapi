@@ -58,7 +58,21 @@ async def resolve_upstream_key(
     if db is not None:
         provider_key = await _lookup_provider_key(owner, provider, db)
         if provider_key is not None:
-            secret = await fetch_secret(provider_key.secret_ref)
+            ref = provider_key.secret_ref
+
+            # Inline key: stored directly in the row (no Secret Manager needed).
+            # Detected by the "sk-" prefix used by OpenRouter plaintext keys.
+            if ref.startswith("sk-"):
+                logger.debug(
+                    "provider_key_resolved_inline",
+                    owner=owner,
+                    provider=provider,
+                    provider_key_id=str(provider_key.id),
+                )
+                return ref
+
+            # Secret Manager path.
+            secret = await fetch_secret(ref)
             if secret:
                 logger.debug(
                     "provider_key_resolved",
@@ -68,15 +82,13 @@ async def resolve_upstream_key(
                 )
                 return secret
             else:
-                # Secret Manager unavailable or secret missing.
-                # Fall through to system default rather than hard-failing —
-                # the request will still work if the owner hasn't configured
-                # their own key yet.
+                # Secret Manager unavailable or secret missing — fall back to
+                # system default so existing requests are not hard-broken.
                 logger.warning(
                     "provider_key_sm_fallback",
                     owner=owner,
                     provider=provider,
-                    secret_ref=provider_key.secret_ref[:60],
+                    secret_ref=ref[:60],
                 )
 
     logger.debug("provider_key_system_default", owner=owner, provider=provider)

@@ -127,11 +127,11 @@ async def _auto_provision_for_owner(
     Steps:
       1. Check if the owner already has an active provider_keys row — skip if so.
       2. Call OpenRouter Management API to create a key.
-      3. Store plaintext in GCP Secret Manager → get secret_ref.
+      3. Store plaintext in GCP Secret Manager if available, else store inline.
       4. Write a ProviderKey row and return it.
 
-    Returns the new ProviderKey on success, or None when provisioning is
-    unavailable (dev environment / management key not configured).
+    Raises RouterVError (500) if the OpenRouter Management API call fails.
+    Returns None if the owner already has a key (idempotent).
     """
     # Skip if owner already has a provider key configured.
     existing = await db.execute(
@@ -145,37 +145,37 @@ async def _auto_provision_for_owner(
         logger.debug("auto_provision_skipped_existing", owner=owner)
         return None
 
-    # Create key on OpenRouter.
+    # Create key on OpenRouter — hard fail if provisioning is unavailable.
     provisioned: ProvisionedKey | None = await create_or_key(
         owner,
         limit_usd=float(spend_cap_usd) if spend_cap_usd is not None else None,
     )
     if provisioned is None:
-        # Provisioner disabled or failed — key will use system default.
-        return None
+        logger.error("auto_provision_failed", owner=owner)
+        from app.exceptions import RouterVError
+        raise RouterVError(
+            "Could not provision an upstream API key. "
+            "Ensure OPENROUTER_MANAGEMENT_KEY is configured."
+        )
 
-    # Store plaintext in Secret Manager.
+    # Prefer GCP Secret Manager; fall back to storing the plaintext inline.
+    # Inline storage (secret_ref starts with "sk-") is handled by the resolver.
+    secret_ref: str
     secret_id = f"openrouter-{owner.lower().replace(' ', '-').replace('_', '-')}"
     version_ref = await store_secret(
         secret_id=secret_id,
         value=provisioned.plaintext,
         project_id=settings.gcp_project_id,
     )
-
-    if version_ref is None:
-        # Secret Manager unavailable (local dev) — store a placeholder so the
-        # ProviderKey row exists but resolver falls back to system default.
-        # In a real GCP environment this path means SM is misconfigured.
-        logger.warning(
-            "auto_provision_sm_unavailable",
-            owner=owner,
-            hint="Secret Manager not configured — using system default key",
-        )
-        # Use a sentinel value that the resolver recognises as "no secret".
-        secret_ref = ""
-    else:
-        # Always point to /versions/latest so future rotations are automatic.
+    if version_ref is not None:
         secret_ref = f"projects/{settings.gcp_project_id}/secrets/{secret_id}/versions/latest"
+        logger.info("auto_provision_stored_sm", owner=owner, secret_id=secret_id)
+    else:
+        # Secret Manager not configured — store plaintext directly in the row.
+        # The resolver detects inline keys by the "sk-" prefix and returns them
+        # without a Secret Manager lookup.
+        secret_ref = provisioned.plaintext
+        logger.info("auto_provision_stored_inline", owner=owner)
 
     pk = ProviderKey(
         owner=owner,
