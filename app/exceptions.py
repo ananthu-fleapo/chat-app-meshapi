@@ -100,13 +100,13 @@ class RateLimitError(RouterVError):
 # ── 5xx ──────────────────────────────────────────────────────────────────────
 
 class UpstreamError(RouterVError):
-    status_code = 502
+    status_code = 500
     error_code = "upstream_error"
     message = "Upstream provider returned an error."
 
 
 class GatewayTimeoutError(RouterVError):
-    status_code = 504
+    status_code = 500
     error_code = "gateway_timeout"
     message = "Upstream provider did not respond in time."
 
