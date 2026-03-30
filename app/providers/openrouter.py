@@ -50,7 +50,10 @@ def _build_payload(
     # Stable per-owner identifier — OpenRouter uses this for abuse detection.
     # We use owner label (not key ID) so all keys for an owner share one bucket.
     if owner is not None:
-        payload.setdefault("user", f"owner:{owner}")
+        # OpenRouter enforces <=256 chars on the user field.
+        # Truncate defensively — owner should always be a short UUID but
+        # this guards against any unexpected long values in the DB.
+        payload.setdefault("user", f"owner:{owner}"[:256])
     return payload
 
 
