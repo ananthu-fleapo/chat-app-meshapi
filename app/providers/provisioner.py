@@ -56,11 +56,12 @@ def _mgmt_headers() -> dict[str, str]:
 
 def _provisioning_enabled() -> bool:
     """
-    Return True only when both the management key and GCP project are
-    configured.  In local dev neither is set, so auto-provisioning is
-    silently skipped and the system default key is used.
+    Return True when the OpenRouter management key is configured.
+
+    GCP project is NOT required — if Secret Manager is unavailable the
+    provisioner stores the key inline in the provider_keys row instead.
     """
-    return bool(settings.openrouter_management_key and settings.gcp_project_id)
+    return bool(settings.openrouter_management_key)
 
 
 async def create_or_key(

@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # Applied when a key has no explicit rpm_limit / rpd_limit set (NULL in DB).
     # Override per-key via PATCH /admin/keys/{id}.
     default_rpm: int = 60
-    default_rpd: int = 1000
+    default_rpd: int = 5000
 
     # ── GCP (Phase 7+) ────────────────────────────────────────────────────────
     gcp_project_id: str = ""
@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     # Falls back to `sub` (Supabase user UUID) when unset or claim not found.
     # Example: set to "routerv_owner" and add that field to Supabase user_metadata.
     supabase_owner_claim: str = ""
+
+    # ── Admin secret ──────────────────────────────────────────────────────────
+    # When set, registers /admin/* routes in prod gated behind:
+    #   Authorization: Bearer <ADMIN_SECRET>
+    # Leave empty in dev (routes are always available without auth).
+    admin_secret: str = ""
 
     # ── Webhook auth ─────────────────────────────────────────────────────────
     # Static secret for inbound webhook calls (e.g. payment provider callbacks).

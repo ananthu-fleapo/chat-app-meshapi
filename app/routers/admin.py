@@ -28,7 +28,7 @@ import uuid
 from decimal import Decimal
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,7 +38,7 @@ from app.cache.key_cache import invalidate_cached_key
 from app.config import settings
 from app.db.models import ApiKey, ModelPrice, ProviderKey, UsageEvent
 from app.db.session import get_db_session
-from app.exceptions import NotFoundError
+from app.exceptions import ForbiddenError, NotFoundError
 from app.providers.provisioner import (
     ProvisionedKey,
     create_or_key,
@@ -49,7 +49,17 @@ from app.providers.secret_manager import fetch_secret, invalidate_secret_cache, 
 
 logger = structlog.get_logger()
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+def _require_admin(authorization: str = Header(default="")) -> None:
+    """
+    In prod, require Authorization: Bearer <ADMIN_SECRET>.
+    In dev with no ADMIN_SECRET set, all admin routes are open.
+    """
+    if settings.admin_secret:
+        if authorization != f"Bearer {settings.admin_secret}":
+            raise ForbiddenError("Admin access denied.")
+
+
+router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(_require_admin)])
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -153,10 +163,7 @@ async def _auto_provision_for_owner(
     if provisioned is None:
         logger.error("auto_provision_failed", owner=owner)
         from app.exceptions import RouterVError
-        raise RouterVError(
-            "Could not provision an upstream API key. "
-            "Ensure OPENROUTER_MANAGEMENT_KEY is configured."
-        )
+        raise RouterVError("Key provisioning failed. Please try again or contact support.")
 
     # Prefer GCP Secret Manager; fall back to storing the plaintext inline.
     # Inline storage (secret_ref starts with "sk-") is handled by the resolver.
@@ -702,3 +709,89 @@ async def delete_model_price(
         raise NotFoundError(f"Model price for '{model_id}' not found.")
     await db.delete(price)
     logger.info("model_price_deleted", model_id=model_id)
+
+
+class SeedPricesResponse(BaseModel):
+    seeded: int
+    skipped: int
+    models: list[str]
+
+
+@router.post("/model-prices/seed", response_model=SeedPricesResponse)
+async def seed_model_prices(
+    db: AsyncSession = Depends(get_db_session),
+    overwrite: bool = False,
+):
+    """
+    Fetch live pricing from OpenRouter's /api/v1/models and upsert into
+    model_prices.
+
+    OpenRouter returns pricing in USD per token; we store USD per 1k tokens.
+    Models with prompt=0 and completion=0 are marked is_free=True.
+
+    Set overwrite=true to update existing rows; default skips already-priced models.
+    """
+    import httpx
+    from decimal import Decimal
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                "https://openrouter.ai/api/v1/models",
+                headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch OpenRouter models: {exc}")
+
+    models_data = data.get("data", [])
+    seeded_ids: list[str] = []
+    skipped = 0
+
+    for model in models_data:
+        model_id: str = model.get("id", "")
+        pricing = model.get("pricing") or {}
+
+        try:
+            prompt_per_token = float(pricing.get("prompt") or 0)
+            completion_per_token = float(pricing.get("completion") or 0)
+        except (ValueError, TypeError):
+            skipped += 1
+            continue
+
+        if not model_id:
+            skipped += 1
+            continue
+
+        # Convert per-token → per 1k tokens
+        prompt_per_1k = Decimal(str(round(prompt_per_token * 1000, 8)))
+        completion_per_1k = Decimal(str(round(completion_per_token * 1000, 8)))
+        is_free = prompt_per_token == 0 and completion_per_token == 0
+
+        stmt = pg_insert(ModelPrice).values(
+            model_id=model_id,
+            prompt_usd_per_1k=prompt_per_1k,
+            completion_usd_per_1k=completion_per_1k,
+            is_free=is_free,
+        )
+        if overwrite:
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["model_id"],
+                set_={
+                    "prompt_usd_per_1k": stmt.excluded.prompt_usd_per_1k,
+                    "completion_usd_per_1k": stmt.excluded.completion_usd_per_1k,
+                    "is_free": stmt.excluded.is_free,
+                    "updated_at": func.now(),
+                },
+            )
+        else:
+            stmt = stmt.on_conflict_do_nothing(index_elements=["model_id"])
+
+        await db.execute(stmt)
+        seeded_ids.append(model_id)
+
+    await db.commit()
+    logger.info("model_prices_seeded", count=len(seeded_ids), skipped=skipped, overwrite=overwrite)
+    return SeedPricesResponse(seeded=len(seeded_ids), skipped=skipped, models=seeded_ids)

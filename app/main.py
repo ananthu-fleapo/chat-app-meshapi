@@ -33,6 +33,15 @@ async def lifespan(app: FastAPI):
         timeout=settings.openrouter_timeout_s,
     )
 
+    # ── Required secrets check ────────────────────────────────────────────────
+    # Fail fast rather than starting in a broken state where all control-plane
+    # auth silently falls back to the insecure dev bypass.
+    if not settings.supabase_jwt_secret:
+        raise RuntimeError(
+            "SUPABASE_JWT_SECRET is not set. "
+            "Set it to the JWT secret from Supabase → Settings → API → JWT Secret."
+        )
+
     # ── Database ──────────────────────────────────────────────────────────────
     if settings.database_url:
         init_db(settings.database_url, echo=(settings.env == "dev"))
@@ -107,11 +116,11 @@ def create_app() -> FastAPI:
     # Models listing: unauthenticated, public info.
     app.include_router(models.router)
 
-    # Admin router: registered only in dev.
-    # In prod, /admin/* routes simply don't exist → 404 from the framework.
-    if settings.env == "dev":
-        from app.routers import admin
-        app.include_router(admin.router)
+    # Admin router: always registered, but gated differently per environment.
+    # Dev  → no auth required (ENV guard is the protection)
+    # Prod → requires Authorization: Bearer <ADMIN_SECRET> (must be set)
+    from app.routers import admin
+    app.include_router(admin.router)
 
     # ── Prometheus metrics ────────────────────────────────────────────────────
     # Instruments HTTP metrics. Endpoint is registered manually below so we
