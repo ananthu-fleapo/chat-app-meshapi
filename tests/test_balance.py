@@ -72,38 +72,24 @@ class TestCheckBalance:
         with pytest.raises(PaymentRequiredError):
             await check_balance("user-123", "openai/gpt-4o", mock_db)
 
-    async def test_unknown_model_treated_as_paid(self, mock_db):
-        """Model not in model_prices defaults to paid — requires balance."""
-        from app.usage.balance import check_balance
-        from app.exceptions import PaymentRequiredError
-
-        mock_db.execute.side_effect = [
-            make_execute_result(rows=None),               # model not found
-            make_execute_result(rows=[(Decimal("0"),)]),  # zero balance
-        ]
-
-        with pytest.raises(PaymentRequiredError):
-            await check_balance("user-123", "unknown/model-x", mock_db)
-
-    async def test_unknown_model_with_positive_balance_passes(self, mock_db):
-        """Unknown model + positive balance → allowed."""
+    async def test_unknown_model_is_allowed(self, mock_db):
+        """Model not in model_prices is allowed through — admin hasn't priced it yet."""
         from app.usage.balance import check_balance
 
-        mock_db.execute.side_effect = [
-            make_execute_result(rows=None),
-            make_execute_result(rows=[(Decimal("10.00"),)]),
-        ]
+        mock_db.execute.return_value = make_execute_result(rows=None)  # not in table
 
+        # Should not raise even with zero balance — only one execute call (price lookup)
         await check_balance("user-123", "unknown/model-x", mock_db)
+        assert mock_db.execute.call_count == 1
 
     async def test_no_balance_row_treated_as_zero(self, mock_db):
-        """User with no balance row → treated as $0 → blocked for paid model."""
+        """User with no balance row → treated as $0 → blocked for explicitly paid model."""
         from app.usage.balance import check_balance
         from app.exceptions import PaymentRequiredError
 
         mock_db.execute.side_effect = [
-            make_execute_result(rows=[(False,)]),  # paid model
-            make_execute_result(rows=None),         # no balance row
+            make_execute_result(rows=[(False,)]),  # model in table, is_free=False
+            make_execute_result(rows=None),         # no balance row → zero
         ]
 
         with pytest.raises(PaymentRequiredError):

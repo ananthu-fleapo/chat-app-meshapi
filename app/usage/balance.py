@@ -36,14 +36,20 @@ logger = structlog.get_logger()
 
 
 async def _is_model_free(model: str, db: AsyncSession) -> bool:
-    """Return True when the model is flagged as free in model_prices."""
+    """
+    Return True when the model should not be billed.
+
+    - is_free=True in model_prices → free
+    - not in model_prices → free (no price configured = no charge)
+    - is_free=False in model_prices → paid, requires balance
+    """
     result = await db.execute(
         select(ModelPrice.is_free).where(ModelPrice.model_id == model)
     )
     row = result.one_or_none()
     if row is None:
-        # Model not in our price table — treat as paid (safe default).
-        return False
+        # Model not in price table — allow through (admin hasn't priced it yet).
+        return True
     return row[0]
 
 

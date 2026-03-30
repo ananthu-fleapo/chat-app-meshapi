@@ -68,9 +68,6 @@ async def chat_completions(
     if key.spend_cap_usd is not None:
         await check_spend_cap(str(key.id), key.spend_cap_usd, db)
 
-    # ── Balance check (account-level, paid models only) ───────────────────────
-    await check_balance(key.owner, raw_body.model or "", db)
-
     # ── Phase 4: Template resolution + rendering ──────────────────────────────
     template = None
     rendered_messages = None
@@ -79,7 +76,11 @@ async def chat_completions(
         rendered_messages = render_template(template, raw_body.variables)
 
     # ── Phase 2: Resolve model + params ───────────────────────────────────────
+    # Must happen before balance check so we have the final resolved model name.
     body = resolve_config(raw_body, key, template, rendered_messages)
+
+    # ── Balance check (account-level, paid models only) ───────────────────────
+    await check_balance(key.owner, body.model, db)
 
     log = logger.bind(
         model=body.model,
