@@ -33,7 +33,14 @@
       "Bash(python3.12 -m venv .venv --quiet)",
       "Bash(python3.12 -m venv .venv)",
       "Bash(.venv/bin/python -m pytest tests/ -v)",
-      "Bash(.venv/bin/python -m pytest tests/ -q)"
+      "Bash(.venv/bin/python -m pytest tests/ -q)",
+      "Bash(python -m pytest tests/test_pricing.py tests/test_template_renderer.py tests/test_config_resolver.py tests/test_auth_dependencies.py tests/test_spend_cap.py tests/test_rate_limiter.py tests/test_usage_logger.py tests/test_template_resolver.py -v)",
+      "Bash(python3 -m pytest tests/test_pricing.py tests/test_template_renderer.py tests/test_config_resolver.py tests/test_auth_dependencies.py tests/test_spend_cap.py tests/test_rate_limiter.py tests/test_usage_logger.py tests/test_template_resolver.py -v)",
+      "Bash(uv run:*)",
+      "Bash(/Users/aifiesta/Downloads/code/routersvc/.venv/bin/pytest tests/test_pricing.py tests/test_template_renderer.py tests/test_config_resolver.py tests/test_auth_dependencies.py tests/test_spend_cap.py tests/test_rate_limiter.py tests/test_usage_logger.py tests/test_template_resolver.py -v)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(ls /Users/aifiesta/Downloads/code/routersvc/.git/*.lock)"
     ]
   }
 }
