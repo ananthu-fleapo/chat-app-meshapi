@@ -88,6 +88,12 @@ class ChatCompletionRequest(BaseModel):
     # `models` — ordered fallback list if primary model is unavailable
     models: list[str] | None = None
 
+    # ── OpenAI-compatible tracking field ──────────────────────────────────────
+    # Clients (e.g. OpenAI SDK) may send this for abuse-detection tracking.
+    # Enforced to 256 chars here so oversized values 422 at our layer, not 400
+    # from OpenRouter. Our code sets a default via setdefault if not provided.
+    user: str | None = Field(default=None, max_length=256)
+
 
 # ── Response ──────────────────────────────────────────────────────────────────
 

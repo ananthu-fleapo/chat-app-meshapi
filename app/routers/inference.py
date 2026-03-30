@@ -151,12 +151,12 @@ async def chat_completions(
             except Exception as exc:
                 status = "error"
                 error_code_val = getattr(exc, "error_code", "upstream_error")
-                log.error(
-                    "stream_error",
-                    error_code=error_code_val,
-                    error=str(exc),
-                )
-                raise
+                msg = getattr(exc, "message", "An upstream error occurred.")
+                log.error("stream_error", error_code=error_code_val, error=str(exc))
+                # Headers (200 + text/event-stream) already sent — can't change
+                # status code. Yield an SSE error frame so clients can handle it.
+                err_payload = json.dumps({"error": {"code": error_code_val, "message": msg}})
+                yield f"data: {err_payload}\n\ndata: [DONE]\n\n".encode()
 
             finally:
                 latency_ms = int((time.monotonic() - start) * 1000)

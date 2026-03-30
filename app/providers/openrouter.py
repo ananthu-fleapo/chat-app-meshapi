@@ -129,9 +129,7 @@ class OpenRouterAdapter(ProviderAdapter):
         except httpx.HTTPStatusError as exc:
             body = exc.response.text[:300]
             log.warning("upstream_http_error", status=exc.response.status_code, body=body)
-            raise UpstreamError(
-                f"Upstream returned {exc.response.status_code}: {body}"
-            ) from exc
+            raise UpstreamError() from exc
 
         except httpx.TimeoutException as exc:
             log.warning("upstream_timeout", model=request.model)
@@ -159,9 +157,7 @@ class OpenRouterAdapter(ProviderAdapter):
                     await response.aread()
                     body = response.text[:300]
                     log.warning("upstream_stream_error", status=response.status_code, body=body)
-                    raise UpstreamError(
-                        f"Upstream returned {response.status_code}: {body}"
-                    )
+                    raise UpstreamError()
 
                 log.debug("upstream_stream_open")
                 async for chunk in response.aiter_raw():
