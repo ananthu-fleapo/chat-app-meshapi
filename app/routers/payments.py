@@ -36,10 +36,10 @@ logger = structlog.get_logger()
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
 
 class PaymentRequest(BaseModel):
-    user_id: str
-    payment_id: str
+    userId: str
+    paymentId: str
     provider: str
-    order_id: str | None = None
+    orderId: str | None = None
     currency: str | None = None
     amount: int | None = None
 
@@ -112,8 +112,8 @@ async def create_payment(
 
     logger.info(
         "payment_received",
-        user_id=body.user_id,
-        payment_id=body.payment_id,
+        user_id=body.userId,
+        payment_id=body.paymentId,
         provider=body.provider,
     )
 
@@ -130,8 +130,8 @@ async def create_payment(
                 logger.warning(
                     "payment_currency_rate_missing",
                     currency=currency,
-                    user_id=body.user_id,
-                    payment_id=body.payment_id,
+                    user_id=body.userId,
+                    payment_id=body.paymentId,
                 )
                 raise HTTPException(
                     status_code=422,
@@ -146,14 +146,14 @@ async def create_payment(
                 rate=str(rate_row.rate),
                 amount_original=body.amount,
                 amount_usd=str(amount_usd),
-                user_id=body.user_id,
+                user_id=body.userId,
             )
 
     event = PaymentEvent(
-        user_id=body.user_id,
-        payment_id=body.payment_id,
+        user_id=body.userId,
+        payment_id=body.paymentId,
         provider=body.provider,
-        order_id=body.order_id,
+        order_id=body.orderId,
         currency=body.currency,
         amount=body.amount,
     )
@@ -161,7 +161,7 @@ async def create_payment(
     await db.flush()
 
     if amount_usd is not None and amount_usd > 0:
-        await credit_balance(body.user_id, amount_usd, db)
+        await credit_balance(body.userId, amount_usd, db)
 
     return {"received": True}
 
