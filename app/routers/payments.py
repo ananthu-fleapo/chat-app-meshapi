@@ -25,7 +25,7 @@ from decimal import Decimal
 
 from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
 from app.auth.dependencies import verify_webhook_key
-from app.db.models import PaymentEvent
+from app.db.models import CurrencyConversionRate, PaymentEvent, UserBalance
 from app.db.session import get_db_session
 from app.usage.balance import credit_balance
 
@@ -61,6 +61,7 @@ class PaymentOut(BaseModel):
 
 class BillingDataOut(BaseModel):
     totalSpent: int
+    balanceUsd: float
 
 
 class PendingImporterPaymentOut(BaseModel):
@@ -121,6 +122,38 @@ async def create_payment(
         provider=body.provider,
     )
 
+    # Resolve conversion rate and compute USD amount before persisting.
+    amount_usd: Decimal | None = None
+    if body.amount and body.amount > 0:
+        currency = (body.currency or "USD").upper()
+        if currency == "USD":
+            # Amount is in cents; normalize to dollars.
+            amount_usd = Decimal(body.amount) / 100
+        else:
+            rate_row = await db.get(CurrencyConversionRate, currency)
+            if rate_row is None:
+                logger.warning(
+                    "payment_currency_rate_missing",
+                    currency=currency,
+                    user_id=body.userId,
+                    payment_id=body.paymentId,
+                )
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"No conversion rate found for currency '{currency}'",
+                )
+            # Amount is in the smallest unit (e.g. paise for INR).
+            # Divide by 100 to get major units, then multiply by rate to get USD.
+            amount_usd = (Decimal(body.amount) / 100) * rate_row.rate
+            logger.info(
+                "payment_currency_converted",
+                currency=currency,
+                rate=str(rate_row.rate),
+                amount_original=body.amount,
+                amount_usd=str(amount_usd),
+                user_id=body.userId,
+            )
+
     event = PaymentEvent(
         user_id=body.userId,
         payment_id=body.paymentId,
@@ -132,9 +165,7 @@ async def create_payment(
     db.add(event)
     await db.flush()
 
-    # Credit user balance — amount is in cents (USD), normalize to dollars.
-    if body.amount and body.amount > 0:
-        amount_usd = Decimal(body.amount) / 100
+    if amount_usd is not None and amount_usd > 0:
         await credit_balance(body.userId, amount_usd, db)
 
     return {"received": True}
@@ -174,15 +205,23 @@ async def get_billing_data(
 
     Auth: Authorization: Bearer <Supabase JWT>
     """
-    result = await db.execute(
+    total_result = await db.execute(
         select(func.coalesce(func.sum(PaymentEvent.amount), 0)).where(
             PaymentEvent.user_id == identity.sub
         )
     )
-    total = result.scalar_one()
+    total = total_result.scalar_one()
 
-    logger.info("billing_data_fetched", user_id=identity.sub, total_spent=total)
-    return BillingDataOut(totalSpent=total)
+    balance_row = await db.get(UserBalance, identity.sub)
+    balance_usd = float(balance_row.balance_usd) if balance_row else 0.0
+
+    logger.info(
+        "billing_data_fetched",
+        user_id=identity.sub,
+        total_spent=total,
+        balance_usd=balance_usd,
+    )
+    return BillingDataOut(totalSpent=total, balanceUsd=balance_usd)
 
 
 @router.get("/pending-importer", response_model=list[PendingImporterPaymentOut])

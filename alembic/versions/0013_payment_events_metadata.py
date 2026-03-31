@@ -1,7 +1,7 @@
 """Add metadata column to payment_events
 
-Revision ID: 0011
-Revises: 0010
+Revision ID: 0013
+Revises: 0012
 Create Date: 2026-03-31
 """
 
@@ -11,16 +11,17 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision: str = "0011"
-down_revision: str | None = "0010"
+revision: str = "0013"
+down_revision: str | None = "0012"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "payment_events",
-        sa.Column("metadata", JSONB, nullable=True),
+    op.execute(
+        sa.text(
+            "ALTER TABLE payment_events ADD COLUMN IF NOT EXISTS metadata JSONB"
+        )
     )
 
 
