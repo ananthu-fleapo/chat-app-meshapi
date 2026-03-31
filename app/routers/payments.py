@@ -12,11 +12,14 @@ POST  /v1/payments               Ingest a payment event from a payment provider 
 GET   /v1/payments/{user_id}     List all payment events for a given user.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from decimal import Decimal
 
@@ -60,6 +63,18 @@ class BillingDataOut(BaseModel):
     totalSpent: int
 
 
+class PendingImporterPaymentOut(BaseModel):
+    id: str
+    userId: str
+    paymentId: str
+    orderId: str | None
+    createdAt: str
+
+
+class MetadataUpdateRequest(BaseModel):
+    metadata: dict
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _to_out(event: PaymentEvent) -> PaymentEventOut:
@@ -71,6 +86,16 @@ def _to_out(event: PaymentEvent) -> PaymentEventOut:
         orderId=event.order_id,
         currency=event.currency,
         amount=event.amount,
+        createdAt=event.created_at.isoformat(),
+    )
+
+
+def _to_pending_importer_out(event: PaymentEvent) -> PendingImporterPaymentOut:
+    return PendingImporterPaymentOut(
+        id=str(event.id),
+        userId=event.user_id,
+        paymentId=event.payment_id,
+        orderId=event.order_id,
         createdAt=event.created_at.isoformat(),
     )
 
@@ -158,3 +183,68 @@ async def get_billing_data(
 
     logger.info("billing_data_fetched", user_id=identity.sub, total_spent=total)
     return BillingDataOut(totalSpent=total)
+
+
+@router.get("/pending-importer", response_model=list[PendingImporterPaymentOut])
+async def list_pending_importer_payments(
+    db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(verify_webhook_key),
+):
+    """
+    Return cashfree payment events for which importer details have not yet been submitted.
+
+    Scoped to events created within the last 7 days but at least 5 minutes old,
+    mirroring the time window used by the subscription/addon importer cron.
+
+    Auth: Authorization: Bearer <WEBHOOK_API_KEY>
+    """
+    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    five_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+    result = await db.execute(
+        select(PaymentEvent)
+        .where(PaymentEvent.provider == "cashfree")
+        .where(
+            or_(
+                PaymentEvent.payment_metadata.is_(None),
+                PaymentEvent.payment_metadata["cashfree_importer_details_submitted"].is_(None),
+            )
+        )
+        .where(PaymentEvent.created_at >= seven_days_ago)
+        .where(PaymentEvent.created_at <= five_minutes_ago)
+        .order_by(PaymentEvent.created_at.asc())
+    )
+    events = result.scalars().all()
+
+    logger.info("pending_importer_payments_listed", count=len(events))
+    return [_to_pending_importer_out(e) for e in events]
+
+
+@router.patch("/{payment_id}/metadata", response_model=PaymentOut)
+async def update_payment_metadata(
+    payment_id: str,
+    body: MetadataUpdateRequest,
+    db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(verify_webhook_key),
+):
+    """
+    Merge the supplied metadata dict into the existing metadata of a payment event.
+
+    Identified by payment_id (the provider-side payment / transaction ID).
+
+    Auth: Authorization: Bearer <WEBHOOK_API_KEY>
+    """
+    result = await db.execute(
+        select(PaymentEvent).where(PaymentEvent.payment_id == payment_id)
+    )
+    event = result.scalar_one_or_none()
+
+    if event is None:
+        raise HTTPException(status_code=404, detail="Payment event not found")
+
+    merged = {**(event.payment_metadata or {}), **body.metadata}
+    event.payment_metadata = merged
+    flag_modified(event, "payment_metadata")
+
+    logger.info("payment_metadata_updated", payment_id=payment_id)
+    return {"received": True}
