@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -25,7 +25,7 @@ from decimal import Decimal
 
 from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
 from app.auth.dependencies import verify_webhook_key
-from app.db.models import CurrencyConversionRate, PaymentEvent, UserBalance
+from app.db.models import CurrencyConversionRate, PaymentEvent
 from app.db.session import get_db_session
 from app.usage.balance import credit_balance
 
@@ -36,23 +36,23 @@ logger = structlog.get_logger()
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
 
 class PaymentRequest(BaseModel):
-    userId: str
-    paymentId: str
+    user_id: str
+    payment_id: str
     provider: str
-    orderId: str | None = None
+    order_id: str | None = None
     currency: str | None = None
     amount: int | None = None
 
 
 class PaymentEventOut(BaseModel):
     id: str
-    userId: str
-    paymentId: str
+    user_id: str
+    payment_id: str
     provider: str
-    orderId: str | None
+    order_id: str | None
     currency: str | None
     amount: int | None
-    createdAt: str
+    created_at: str
 
 
 class PaymentOut(BaseModel):
@@ -61,10 +61,10 @@ class PaymentOut(BaseModel):
 
 class PendingImporterPaymentOut(BaseModel):
     id: str
-    userId: str
-    paymentId: str
-    orderId: str | None
-    createdAt: str
+    user_id: str
+    payment_id: str
+    order_id: str | None
+    created_at: str
 
 
 class MetadataUpdateRequest(BaseModel):
@@ -76,23 +76,23 @@ class MetadataUpdateRequest(BaseModel):
 def _to_out(event: PaymentEvent) -> PaymentEventOut:
     return PaymentEventOut(
         id=str(event.id),
-        userId=event.user_id,
-        paymentId=event.payment_id,
+        user_id=event.user_id,
+        payment_id=event.payment_id,
         provider=event.provider,
-        orderId=event.order_id,
+        order_id=event.order_id,
         currency=event.currency,
         amount=event.amount,
-        createdAt=event.created_at.isoformat(),
+        created_at=event.created_at.isoformat(),
     )
 
 
 def _to_pending_importer_out(event: PaymentEvent) -> PendingImporterPaymentOut:
     return PendingImporterPaymentOut(
         id=str(event.id),
-        userId=event.user_id,
-        paymentId=event.payment_id,
-        orderId=event.order_id,
-        createdAt=event.created_at.isoformat(),
+        user_id=event.user_id,
+        payment_id=event.payment_id,
+        order_id=event.order_id,
+        created_at=event.created_at.isoformat(),
     )
 
 
@@ -112,8 +112,8 @@ async def create_payment(
 
     logger.info(
         "payment_received",
-        user_id=body.userId,
-        payment_id=body.paymentId,
+        user_id=body.user_id,
+        payment_id=body.payment_id,
         provider=body.provider,
     )
 
@@ -130,8 +130,8 @@ async def create_payment(
                 logger.warning(
                     "payment_currency_rate_missing",
                     currency=currency,
-                    user_id=body.userId,
-                    payment_id=body.paymentId,
+                    user_id=body.user_id,
+                    payment_id=body.payment_id,
                 )
                 raise HTTPException(
                     status_code=422,
@@ -146,14 +146,14 @@ async def create_payment(
                 rate=str(rate_row.rate),
                 amount_original=body.amount,
                 amount_usd=str(amount_usd),
-                user_id=body.userId,
+                user_id=body.user_id,
             )
 
     event = PaymentEvent(
-        user_id=body.userId,
-        payment_id=body.paymentId,
+        user_id=body.user_id,
+        payment_id=body.payment_id,
         provider=body.provider,
-        order_id=body.orderId,
+        order_id=body.order_id,
         currency=body.currency,
         amount=body.amount,
     )
@@ -161,7 +161,7 @@ async def create_payment(
     await db.flush()
 
     if amount_usd is not None and amount_usd > 0:
-        await credit_balance(body.userId, amount_usd, db)
+        await credit_balance(body.user_id, amount_usd, db)
 
     return {"received": True}
 
