@@ -195,31 +195,11 @@ async def _apply_discounts(
     """
     Enrich each model's pricing with the caller's active discount.
 
-    Looks up account-level discount once, then checks model-level per model.
-    Model-level takes priority over account-level (non-stackable).
-    Free models are skipped — no discount needed when price is already zero.
+    Uses get_active_discount which handles precedence, expiry warnings,
+    and temporal validity — model-level overrides account-level (non-stackable).
+    Free models are skipped.
     """
     from app.usage.balance import get_active_discount
-
-    # Pre-fetch account-level discount (single DB call)
-    account_discount = await get_active_discount(owner, "__account__", db)
-    # get_active_discount with a dummy model falls through to account-level
-    # Fetch it directly instead:
-    from datetime import UTC, datetime
-    from app.db.models import Discount
-    from sqlalchemy import select as sa_select
-
-    now = datetime.now(UTC)
-    acct_row = await db.execute(
-        sa_select(Discount.discount_pct).where(
-            Discount.user_id == owner,
-            Discount.model_id.is_(None),
-            Discount.is_active.is_(True),
-            Discount.valid_from <= now,
-        ).limit(1)
-    )
-    acct_discount_row = acct_row.one_or_none()
-    account_pct = Decimal(str(acct_discount_row[0])) if acct_discount_row else None
 
     result = []
     for m in models:
@@ -227,25 +207,14 @@ async def _apply_discounts(
             result.append(m)
             continue
 
-        # Check model-level discount first
-        model_row = await db.execute(
-            sa_select(Discount.discount_pct).where(
-                Discount.user_id == owner,
-                Discount.model_id == m.id,
-                Discount.is_active.is_(True),
-                Discount.valid_from <= now,
-            ).limit(1)
-        )
-        model_row_val = model_row.one_or_none()
-        pct = Decimal(str(model_row_val[0])) if model_row_val else account_pct
-
+        pct = await get_active_discount(owner, m.id, db)
         if pct is None:
             result.append(m)
             continue
 
-        # Apply discount to pricing fields
         multiplier = 1 - pct / 100
-        def _discount(val: str | None) -> str | None:
+
+        def _discounted(val: str | None) -> str | None:
             if val is None:
                 return None
             try:
@@ -254,8 +223,8 @@ async def _apply_discounts(
                 return val
 
         m.pricing.discount_pct = str(pct)
-        m.pricing.prompt_usd_per_1k_discounted = _discount(m.pricing.prompt_usd_per_1k)
-        m.pricing.completion_usd_per_1k_discounted = _discount(m.pricing.completion_usd_per_1k)
+        m.pricing.prompt_usd_per_1k_discounted = _discounted(m.pricing.prompt_usd_per_1k)
+        m.pricing.completion_usd_per_1k_discounted = _discounted(m.pricing.completion_usd_per_1k)
         result.append(m)
 
     return result

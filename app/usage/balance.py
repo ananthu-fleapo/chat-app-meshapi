@@ -116,43 +116,54 @@ async def get_active_discount(owner: str, model: str, db: AsyncSession) -> Decim
       1. Model-level discount  (user_id=owner, model_id=model)
       2. Account-level discount (user_id=owner, model_id=NULL)
 
-    A discount is active when:
-      - is_active = True
-      - valid_from <= now
-      - valid_until IS NULL OR valid_until >= now
+    Expired discounts (valid_until < now) log a warning and are skipped —
+    the caller deducts the full charge with no error raised.
     """
     now = datetime.now(UTC)
 
-    for model_filter in [model, None]:
-        condition = [
-            Discount.user_id == owner,
-            Discount.is_active.is_(True),
-            Discount.valid_from <= now,
-        ]
+    for scope, model_filter in [("model", model), ("account", None)]:
         if model_filter is not None:
-            condition.append(Discount.model_id == model_filter)
+            model_condition = Discount.model_id == model_filter
         else:
-            condition.append(Discount.model_id.is_(None))
+            model_condition = Discount.model_id.is_(None)
 
         result = await db.execute(
-            select(Discount.discount_pct).where(*condition).limit(1)
-        )
-        row = result.one_or_none()
-        if row is not None:
-            # Check valid_until in Python (handles None cleanly)
-            discount_row = await db.execute(
-                select(Discount).where(*condition).limit(1)
+            select(Discount)
+            .where(
+                Discount.user_id == owner,
+                Discount.is_active.is_(True),
+                model_condition,
             )
-            d = discount_row.scalar_one_or_none()
-            if d and (d.valid_until is None or d.valid_until.replace(tzinfo=UTC) >= now):
-                logger.debug(
-                    "discount_applied",
-                    owner=owner,
-                    model=model,
-                    scope="model" if model_filter else "account",
-                    pct=str(d.discount_pct),
-                )
-                return d.discount_pct
+            .limit(1)
+        )
+        d = result.scalar_one_or_none()
+        if d is None:
+            continue
+
+        # Discount exists — check temporal validity
+        if d.valid_from.replace(tzinfo=UTC) > now:
+            continue  # Not yet active
+
+        if d.valid_until is not None and d.valid_until.replace(tzinfo=UTC) < now:
+            logger.warning(
+                "discount_expired",
+                owner=owner,
+                model=model,
+                scope=scope,
+                discount_id=str(d.id),
+                expired_at=d.valid_until.isoformat(),
+                hint="Deducting full charge — update or deactivate the discount",
+            )
+            continue  # Expired — full charge, no error
+
+        logger.debug(
+            "discount_applied",
+            owner=owner,
+            model=model,
+            scope=scope,
+            pct=str(d.discount_pct),
+        )
+        return d.discount_pct
 
     return None
 
