@@ -99,6 +99,17 @@ async def log_usage_event(
     if prompt_tokens is not None and completion_tokens is not None:
         cost = await _our_cost(model, prompt_tokens, completion_tokens)
 
+    # ── Apply discount if one is active for this owner + model ───────────────
+    if cost is not None and cost > 0:
+        try:
+            async with get_session_factory()() as _disc_session:
+                from app.usage.balance import get_active_discount
+                discount_pct = await get_active_discount(owner, model, _disc_session)
+            if discount_pct:
+                cost = (cost * (1 - discount_pct / 100)).quantize(Decimal("0.00000001"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("discount_lookup_failed", owner=owner, model=model, error=str(exc))
+
     try:
         async with get_session_factory()() as session:
             event = UsageEvent(

@@ -26,10 +26,12 @@ import httpx
 import structlog
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
 from app.cache.redis_client import get_redis
 from app.config import settings
+from app.db.session import get_db_session
 
 router = APIRouter(tags=["models"])
 logger = structlog.get_logger()
@@ -41,9 +43,13 @@ _MODELS_CACHE_TTL = 300  # seconds — refresh every 5 minutes
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
 
 class ModelPricing(BaseModel):
-    prompt_usd_per_1k: str | None   # "0.000005" → multiply by 1 000
+    prompt_usd_per_1k: str | None
     completion_usd_per_1k: str | None
     image_usd_per_image: str | None = None
+    # Set when caller has an active discount for this model
+    discount_pct: str | None = None
+    prompt_usd_per_1k_discounted: str | None = None
+    completion_usd_per_1k_discounted: str | None = None
 
 
 class ModelOut(BaseModel):
@@ -181,25 +187,96 @@ async def _get_models() -> list[ModelOut]:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+async def _apply_discounts(
+    models: list[ModelOut],
+    owner: str,
+    db: AsyncSession,
+) -> list[ModelOut]:
+    """
+    Enrich each model's pricing with the caller's active discount.
+
+    Looks up account-level discount once, then checks model-level per model.
+    Model-level takes priority over account-level (non-stackable).
+    Free models are skipped — no discount needed when price is already zero.
+    """
+    from app.usage.balance import get_active_discount
+
+    # Pre-fetch account-level discount (single DB call)
+    account_discount = await get_active_discount(owner, "__account__", db)
+    # get_active_discount with a dummy model falls through to account-level
+    # Fetch it directly instead:
+    from datetime import UTC, datetime
+    from app.db.models import Discount
+    from sqlalchemy import select as sa_select
+
+    now = datetime.now(UTC)
+    acct_row = await db.execute(
+        sa_select(Discount.discount_pct).where(
+            Discount.user_id == owner,
+            Discount.model_id.is_(None),
+            Discount.is_active.is_(True),
+            Discount.valid_from <= now,
+        ).limit(1)
+    )
+    acct_discount_row = acct_row.one_or_none()
+    account_pct = Decimal(str(acct_discount_row[0])) if acct_discount_row else None
+
+    result = []
+    for m in models:
+        if m.is_free:
+            result.append(m)
+            continue
+
+        # Check model-level discount first
+        model_row = await db.execute(
+            sa_select(Discount.discount_pct).where(
+                Discount.user_id == owner,
+                Discount.model_id == m.id,
+                Discount.is_active.is_(True),
+                Discount.valid_from <= now,
+            ).limit(1)
+        )
+        model_row_val = model_row.one_or_none()
+        pct = Decimal(str(model_row_val[0])) if model_row_val else account_pct
+
+        if pct is None:
+            result.append(m)
+            continue
+
+        # Apply discount to pricing fields
+        multiplier = 1 - pct / 100
+        def _discount(val: str | None) -> str | None:
+            if val is None:
+                return None
+            try:
+                return str((Decimal(val) * multiplier).quantize(Decimal("0.00000001")))
+            except InvalidOperation:
+                return val
+
+        m.pricing.discount_pct = str(pct)
+        m.pricing.prompt_usd_per_1k_discounted = _discount(m.pricing.prompt_usd_per_1k)
+        m.pricing.completion_usd_per_1k_discounted = _discount(m.pricing.completion_usd_per_1k)
+        result.append(m)
+
+    return result
+
+
 @router.get("/v1/models", response_model=list[ModelOut])
 async def list_models(
     free: bool | None = Query(
         default=None,
         description="Filter: true = free models only, false = paid only, omit = all",
     ),
-    # Control plane auth — requires a valid Supabase session JWT.
-    # Keeps model listing off the data plane (rsk_ keys are for inference only).
-    _identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """
-    List available models.
+    List available models with per-user discounted pricing when applicable.
 
     Requires a valid dashboard session (Supabase JWT).
     Includes pricing per 1 000 tokens and a convenience ``is_free`` flag.
-    Response is cached for 5 minutes — stale data is preferred over
-    returning an error if the upstream provider is temporarily unreachable.
-
-    Use ``?free=true`` for free-only models, ``?free=false`` for paid-only.
+    If the caller has an active discount, discounted prices are included.
+    Response is cached for 5 minutes.
     """
     models = await _get_models()
 
@@ -208,22 +285,24 @@ async def list_models(
     elif free is False:
         models = [m for m in models if not m.is_free]
 
-    return models
+    return await _apply_discounts(models, identity.owner, db)
 
 
 @router.get("/v1/models/free", response_model=list[ModelOut])
 async def list_free_models(
-    _identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """Shortcut: list only models with zero prompt + completion cost."""
-    models = await _get_models()
-    return [m for m in models if m.is_free]
+    models = [m for m in await _get_models() if m.is_free]
+    return await _apply_discounts(models, identity.owner, db)
 
 
 @router.get("/v1/models/paid", response_model=list[ModelOut])
 async def list_paid_models(
-    _identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """Shortcut: list only models that have a non-zero cost."""
-    models = await _get_models()
-    return [m for m in models if not m.is_free]
+    models = [m for m in await _get_models() if not m.is_free]
+    return await _apply_discounts(models, identity.owner, db)

@@ -28,8 +28,10 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datetime import UTC, datetime
+
 from app.db.engine import get_session_factory
-from app.db.models import ModelPrice, UserBalance
+from app.db.models import Discount, ModelPrice, UserBalance
 from app.exceptions import PaymentRequiredError
 
 logger = structlog.get_logger()
@@ -104,6 +106,55 @@ async def deduct_balance(owner: str, cost_usd: Decimal) -> None:
         logger.debug("balance_deducted", owner=owner, cost_usd=str(cost_usd))
     except Exception as exc:  # noqa: BLE001
         logger.error("balance_deduct_failed", owner=owner, cost_usd=str(cost_usd), error=str(exc))
+
+
+async def get_active_discount(owner: str, model: str, db: AsyncSession) -> Decimal | None:
+    """
+    Return the discount_pct for this owner + model, or None if no active discount.
+
+    Precedence (non-stackable):
+      1. Model-level discount  (user_id=owner, model_id=model)
+      2. Account-level discount (user_id=owner, model_id=NULL)
+
+    A discount is active when:
+      - is_active = True
+      - valid_from <= now
+      - valid_until IS NULL OR valid_until >= now
+    """
+    now = datetime.now(UTC)
+
+    for model_filter in [model, None]:
+        condition = [
+            Discount.user_id == owner,
+            Discount.is_active.is_(True),
+            Discount.valid_from <= now,
+        ]
+        if model_filter is not None:
+            condition.append(Discount.model_id == model_filter)
+        else:
+            condition.append(Discount.model_id.is_(None))
+
+        result = await db.execute(
+            select(Discount.discount_pct).where(*condition).limit(1)
+        )
+        row = result.one_or_none()
+        if row is not None:
+            # Check valid_until in Python (handles None cleanly)
+            discount_row = await db.execute(
+                select(Discount).where(*condition).limit(1)
+            )
+            d = discount_row.scalar_one_or_none()
+            if d and (d.valid_until is None or d.valid_until.replace(tzinfo=UTC) >= now):
+                logger.debug(
+                    "discount_applied",
+                    owner=owner,
+                    model=model,
+                    scope="model" if model_filter else "account",
+                    pct=str(d.discount_pct),
+                )
+                return d.discount_pct
+
+    return None
 
 
 async def credit_balance(user_id: str, amount_usd: Decimal, db: AsyncSession) -> None:

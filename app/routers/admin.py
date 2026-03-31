@@ -36,7 +36,7 @@ from ulid import ULID
 
 from app.cache.key_cache import invalidate_cached_key
 from app.config import settings
-from app.db.models import ApiKey, ModelPrice, ProviderKey, UsageEvent
+from app.db.models import ApiKey, Discount, ModelPrice, ProviderKey, UsageEvent, UserBalance
 from app.db.session import get_db_session
 from app.exceptions import ForbiddenError, NotFoundError
 from app.providers.provisioner import (
@@ -795,3 +795,250 @@ async def seed_model_prices(
     await db.commit()
     logger.info("model_prices_seeded", count=len(seeded_ids), skipped=skipped, overwrite=overwrite)
     return SeedPricesResponse(seeded=len(seeded_ids), skipped=skipped, models=seeded_ids)
+
+
+# ── Discounts ─────────────────────────────────────────────────────────────────
+
+class DiscountIn(BaseModel):
+    user_id: str
+    model_id: str | None = None          # None = account-level
+    discount_pct: float                  # 0–100
+    valid_from: str | None = None        # ISO8601; defaults to now
+    valid_until: str | None = None       # ISO8601; None = no expiry
+    label: str | None = None
+
+
+class DiscountUpdateIn(BaseModel):
+    discount_pct: float | None = None
+    valid_from: str | None = None
+    valid_until: str | None = None
+    is_active: bool | None = None
+    label: str | None = None
+
+
+class DiscountOut(BaseModel):
+    id: str
+    user_id: str
+    model_id: str | None
+    discount_pct: str
+    valid_from: str
+    valid_until: str | None
+    is_active: bool
+    label: str | None
+    created_at: str
+
+
+def _to_discount_out(d: Discount) -> DiscountOut:
+    return DiscountOut(
+        id=str(d.id),
+        user_id=d.user_id,
+        model_id=d.model_id,
+        discount_pct=str(d.discount_pct),
+        valid_from=d.valid_from.isoformat(),
+        valid_until=d.valid_until.isoformat() if d.valid_until else None,
+        is_active=d.is_active,
+        label=d.label,
+        created_at=d.created_at.isoformat(),
+    )
+
+
+@router.post("/discounts", response_model=DiscountOut, status_code=201)
+async def create_discount(
+    body: DiscountIn,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Create a discount for a user. model_id=null = account-level (all models)."""
+    from datetime import UTC, datetime
+    from decimal import Decimal as D
+
+    if not (0 <= body.discount_pct <= 100):
+        raise HTTPException(status_code=422, detail="discount_pct must be between 0 and 100")
+
+    valid_from = datetime.fromisoformat(body.valid_from) if body.valid_from else datetime.now(UTC)
+    valid_until = datetime.fromisoformat(body.valid_until) if body.valid_until else None
+
+    d = Discount(
+        user_id=body.user_id,
+        model_id=body.model_id,
+        discount_pct=D(str(body.discount_pct)),
+        valid_from=valid_from,
+        valid_until=valid_until,
+        label=body.label,
+    )
+    db.add(d)
+    await db.flush()
+    await db.refresh(d)
+    logger.info("discount_created", user_id=body.user_id, model_id=body.model_id, pct=body.discount_pct)
+    return _to_discount_out(d)
+
+
+@router.get("/discounts", response_model=list[DiscountOut])
+async def list_discounts(
+    user_id: str | None = None,
+    model_id: str | None = None,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """List discounts. Filter by ?user_id= or ?model_id=."""
+    q = select(Discount).order_by(Discount.created_at.desc())
+    if user_id:
+        q = q.where(Discount.user_id == user_id)
+    if model_id:
+        q = q.where(Discount.model_id == model_id)
+    result = await db.execute(q)
+    return [_to_discount_out(d) for d in result.scalars().all()]
+
+
+@router.patch("/discounts/{discount_id}", response_model=DiscountOut)
+async def update_discount(
+    discount_id: str,
+    body: DiscountUpdateIn,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Update discount percentage, dates, active state, or label."""
+    import uuid as _uuid
+    from decimal import Decimal as D
+
+    result = await db.execute(select(Discount).where(Discount.id == _uuid.UUID(discount_id)))
+    d = result.scalar_one_or_none()
+    if d is None:
+        raise NotFoundError(f"Discount '{discount_id}' not found.")
+
+    if body.discount_pct is not None:
+        if not (0 <= body.discount_pct <= 100):
+            raise HTTPException(status_code=422, detail="discount_pct must be between 0 and 100")
+        d.discount_pct = D(str(body.discount_pct))
+    if body.valid_from is not None:
+        from datetime import datetime
+        d.valid_from = datetime.fromisoformat(body.valid_from)
+    if body.valid_until is not None:
+        from datetime import datetime
+        d.valid_until = datetime.fromisoformat(body.valid_until)
+    if body.is_active is not None:
+        d.is_active = body.is_active
+    if body.label is not None:
+        d.label = body.label
+
+    await db.flush()
+    await db.refresh(d)
+    logger.info("discount_updated", discount_id=discount_id)
+    return _to_discount_out(d)
+
+
+@router.delete("/discounts/{discount_id}", status_code=204)
+async def delete_discount(
+    discount_id: str,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Hard delete a discount."""
+    import uuid as _uuid
+    result = await db.execute(select(Discount).where(Discount.id == _uuid.UUID(discount_id)))
+    d = result.scalar_one_or_none()
+    if d is None:
+        raise NotFoundError(f"Discount '{discount_id}' not found.")
+    await db.delete(d)
+    logger.info("discount_deleted", discount_id=discount_id)
+
+
+# ── Balance monitoring ────────────────────────────────────────────────────────
+
+class BalanceSummary(BaseModel):
+    user_id: str
+    balance_usd: str
+    total_spent_usd: str
+    last_activity: str | None
+    updated_at: str
+
+
+class BalanceDetail(BaseModel):
+    user_id: str
+    balance_usd: str
+    updated_at: str
+    total_spent_usd: str
+    by_model: list[dict]   # [{model, requests, cost_usd}]
+
+
+@router.get("/balances", response_model=list[BalanceSummary])
+async def list_balances(db: AsyncSession = Depends(get_db_session)):
+    """
+    List all user balances with total spend and last activity.
+    Sorted by balance ascending (lowest first — easy to spot who needs top-up).
+    """
+    from sqlalchemy import cast, Float, literal_column, text as sa_text
+
+    rows = await db.execute(sa_text("""
+        SELECT
+            ub.user_id,
+            ub.balance_usd,
+            ub.updated_at,
+            COALESCE(SUM(ue.cost_usd), 0)  AS total_spent_usd,
+            MAX(ue.created_at)              AS last_activity
+        FROM user_balances ub
+        LEFT JOIN api_keys ak ON ak.owner = ub.user_id
+        LEFT JOIN usage_events ue ON ue.key_id = ak.id AND ue.status = 'success'
+        GROUP BY ub.user_id, ub.balance_usd, ub.updated_at
+        ORDER BY ub.balance_usd ASC
+    """))
+
+    return [
+        BalanceSummary(
+            user_id=r.user_id,
+            balance_usd=str(r.balance_usd),
+            total_spent_usd=str(r.total_spent_usd),
+            last_activity=r.last_activity.isoformat() if r.last_activity else None,
+            updated_at=r.updated_at.isoformat(),
+        )
+        for r in rows
+    ]
+
+
+@router.get("/balances/{user_id}", response_model=BalanceDetail)
+async def get_balance(user_id: str, db: AsyncSession = Depends(get_db_session)):
+    """
+    Detailed balance for a specific user: current balance + spend broken down by model.
+    """
+    from sqlalchemy import text as sa_text
+
+    balance_row = await db.execute(
+        select(UserBalance).where(UserBalance.user_id == user_id)
+    )
+    balance = balance_row.scalar_one_or_none()
+    if balance is None:
+        raise NotFoundError(f"No balance record found for user '{user_id}'.")
+
+    by_model_rows = await db.execute(sa_text("""
+        SELECT
+            ue.model,
+            COUNT(*)                        AS requests,
+            COALESCE(SUM(ue.cost_usd), 0)  AS cost_usd
+        FROM api_keys ak
+        JOIN usage_events ue ON ue.key_id = ak.id
+        WHERE ak.owner = :user_id AND ue.status = 'success'
+        GROUP BY ue.model
+        ORDER BY cost_usd DESC
+    """), {"user_id": user_id})
+
+    total_spent = sum(r.cost_usd for r in by_model_rows)
+
+    # Re-run (rows consumed above)
+    by_model_rows2 = await db.execute(sa_text("""
+        SELECT
+            ue.model,
+            COUNT(*)                        AS requests,
+            COALESCE(SUM(ue.cost_usd), 0)  AS cost_usd
+        FROM api_keys ak
+        JOIN usage_events ue ON ue.key_id = ak.id
+        WHERE ak.owner = :user_id AND ue.status = 'success'
+        GROUP BY ue.model
+        ORDER BY cost_usd DESC
+    """), {"user_id": user_id})
+
+    return BalanceDetail(
+        user_id=user_id,
+        balance_usd=str(balance.balance_usd),
+        updated_at=balance.updated_at.isoformat(),
+        total_spent_usd=str(total_spent),
+        by_model=[
+            {"model": r.model, "requests": r.requests, "cost_usd": str(r.cost_usd)}
+            for r in by_model_rows2
+        ],
+    )

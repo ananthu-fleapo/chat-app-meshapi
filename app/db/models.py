@@ -378,3 +378,45 @@ class PaymentEvent(Base):
             f"<PaymentEvent id={self.id} user_id={self.user_id!r} "
             f"payment_id={self.payment_id!r} provider={self.provider!r}>"
         )
+
+
+class Discount(Base):
+    """
+    Per-user discount applied before balance deduction.
+
+    Columns
+    -------
+    user_id       Matches ApiKey.owner — discount is owner-scoped.
+    model_id      NULL = account-level (all models).
+                  Set = model-level (this model only).
+                  Model-level takes priority over account-level (non-stackable).
+    discount_pct  Percentage reduction: 0.00–100.00.
+    valid_from    Discount becomes active at this timestamp.
+    valid_until   Discount expires at this timestamp. NULL = no expiry.
+    is_active     False = manually deactivated by admin.
+    label         Admin note e.g. "Q2 promo", "partner deal".
+    """
+
+    __tablename__ = "discounts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    model_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    discount_pct: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
+    valid_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        scope = f"model={self.model_id!r}" if self.model_id else "account-level"
+        return f"<Discount id={self.id} user={self.user_id!r} {scope} pct={self.discount_pct}>"
