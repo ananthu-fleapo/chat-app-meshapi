@@ -351,6 +351,7 @@ class PaymentEvent(Base):
     order_id         Provider-side order / invoice identifier.
     currency         ISO 4217 currency code (e.g. "USD", "EUR").
     amount           Charged amount in the smallest currency unit (e.g. cents).
+    metadata         Arbitrary provider-specific data (e.g. cashfree_importer_details_submitted).
     """
 
     __tablename__ = "payment_events"
@@ -366,6 +367,7 @@ class PaymentEvent(Base):
     order_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     currency: Mapped[str | None] = mapped_column(Text, nullable=True)
     amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payment_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
