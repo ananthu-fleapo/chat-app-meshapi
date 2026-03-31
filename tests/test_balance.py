@@ -2,17 +2,39 @@
 Unit tests for app/usage/balance.py
 
 Covers:
-  check_balance  — free model bypass, paid model pass/block, unknown model
-  deduct_balance — happy path, zero cost skip, DB error swallowed
-  credit_balance — new user insert, existing user increment
+  check_balance       — free model bypass, paid model pass/block, unknown model
+  deduct_balance      — happy path, zero cost skip, DB error swallowed
+  credit_balance      — new user insert, existing user increment
+  get_active_discount — model-level, account-level, priority, expiry warning,
+                        future valid_from, no-expiry (valid_until=None)
 """
 
 from decimal import Decimal
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from tests.conftest import make_execute_result
+
+
+def _make_discount(
+    discount_pct: Decimal = Decimal("10.00"),
+    valid_from_offset_days: int = -10,   # negative = past, positive = future
+    valid_until_offset_days: int | None = None,  # None = no expiry
+    model_id: str | None = "openai/gpt-4o",
+) -> MagicMock:
+    """Build a Discount-like mock with real datetime objects."""
+    d = MagicMock()
+    d.id = "discount-test-id"
+    d.discount_pct = discount_pct
+    d.model_id = model_id
+    d.valid_from = datetime.now(UTC) + timedelta(days=valid_from_offset_days)
+    if valid_until_offset_days is None:
+        d.valid_until = None
+    else:
+        d.valid_until = datetime.now(UTC) + timedelta(days=valid_until_offset_days)
+    return d
 
 
 # ── check_balance ─────────────────────────────────────────────────────────────
@@ -196,3 +218,126 @@ class TestCreditBalance:
         await credit_balance("user-123", Decimal("0.99"), mock_db)
 
         mock_db.execute.assert_called_once()
+
+
+# ── get_active_discount ───────────────────────────────────────────────────────
+
+class TestGetActiveDiscount:
+
+    async def test_no_discount_returns_none(self, mock_db):
+        """No discount row for model or account → returns None."""
+        from app.usage.balance import get_active_discount
+
+        mock_db.execute.return_value = make_execute_result(scalar=None)
+        result = await get_active_discount("owner", "openai/gpt-4o", mock_db)
+        assert result is None
+
+    async def test_active_model_level_discount_returned(self, mock_db):
+        """Active model-level discount → returns its discount_pct."""
+        from app.usage.balance import get_active_discount
+
+        discount = _make_discount(discount_pct=Decimal("20.00"), model_id="openai/gpt-4o")
+        mock_db.execute.return_value = make_execute_result(scalar=discount)
+
+        result = await get_active_discount("owner", "openai/gpt-4o", mock_db)
+        assert result == Decimal("20.00")
+
+    async def test_account_level_discount_used_when_no_model_level(self, mock_db):
+        """Model-level miss → falls through to account-level discount."""
+        from app.usage.balance import get_active_discount
+
+        account_discount = _make_discount(discount_pct=Decimal("5.00"), model_id=None)
+        mock_db.execute.side_effect = [
+            make_execute_result(scalar=None),            # model-level: miss
+            make_execute_result(scalar=account_discount),  # account-level: hit
+        ]
+
+        result = await get_active_discount("owner", "openai/gpt-4o", mock_db)
+        assert result == Decimal("5.00")
+
+    async def test_model_level_takes_priority_over_account_level(self, mock_db):
+        """Model-level hit → account-level is never queried."""
+        from app.usage.balance import get_active_discount
+
+        model_discount = _make_discount(discount_pct=Decimal("30.00"), model_id="openai/gpt-4o")
+        mock_db.execute.return_value = make_execute_result(scalar=model_discount)
+
+        result = await get_active_discount("owner", "openai/gpt-4o", mock_db)
+        assert result == Decimal("30.00")
+        # Only one DB call — stopped at model-level hit
+        assert mock_db.execute.call_count == 1
+
+    async def test_expired_discount_logs_warning_and_returns_none(self, mock_db):
+        """Expired discount (valid_until < now) → warning logged, returns None."""
+        from app.usage.balance import get_active_discount
+
+        expired = _make_discount(
+            discount_pct=Decimal("15.00"),
+            valid_from_offset_days=-30,
+            valid_until_offset_days=-1,   # expired yesterday
+        )
+        mock_db.execute.side_effect = [
+            make_execute_result(scalar=expired),  # model-level: expired
+            make_execute_result(scalar=None),     # account-level: no discount
+        ]
+
+        with patch("app.usage.balance.logger") as mock_logger:
+            result = await get_active_discount("owner", "openai/gpt-4o", mock_db)
+
+        assert result is None
+        mock_logger.warning.assert_called_once()
+        warning_call = mock_logger.warning.call_args[0][0]
+        assert warning_call == "discount_expired"
+
+    async def test_expired_model_level_falls_through_to_account_level(self, mock_db):
+        """Expired model-level discount → skips to account-level (which is active)."""
+        from app.usage.balance import get_active_discount
+
+        expired_model = _make_discount(
+            discount_pct=Decimal("25.00"),
+            valid_until_offset_days=-1,  # expired
+            model_id="openai/gpt-4o",
+        )
+        active_account = _make_discount(
+            discount_pct=Decimal("10.00"),
+            valid_until_offset_days=None,  # no expiry
+            model_id=None,
+        )
+        mock_db.execute.side_effect = [
+            make_execute_result(scalar=expired_model),
+            make_execute_result(scalar=active_account),
+        ]
+
+        with patch("app.usage.balance.logger"):
+            result = await get_active_discount("owner", "openai/gpt-4o", mock_db)
+
+        assert result == Decimal("10.00")
+
+    async def test_future_valid_from_skipped_silently(self, mock_db):
+        """Discount whose valid_from is in the future → skipped, no warning."""
+        from app.usage.balance import get_active_discount
+
+        future_discount = _make_discount(
+            discount_pct=Decimal("10.00"),
+            valid_from_offset_days=+5,  # starts 5 days from now
+        )
+        mock_db.execute.return_value = make_execute_result(scalar=future_discount)
+
+        with patch("app.usage.balance.logger") as mock_logger:
+            result = await get_active_discount("owner", "openai/gpt-4o", mock_db)
+
+        assert result is None
+        mock_logger.warning.assert_not_called()
+
+    async def test_no_expiry_valid_until_none_is_active(self, mock_db):
+        """Discount with valid_until=None (permanent) → treated as active."""
+        from app.usage.balance import get_active_discount
+
+        permanent = _make_discount(
+            discount_pct=Decimal("50.00"),
+            valid_until_offset_days=None,  # no expiry
+        )
+        mock_db.execute.return_value = make_execute_result(scalar=permanent)
+
+        result = await get_active_discount("owner", "openai/gpt-4o", mock_db)
+        assert result == Decimal("50.00")
