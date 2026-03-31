@@ -59,11 +59,6 @@ class PaymentOut(BaseModel):
     received: bool
 
 
-class BillingDataOut(BaseModel):
-    totalSpent: int
-    balanceUsd: float
-
-
 class PendingImporterPaymentOut(BaseModel):
     id: str
     userId: str
@@ -193,35 +188,6 @@ async def list_payments(
 
     logger.info("payments_listed", user_id=identity.sub, count=len(events))
     return [_to_out(e) for e in events]
-
-
-@router.get("/billing", response_model=BillingDataOut)
-async def get_billing_data(
-    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
-    db: AsyncSession = Depends(get_db_session),
-):
-    """
-    Return the sum of all payment amounts for the authenticated user.
-
-    Auth: Authorization: Bearer <Supabase JWT>
-    """
-    total_result = await db.execute(
-        select(func.coalesce(func.sum(PaymentEvent.amount), 0)).where(
-            PaymentEvent.user_id == identity.sub
-        )
-    )
-    total = total_result.scalar_one()
-
-    balance_row = await db.get(UserBalance, identity.sub)
-    balance_usd = float(balance_row.balance_usd) if balance_row else 0.0
-
-    logger.info(
-        "billing_data_fetched",
-        user_id=identity.sub,
-        total_spent=total,
-        balance_usd=balance_usd,
-    )
-    return BillingDataOut(totalSpent=total, balanceUsd=balance_usd)
 
 
 @router.get("/pending-importer", response_model=list[PendingImporterPaymentOut])
