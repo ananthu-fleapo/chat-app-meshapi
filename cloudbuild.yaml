@@ -50,7 +50,39 @@ steps:
       - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}"
     waitFor: [build]
 
-  # ── 3. Migrate ─────────────────────────────────────────────────────────────
+  # ── 3. Migration head check ────────────────────────────────────────────────
+  # Scans alembic/versions/ for duplicate revision IDs without a DB connection.
+  # Fails fast if two developers both created a migration with the same number.
+  # The developer who merged second must renumber their migration and re-push.
+  - name: "python:3.12-slim"
+    id: check-migration-heads
+    entrypoint: python
+    args:
+      - -c
+      - |
+        import glob, sys, re
+        files = [f for f in glob.glob("alembic/versions/*.py") if "__pycache__" not in f]
+        revs = []
+        for f in files:
+            m = re.search(r'^revision\s*[=:][^"]*"([^"]+)"', open(f).read(), re.MULTILINE)
+            if m:
+                revs.append((m.group(1), f))
+        ids = [r for r, _ in revs]
+        dupes = sorted({r for r in ids if ids.count(r) > 1})
+        if dupes:
+            print("ERROR: Duplicate migration revision IDs detected.")
+            print("The developer who merged second must renumber their migration.")
+            print()
+            for rev, fname in sorted(revs):
+                if rev in dupes:
+                    print(f"  revision={rev}  {fname}")
+            sys.exit(1)
+        print(f"OK: {len(revs)} migrations, no duplicate revision IDs.")
+    waitFor: [push]
+
+  # ── 4. Migrate ─────────────────────────────────────────────────────────────
+  # Runs AFTER check-migration-heads passes — guaranteed single head.
+
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
     id: migrate-update
     entrypoint: bash
@@ -69,7 +101,7 @@ steps:
           --service-account="${_SERVICE_ACCOUNT}" \
           --region="$$REGION" \
           --max-retries=0
-    waitFor: [push]
+    waitFor: [push, check-migration-heads]
 
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
     id: migrate
