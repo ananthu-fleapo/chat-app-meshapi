@@ -35,6 +35,7 @@ from app.exceptions import RouterVError
 router = APIRouter(prefix="/v1/fx-rates", tags=["fx-rates"])
 logger = structlog.get_logger()
 
+_BASE_CURRENCY = "INR"
 _MARKUP_PCT = Decimal("0.002")  # 0.2 %
 _PRECISION = Decimal("0.0001")  # 4 decimal places
 
@@ -83,7 +84,7 @@ async def refresh_fx_rates(
     # rate: exact INR-per-USD value from the API (e.g. 93.8571)
     # markup_fee: 0.2 % of rate
     # total_rate: effective INR-per-USD rate applied when crediting payments
-    rate = Decimal(str(payload["conversion_rates"]["INR"])).quantize(
+    rate = Decimal(str(payload["conversion_rates"][_BASE_CURRENCY])).quantize(
         _PRECISION, rounding=ROUND_DOWN
     )
     markup_fee = (rate * _MARKUP_PCT).quantize(_PRECISION, rounding=ROUND_DOWN)
@@ -98,12 +99,12 @@ async def refresh_fx_rates(
 
     # ── 3. Upsert into DB ─────────────────────────────────────────────────────
     result = await db.execute(
-        select(CurrencyConversionRate).where(CurrencyConversionRate.currency == "INR")
+        select(CurrencyConversionRate).where(CurrencyConversionRate.currency == _BASE_CURRENCY)
     )
     row = result.scalar_one_or_none()
 
     if row is None:
-        row = CurrencyConversionRate(currency="INR")
+        row = CurrencyConversionRate(currency=_BASE_CURRENCY)
         db.add(row)
 
     row.rate = rate
@@ -113,10 +114,10 @@ async def refresh_fx_rates(
     await db.commit()
     await db.refresh(row)
 
-    logger.info("fx_rate_updated", currency="INR", total_rate=str(total_rate))
+    logger.info("fx_rate_updated", currency=_BASE_CURRENCY, total_rate=str(total_rate))
 
     return FxRefreshResponse(
-        currency="INR",
+        currency=_BASE_CURRENCY,
         rate=str(rate),
         markup_fee=str(markup_fee),
         total_rate=str(total_rate),
