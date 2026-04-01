@@ -339,6 +339,33 @@ class ModelPrice(Base):
         )
 
 
+class CurrencyConversionRate(Base):
+    """
+    Admin-managed currency conversion rates to USD.
+
+    Columns
+    -------
+    currency   ISO 4217 currency code (e.g. "INR", "EUR"). Primary key.
+    rate       How many USD 1 unit of this currency is worth (e.g. INR: ~0.012).
+               For USD itself this should be 1.0.
+    updated_at Timestamp of the last rate update.
+    """
+
+    __tablename__ = "currency_conversion_rates"
+
+    currency: Mapped[str] = mapped_column(Text, primary_key=True)
+    rate: Mapped[Decimal] = mapped_column(Numeric(18, 10), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return f"<CurrencyConversionRate currency={self.currency!r} rate={self.rate}>"
+
+
 class PaymentEvent(Base):
     """
     Append-only log of inbound payment webhook events.

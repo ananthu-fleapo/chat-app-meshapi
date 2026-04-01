@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -25,7 +25,7 @@ from decimal import Decimal
 
 from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
 from app.auth.dependencies import verify_webhook_key
-from app.db.models import PaymentEvent
+from app.db.models import CurrencyConversionRate, PaymentEvent
 from app.db.session import get_db_session
 from app.usage.balance import credit_balance
 
@@ -46,29 +46,25 @@ class PaymentRequest(BaseModel):
 
 class PaymentEventOut(BaseModel):
     id: str
-    userId: str
-    paymentId: str
+    user_id: str
+    payment_id: str
     provider: str
-    orderId: str | None
+    order_id: str | None
     currency: str | None
     amount: int | None
-    createdAt: str
+    created_at: str
 
 
 class PaymentOut(BaseModel):
     received: bool
 
 
-class BillingDataOut(BaseModel):
-    totalSpent: int
-
-
 class PendingImporterPaymentOut(BaseModel):
     id: str
-    userId: str
-    paymentId: str
-    orderId: str | None
-    createdAt: str
+    user_id: str
+    payment_id: str
+    order_id: str | None
+    created_at: str
 
 
 class MetadataUpdateRequest(BaseModel):
@@ -80,23 +76,23 @@ class MetadataUpdateRequest(BaseModel):
 def _to_out(event: PaymentEvent) -> PaymentEventOut:
     return PaymentEventOut(
         id=str(event.id),
-        userId=event.user_id,
-        paymentId=event.payment_id,
+        user_id=event.user_id,
+        payment_id=event.payment_id,
         provider=event.provider,
-        orderId=event.order_id,
+        order_id=event.order_id,
         currency=event.currency,
         amount=event.amount,
-        createdAt=event.created_at.isoformat(),
+        created_at=event.created_at.isoformat(),
     )
 
 
 def _to_pending_importer_out(event: PaymentEvent) -> PendingImporterPaymentOut:
     return PendingImporterPaymentOut(
         id=str(event.id),
-        userId=event.user_id,
-        paymentId=event.payment_id,
-        orderId=event.order_id,
-        createdAt=event.created_at.isoformat(),
+        user_id=event.user_id,
+        payment_id=event.payment_id,
+        order_id=event.order_id,
+        created_at=event.created_at.isoformat(),
     )
 
 
@@ -121,6 +117,38 @@ async def create_payment(
         provider=body.provider,
     )
 
+    # Resolve conversion rate and compute USD amount before persisting.
+    amount_usd: Decimal | None = None
+    if body.amount and body.amount > 0:
+        currency = (body.currency or "USD").upper()
+        if currency == "USD":
+            # Amount is in cents; normalize to dollars.
+            amount_usd = Decimal(body.amount) / 100
+        else:
+            rate_row = await db.get(CurrencyConversionRate, currency)
+            if rate_row is None:
+                logger.warning(
+                    "payment_currency_rate_missing",
+                    currency=currency,
+                    user_id=body.userId,
+                    payment_id=body.paymentId,
+                )
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"No conversion rate found for currency '{currency}'",
+                )
+            # Amount is in the smallest unit (e.g. paise for INR).
+            # Divide by 100 to get major units, then multiply by rate to get USD.
+            amount_usd = (Decimal(body.amount) / 100) * rate_row.rate
+            logger.info(
+                "payment_currency_converted",
+                currency=currency,
+                rate=str(rate_row.rate),
+                amount_original=body.amount,
+                amount_usd=str(amount_usd),
+                user_id=body.userId,
+            )
+
     event = PaymentEvent(
         user_id=body.userId,
         payment_id=body.paymentId,
@@ -132,9 +160,7 @@ async def create_payment(
     db.add(event)
     await db.flush()
 
-    # Credit user balance — amount is in cents (USD), normalize to dollars.
-    if body.amount and body.amount > 0:
-        amount_usd = Decimal(body.amount) / 100
+    if amount_usd is not None and amount_usd > 0:
         await credit_balance(body.userId, amount_usd, db)
 
     return {"received": True}
@@ -162,27 +188,6 @@ async def list_payments(
 
     logger.info("payments_listed", user_id=identity.sub, count=len(events))
     return [_to_out(e) for e in events]
-
-
-@router.get("/billing", response_model=BillingDataOut)
-async def get_billing_data(
-    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
-    db: AsyncSession = Depends(get_db_session),
-):
-    """
-    Return the sum of all payment amounts for the authenticated user.
-
-    Auth: Authorization: Bearer <Supabase JWT>
-    """
-    result = await db.execute(
-        select(func.coalesce(func.sum(PaymentEvent.amount), 0)).where(
-            PaymentEvent.user_id == identity.sub
-        )
-    )
-    total = result.scalar_one()
-
-    logger.info("billing_data_fetched", user_id=identity.sub, total_spent=total)
-    return BillingDataOut(totalSpent=total)
 
 
 @router.get("/pending-importer", response_model=list[PendingImporterPaymentOut])
