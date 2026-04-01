@@ -47,6 +47,17 @@ class Settings(BaseSettings):
     default_rpm: int = 60
     default_rpd: int = 5000
 
+    # Hard ceiling — effective limits are clamped to these values regardless
+    # of per-key overrides.  Admin cannot set a key above these values.
+    max_rpm: int = 100
+    max_rpd: int = 7500
+
+    # Separate, tighter limits applied only to free-model requests.
+    # Counted on a separate Redis key (shared across all free models per key)
+    # so a user cannot get unlimited free usage by rotating models.
+    default_free_rpm: int = 20
+    default_free_rpd: int = 200
+
     # ── Vertex AI ─────────────────────────────────────────────────────────────
     # Set these to route models to Vertex AI.
     # vertex_ai_service_account_json: full JSON string of a service account key,

@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.config_resolver import resolve_config
 from app.auth.dependencies import get_authenticated_key
-from app.cache.rate_limiter import check_rate_limits
+from app.cache.rate_limiter import check_free_model_rate_limits, check_rate_limits
 from app.config import settings
 from app.db.models import ApiKey
 from app.db.session import get_db_session
@@ -62,6 +62,8 @@ async def chat_completions(
         rpd_limit=key.rpd_limit,
         default_rpm=settings.default_rpm,
         default_rpd=settings.default_rpd,
+        max_rpm=settings.max_rpm,
+        max_rpd=settings.max_rpd,
     )
 
     # ── Phase 5: Spend cap (per-key hard limit, optional) ────────────────────
@@ -79,8 +81,14 @@ async def chat_completions(
     # Must happen before balance check so we have the final resolved model name.
     body = resolve_config(raw_body, key, template, rendered_messages)
 
-    # ── Balance check (account-level, paid models only) ───────────────────────
-    await check_balance(key.owner, body.model, db)
+    # ── Balance check + free-model rate limit ────────────────────────────────
+    is_free_model = await check_balance(key.owner, body.model, db)
+    if is_free_model:
+        await check_free_model_rate_limits(
+            key_id=str(key.id),
+            free_rpm=settings.default_free_rpm,
+            free_rpd=settings.default_free_rpd,
+        )
 
     log = logger.bind(
         model=body.model,
