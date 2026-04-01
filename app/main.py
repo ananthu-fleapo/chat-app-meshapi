@@ -11,6 +11,7 @@ from app.exceptions import RouterVError, routerv_exception_handler, validation_e
 from app.logging_config import configure_logging
 from app.middleware import CloudflareOriginGuard, RequestIdMiddleware
 from app.providers.openrouter import OpenRouterAdapter
+from app.providers.registry import register_adapter
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.routers import balance, inference, keys, models, payments, usage
@@ -32,6 +33,68 @@ async def lifespan(app: FastAPI):
         base_url=settings.openrouter_base_url,
         timeout=settings.openrouter_timeout_s,
     )
+
+    # ── Vertex AI adapter (optional) ──────────────────────────────────────────
+    # Enabled only when project_id + service account JSON are both configured.
+    if settings.vertex_ai_project_id and settings.vertex_ai_service_account_json:
+        from app.providers.vertex_ai import VertexAIAdapter
+        VertexAIAdapter.init(
+            project_id=settings.vertex_ai_project_id,
+            location=settings.vertex_ai_location,
+            service_account_json=settings.vertex_ai_service_account_json,
+            timeout=settings.vertex_ai_timeout_s,
+        )
+        register_adapter("vertex", VertexAIAdapter)
+    else:
+        logger.info(
+            "vertex_ai_adapter_skipped",
+            hint="Set VERTEX_AI_PROJECT_ID and VERTEX_AI_SERVICE_ACCOUNT_JSON to enable",
+        )
+
+    # ── AWS Bedrock adapter (optional) ────────────────────────────────────────
+    if settings.aws_access_key_id and settings.aws_secret_access_key:
+        from app.providers.bedrock import BedrockAdapter
+        BedrockAdapter.init(
+            aws_access_key_id=settings.aws_access_key_id,
+            aws_secret_access_key=settings.aws_secret_access_key,
+            region=settings.aws_region,
+        )
+        register_adapter("bedrock", BedrockAdapter)
+    else:
+        logger.info(
+            "bedrock_adapter_skipped",
+            hint="Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to enable",
+        )
+
+    # ── OpenAI Direct adapter (optional) ──────────────────────────────────────
+    if settings.openai_api_key:
+        from app.providers.openai_direct import OpenAIDirectAdapter
+        OpenAIDirectAdapter.init(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            timeout=settings.openai_timeout_s,
+        )
+        register_adapter("openai", OpenAIDirectAdapter)
+    else:
+        logger.info(
+            "openai_direct_adapter_skipped",
+            hint="Set OPENAI_API_KEY to enable direct OpenAI routing",
+        )
+
+    # ── Qwen / DashScope adapter (optional) ───────────────────────────────────
+    if settings.qwen_api_key:
+        from app.providers.qwen import QwenAdapter
+        QwenAdapter.init(
+            api_key=settings.qwen_api_key,
+            base_url=settings.qwen_base_url,
+            timeout=settings.qwen_timeout_s,
+        )
+        register_adapter("qwen", QwenAdapter)
+    else:
+        logger.info(
+            "qwen_adapter_skipped",
+            hint="Set QWEN_API_KEY to enable direct Qwen/DashScope routing",
+        )
 
     # ── Required secrets check ────────────────────────────────────────────────
     # Fail fast rather than starting in a broken state where all control-plane
@@ -61,6 +124,22 @@ async def lifespan(app: FastAPI):
 
     logger.info("shutdown")
     await OpenRouterAdapter.close()
+
+    # Close optional adapters if they were initialised
+    from app.providers.registry import _REGISTRY
+    if "vertex" in _REGISTRY:
+        from app.providers.vertex_ai import VertexAIAdapter
+        await VertexAIAdapter.close()
+    if "bedrock" in _REGISTRY:
+        from app.providers.bedrock import BedrockAdapter
+        await BedrockAdapter.close()
+    if "openai" in _REGISTRY:
+        from app.providers.openai_direct import OpenAIDirectAdapter
+        await OpenAIDirectAdapter.close()
+    if "qwen" in _REGISTRY:
+        from app.providers.qwen import QwenAdapter
+        await QwenAdapter.close()
+
     await close_db()
     await close_redis()
 

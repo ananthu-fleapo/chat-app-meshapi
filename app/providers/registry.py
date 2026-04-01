@@ -1,15 +1,25 @@
 """
-Model → adapter routing registry.
+Provider routing registry.
 
-Phase 1: all models route to OpenRouter (single upstream).
-OpenRouter accepts both OpenRouter-namespaced strings ("openai/gpt-4o") and
-plain OpenAI-style strings ("gpt-4o"), so we pass them through as-is.
+Resolves which upstream adapter to use based on the provider slug stored
+in model_prices.provider.  The model_prices table is the single source of
+truth for provider selection — change the provider column (and flip is_default)
+to route a model to a different upstream without any code changes.
 
-Phase 6+: this table moves to Postgres so new models/providers can be added
-without a redeploy. For now, a prefix-match table is sufficient.
+resolve_provider(model, db)
+    Queries model_prices for the row where (model_id=model, is_default=True).
+    Falls back to any row for that model_id, then to "openrouter" if not found.
+
+get_adapter(provider)
+    Returns the singleton ProviderAdapter for the given provider slug.
+    Raises UnsupportedModelError for unknown provider names.
 """
 
+from __future__ import annotations
+
 import structlog
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import UnsupportedModelError
 from app.providers.base import ProviderAdapter
@@ -17,43 +27,85 @@ from app.providers.openrouter import OpenRouterAdapter
 
 logger = structlog.get_logger()
 
-# All known model prefixes that OpenRouter supports.
-# Order matters: more specific prefixes should come first.
-_OPENROUTER_PREFIXES: tuple[str, ...] = (
-    # Namespaced (OpenRouter canonical form)
-    "openai/",
-    "anthropic/",
-    "google/",
-    "meta-llama/",
-    "mistralai/",
-    "cohere/",
-    "perplexity/",
-    "deepseek/",
-    "qwen/",
-    # Plain (OpenAI-compatible shorthand — OpenRouter also accepts these)
-    "gpt-",
-    "o1",
-    "o3",
-    "claude-",
-    "gemini-",
-    "mistral-",
-    "llama",
-    "command-",
-    "sonar-",
-)
+# Populated at startup by main.py as adapters are initialised.
+# Only adapters whose credentials are configured will be registered.
+_REGISTRY: dict[str, type[ProviderAdapter]] = {
+    "openrouter": OpenRouterAdapter,
+}
 
 
-def get_adapter(model: str) -> ProviderAdapter:
+def register_adapter(provider: str, cls: type[ProviderAdapter]) -> None:
+    """Register an adapter class under the given provider slug."""
+    _REGISTRY[provider] = cls
+    logger.info("provider_registered", provider=provider)
+
+
+def get_adapter(provider: str) -> ProviderAdapter:
     """
-    Resolve a model string to its provider adapter.
-    Raises UnsupportedModelError if no adapter matches.
-    """
-    for prefix in _OPENROUTER_PREFIXES:
-        if model.startswith(prefix):
-            return OpenRouterAdapter.get()
+    Return the singleton ProviderAdapter for *provider*.
 
-    # Default: attempt OpenRouter for unknown/future models rather than hard-failing.
-    # OpenRouter will return a 404 if it doesn't know the model, which propagates
-    # as an UpstreamError with a clear message.
-    logger.debug("unknown_model_prefix_fallback_openrouter", model=model)
-    return OpenRouterAdapter.get()
+    Raises UnsupportedModelError if no adapter is registered for this provider.
+    """
+    cls = _REGISTRY.get(provider)
+    if cls is None:
+        raise UnsupportedModelError(
+            f"No adapter registered for provider '{provider}'. "
+            "Check that the required credentials are configured."
+        )
+    return cls.get()
+
+
+async def resolve_provider(model: str, db: AsyncSession) -> str:
+    """
+    Return the provider slug to use for *model*.
+
+    Lookup order:
+      1. Row where (model_id=model, is_default=True)   — explicit default
+      2. Any row where model_id=model                  — first available
+      3. "openrouter"                                   — safe fallback
+
+    Parameters
+    ----------
+    model : str
+        Canonical RouterV model identifier (e.g. "openai/gpt-4o-mini").
+    db : AsyncSession
+        Active DB session from the request lifecycle.
+
+    Returns
+    -------
+    str
+        Provider slug, e.g. "openrouter", "vertex", "bedrock", "openai".
+    """
+    from app.db.models import ModelPrice
+
+    # Prefer the is_default row
+    result = await db.execute(
+        select(ModelPrice.provider)
+        .where(
+            ModelPrice.model_id == model,
+            ModelPrice.is_default.is_(True),
+        )
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    if row is not None:
+        return row
+
+    # Fall back to any row for this model
+    result = await db.execute(
+        select(ModelPrice.provider)
+        .where(ModelPrice.model_id == model)
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    if row is not None:
+        logger.debug(
+            "provider_resolved_no_default",
+            model=model,
+            provider=row,
+        )
+        return row
+
+    # Model not in price table — default to OpenRouter
+    logger.debug("provider_resolved_fallback_openrouter", model=model)
+    return "openrouter"

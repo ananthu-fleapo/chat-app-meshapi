@@ -46,7 +46,10 @@ async def _is_model_free(model: str, db: AsyncSession) -> bool:
     - is_free=False in model_prices → paid, requires balance
     """
     result = await db.execute(
-        select(ModelPrice.is_free).where(ModelPrice.model_id == model)
+        select(ModelPrice.is_free).where(
+            ModelPrice.model_id == model,
+            ModelPrice.is_default.is_(True),
+        )
     )
     row = result.one_or_none()
     if row is None:

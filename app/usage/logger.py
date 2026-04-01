@@ -55,7 +55,7 @@ async def _our_cost(
         async with get_session_factory()() as session:
             result = await session.execute(
                 select(ModelPrice.prompt_usd_per_1k, ModelPrice.completion_usd_per_1k, ModelPrice.is_free)
-                .where(ModelPrice.model_id == model)
+                .where(ModelPrice.model_id == model, ModelPrice.is_default.is_(True))
             )
             row = result.one_or_none()
 
@@ -78,6 +78,7 @@ async def log_usage_event(
     owner: str,
     request_id: str,
     model: str,
+    provider: str = "openrouter",
     template_id: str | None,
     stream: bool,
     prompt_tokens: int | None,
@@ -116,6 +117,7 @@ async def log_usage_event(
                 key_id=uuid.UUID(key_id),
                 request_id=request_id,
                 model=model,
+                provider=provider,
                 template_id=uuid.UUID(template_id) if template_id else None,
                 stream=stream,
                 prompt_tokens=prompt_tokens,
@@ -174,9 +176,9 @@ async def log_usage_event(
         await deduct_balance(owner, cost)
 
 
-def fire_usage_log(*, owner: str, **kwargs) -> None:
+def fire_usage_log(*, owner: str, provider: str = "openrouter", **kwargs) -> None:
     """
     Schedule log_usage_event as a fire-and-forget background task.
     Safe to call from inside async generators and route handlers.
     """
-    asyncio.create_task(log_usage_event(owner=owner, **kwargs))
+    asyncio.create_task(log_usage_event(owner=owner, provider=provider, **kwargs))

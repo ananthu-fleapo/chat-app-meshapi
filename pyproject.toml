@@ -40,6 +40,24 @@ gcp = [
     "google-cloud-secret-manager>=2.20.0",
 ]
 
+# Install for Vertex AI direct routing (google.oauth2 service-account token refresh).
+vertex = [
+    "google-auth>=2.29.0",
+]
+
+# Install for AWS Bedrock direct routing (async boto3 wrapper).
+bedrock = [
+    "aiobotocore>=2.13.0",
+]
+
+# Install all provider extras at once (GCP + Vertex AI + Bedrock):
+#   pip install -e ".[providers]"
+providers = [
+    "google-cloud-secret-manager>=2.20.0",
+    "google-auth>=2.29.0",
+    "aiobotocore>=2.13.0",
+]
+
 # Full production set (combine with: pip install -e ".[gcp,observability]")
 # Phase 7 deps:
 # observability = [

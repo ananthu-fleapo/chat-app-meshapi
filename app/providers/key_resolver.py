@@ -92,7 +92,26 @@ async def resolve_upstream_key(
                 )
 
     logger.debug("provider_key_system_default", owner=owner, provider=provider)
-    return settings.openrouter_api_key
+    return _system_default_key(provider)
+
+
+def _system_default_key(provider: str) -> str:
+    """
+    Return the system-level API key for a given provider.
+
+    For providers that use their own credential mechanisms (Vertex AI uses
+    service-account tokens; Bedrock uses SigV4 signing), we return an empty
+    string — the adapter handles auth entirely on its own without needing a
+    key passed in from the resolver.
+    """
+    if provider == "openrouter":
+        return settings.openrouter_api_key
+    if provider == "openai":
+        return settings.openai_api_key
+    if provider == "qwen":
+        return settings.qwen_api_key
+    # vertex / bedrock — adapters manage auth internally
+    return ""
 
 
 async def _lookup_provider_key(

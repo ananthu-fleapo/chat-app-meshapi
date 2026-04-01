@@ -25,7 +25,7 @@ from app.config import settings
 from app.db.models import ApiKey
 from app.db.session import get_db_session
 from app.providers.key_resolver import resolve_upstream_key
-from app.providers.registry import get_adapter
+from app.providers.registry import get_adapter, resolve_provider
 from app.schemas.chat import ChatCompletionRequest
 from app.templates.renderer import render_template
 from app.templates.resolver import resolve_template
@@ -89,10 +89,11 @@ async def chat_completions(
         key_owner=key.owner,
         template=raw_body.template,
     )
-    # ── Phase 6: Resolve per-owner upstream API key ───────────────────────────
-    upstream_key = await resolve_upstream_key(owner=key.owner, db=db)
+    # ── Phase 6: Resolve provider + per-owner upstream API key ───────────────
+    provider = await resolve_provider(body.model, db)
+    upstream_key = await resolve_upstream_key(owner=key.owner, provider=provider, db=db)
 
-    adapter = get_adapter(body.model)
+    adapter = get_adapter(provider)
     start = time.monotonic()
     template_id = str(template.id) if template else None
 
@@ -173,6 +174,7 @@ async def chat_completions(
                     key_id=str(key.id),
                     request_id=request_id,
                     model=body.model,
+                    provider=provider,
                     template_id=template_id,
                     stream=True,
                     prompt_tokens=usage_data.get("prompt_tokens") if usage_data else None,
@@ -216,6 +218,7 @@ async def chat_completions(
             key_id=str(key.id),
             request_id=request_id,
             model=(response_body or {}).get("model", body.model),
+            provider=provider,
             template_id=template_id,
             stream=False,
             prompt_tokens=usage.get("prompt_tokens"),
