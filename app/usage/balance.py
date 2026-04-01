@@ -37,6 +37,44 @@ from app.exceptions import PaymentRequiredError
 logger = structlog.get_logger()
 
 
+async def _lookup_model_price(model: str, db: AsyncSession) -> ModelPrice | None:
+    """
+    Look up a ModelPrice row with :free-suffix abuse prevention.
+
+    Lookup order:
+      1. Exact match on model — covers all normal cases.
+      2. If model ends with ':free' and no exact row exists, check the base
+         name (strip suffix).  If the base name IS a paid model it means the
+         caller appended ':free' to bypass billing — return the paid row so
+         the request is priced correctly.  If the base name is also free /
+         unknown, return None (allow through).
+
+    This keeps OpenRouter's legitimate ':free' variants working (they have
+    their own exact rows in model_prices) while closing the abuse vector.
+    """
+    result = await db.execute(select(ModelPrice).where(ModelPrice.model_id == model))
+    row = result.scalar_one_or_none()
+    if row is not None:
+        return row
+
+    if model.endswith(":free"):
+        base = model.removesuffix(":free")
+        result = await db.execute(select(ModelPrice).where(ModelPrice.model_id == base))
+        base_row = result.scalar_one_or_none()
+        # Only return the base row when it is a paid model — that means the
+        # ':free' suffix was fabricated to evade the balance check.
+        if base_row is not None and not base_row.is_free:
+            logger.warning(
+                "free_suffix_abuse_detected",
+                requested=model,
+                resolved=base,
+                hint="Billing as paid model",
+            )
+            return base_row
+
+    return None
+
+
 async def _is_model_free(model: str, db: AsyncSession) -> bool:
     """
     Return True when the model should not be billed.
@@ -45,19 +83,21 @@ async def _is_model_free(model: str, db: AsyncSession) -> bool:
     - not in model_prices → free (no price configured = no charge)
     - is_free=False in model_prices → paid, requires balance
     """
-    result = await db.execute(
-        select(ModelPrice.is_free).where(ModelPrice.model_id == model)
-    )
-    row = result.one_or_none()
+    row = await _lookup_model_price(model, db)
     if row is None:
         # Model not in price table — allow through (admin hasn't priced it yet).
         return True
-    return row[0]
+    return row.is_free
 
 
-async def check_balance(owner: str, model: str, db: AsyncSession) -> None:
+async def check_balance(owner: str, model: str, db: AsyncSession) -> bool:
     """
     Raise PaymentRequiredError if the user has no balance and the model is paid.
+
+    Returns True if the model is free (no balance check performed), False if
+    the model is paid and the user passed the balance check.  The return value
+    is used by the inference router to decide whether to apply the tighter
+    free-model rate limit.
 
     Parameters
     ----------
@@ -66,7 +106,7 @@ async def check_balance(owner: str, model: str, db: AsyncSession) -> None:
     db      Active request DB session.
     """
     if await _is_model_free(model, db):
-        return
+        return True  # free model — no balance required
 
     result = await db.execute(
         select(UserBalance.balance_usd).where(UserBalance.user_id == owner)
@@ -82,6 +122,8 @@ async def check_balance(owner: str, model: str, db: AsyncSession) -> None:
         raise PaymentRequiredError(
             "Insufficient balance. Top up your account to use paid models."
         )
+
+    return False  # paid model, balance OK
 
 
 async def deduct_balance(owner: str, cost_usd: Decimal) -> None:

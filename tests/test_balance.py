@@ -18,6 +18,15 @@ import pytest
 from tests.conftest import make_execute_result
 
 
+def _make_model_price(is_free: bool = False) -> MagicMock:
+    """Build a ModelPrice-like mock."""
+    mp = MagicMock()
+    mp.is_free = is_free
+    mp.prompt_usd_per_1k = Decimal("0.003000")
+    mp.completion_usd_per_1k = Decimal("0.015000")
+    return mp
+
+
 def _make_discount(
     discount_pct: Decimal = Decimal("10.00"),
     valid_from_offset_days: int = -10,   # negative = past, positive = future
@@ -44,10 +53,9 @@ class TestCheckBalance:
     async def test_free_model_skips_balance_check(self, mock_db):
         """Free model always passes regardless of balance."""
         from app.usage.balance import check_balance
-        from app.exceptions import PaymentRequiredError
 
         # model_prices row: is_free = True
-        mock_db.execute.return_value = make_execute_result(rows=[(True,)])
+        mock_db.execute.return_value = make_execute_result(scalar=_make_model_price(is_free=True))
 
         # Should not raise even though we never query user_balances
         await check_balance("user-123", "meta-llama/llama-3-free", mock_db)
@@ -59,10 +67,10 @@ class TestCheckBalance:
         """Paid model with balance > 0 proceeds."""
         from app.usage.balance import check_balance
 
-        # First call: model_prices → is_free = False
+        # First call: model_prices → paid model
         # Second call: user_balances → balance = 5.00
         mock_db.execute.side_effect = [
-            make_execute_result(rows=[(False,)]),
+            make_execute_result(scalar=_make_model_price(is_free=False)),
             make_execute_result(rows=[(Decimal("5.000000"),)]),
         ]
 
@@ -74,7 +82,7 @@ class TestCheckBalance:
         from app.exceptions import PaymentRequiredError
 
         mock_db.execute.side_effect = [
-            make_execute_result(rows=[(False,)]),
+            make_execute_result(scalar=_make_model_price(is_free=False)),
             make_execute_result(rows=[(Decimal("0"),)]),
         ]
 
@@ -87,7 +95,7 @@ class TestCheckBalance:
         from app.exceptions import PaymentRequiredError
 
         mock_db.execute.side_effect = [
-            make_execute_result(rows=[(False,)]),
+            make_execute_result(scalar=_make_model_price(is_free=False)),
             make_execute_result(rows=[(Decimal("-0.000500"),)]),
         ]
 
@@ -98,7 +106,7 @@ class TestCheckBalance:
         """Model not in model_prices is allowed through — admin hasn't priced it yet."""
         from app.usage.balance import check_balance
 
-        mock_db.execute.return_value = make_execute_result(rows=None)  # not in table
+        mock_db.execute.return_value = make_execute_result(scalar=None)  # not in table
 
         # Should not raise even with zero balance — only one execute call (price lookup)
         await check_balance("user-123", "unknown/model-x", mock_db)
@@ -110,8 +118,8 @@ class TestCheckBalance:
         from app.exceptions import PaymentRequiredError
 
         mock_db.execute.side_effect = [
-            make_execute_result(rows=[(False,)]),  # model in table, is_free=False
-            make_execute_result(rows=None),         # no balance row → zero
+            make_execute_result(scalar=_make_model_price(is_free=False)),
+            make_execute_result(rows=None),  # no balance row → zero
         ]
 
         with pytest.raises(PaymentRequiredError):
@@ -123,7 +131,7 @@ class TestCheckBalance:
         from app.exceptions import PaymentRequiredError
 
         mock_db.execute.side_effect = [
-            make_execute_result(rows=[(False,)]),
+            make_execute_result(scalar=_make_model_price(is_free=False)),
             make_execute_result(rows=[(Decimal("0"),)]),
         ]
 

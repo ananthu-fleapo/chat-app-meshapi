@@ -79,7 +79,7 @@ class TestCheckRateLimits:
 
         redis = _make_redis_mock(rpm_count=5, rpd_count=50)
         with patch("app.cache.rate_limiter.get_redis", return_value=redis):
-            await check_rate_limits(KEY_ID, None, None, default_rpm=60, default_rpd=1000)
+            await check_rate_limits(KEY_ID, None, None, default_rpm=60, default_rpd=1000, max_rpm=100, max_rpd=7500)
 
     async def test_rpm_exceeded_raises_rate_limit_error(self):
         """RPM counter > limit → RateLimitError with limit_type='rpm'."""
@@ -90,7 +90,7 @@ class TestCheckRateLimits:
         with patch("app.cache.rate_limiter.get_redis", return_value=redis), \
              patch("app.metrics.RATE_LIMIT_HITS", MagicMock()):
             with pytest.raises(RateLimitError) as exc_info:
-                await check_rate_limits(KEY_ID, None, None, default_rpm=60, default_rpd=1000)
+                await check_rate_limits(KEY_ID, None, None, default_rpm=60, default_rpd=1000, max_rpm=100, max_rpd=7500)
         assert exc_info.value.limit_type == "rpm"
 
     async def test_rpd_exceeded_raises_rate_limit_error(self):
@@ -102,7 +102,7 @@ class TestCheckRateLimits:
         with patch("app.cache.rate_limiter.get_redis", return_value=redis), \
              patch("app.metrics.RATE_LIMIT_HITS", MagicMock()):
             with pytest.raises(RateLimitError) as exc_info:
-                await check_rate_limits(KEY_ID, None, None, default_rpm=60, default_rpd=1000)
+                await check_rate_limits(KEY_ID, None, None, default_rpm=60, default_rpd=1000, max_rpm=100, max_rpd=7500)
         assert exc_info.value.limit_type == "rpd"
 
     async def test_rpm_checked_before_rpd(self):
@@ -114,7 +114,7 @@ class TestCheckRateLimits:
         with patch("app.cache.rate_limiter.get_redis", return_value=redis), \
              patch("app.metrics.RATE_LIMIT_HITS", MagicMock()):
             with pytest.raises(RateLimitError) as exc_info:
-                await check_rate_limits(KEY_ID, None, None, default_rpm=60, default_rpd=1000)
+                await check_rate_limits(KEY_ID, None, None, default_rpm=60, default_rpd=1000, max_rpm=100, max_rpd=7500)
         assert exc_info.value.limit_type == "rpm"
 
     async def test_per_key_rpm_limit_used_over_default(self):
@@ -127,7 +127,7 @@ class TestCheckRateLimits:
         with patch("app.cache.rate_limiter.get_redis", return_value=redis), \
              patch("app.metrics.RATE_LIMIT_HITS", MagicMock()):
             with pytest.raises(RateLimitError) as exc_info:
-                await check_rate_limits(KEY_ID, rpm_limit=20, rpd_limit=None, default_rpm=60, default_rpd=1000)
+                await check_rate_limits(KEY_ID, rpm_limit=20, rpd_limit=None, default_rpm=60, default_rpd=1000, max_rpm=100, max_rpd=7500)
         assert exc_info.value.limit_type == "rpm"
 
     async def test_none_per_key_limit_uses_default(self):
@@ -137,7 +137,7 @@ class TestCheckRateLimits:
         # 59 requests, default allows 60 → no exception
         redis = _make_redis_mock(rpm_count=59, rpd_count=50)
         with patch("app.cache.rate_limiter.get_redis", return_value=redis):
-            await check_rate_limits(KEY_ID, rpm_limit=None, rpd_limit=None, default_rpm=60, default_rpd=1000)
+            await check_rate_limits(KEY_ID, rpm_limit=None, rpd_limit=None, default_rpm=60, default_rpd=1000, max_rpm=100, max_rpd=7500)
 
     async def test_redis_unavailable_fails_open(self):
         """Redis error → request proceeds (fail-open), no exception raised."""
@@ -145,7 +145,7 @@ class TestCheckRateLimits:
 
         with patch("app.cache.rate_limiter.get_redis", side_effect=Exception("Redis down")):
             # Must not raise
-            await check_rate_limits(KEY_ID, None, None, default_rpm=60, default_rpd=1000)
+            await check_rate_limits(KEY_ID, None, None, default_rpm=60, default_rpd=1000, max_rpm=100, max_rpd=7500)
 
     async def test_retry_after_is_positive_integer(self):
         """RateLimitError carries a positive retry_after value."""
@@ -156,6 +156,6 @@ class TestCheckRateLimits:
         with patch("app.cache.rate_limiter.get_redis", return_value=redis), \
              patch("app.metrics.RATE_LIMIT_HITS", MagicMock()):
             with pytest.raises(RateLimitError) as exc_info:
-                await check_rate_limits(KEY_ID, None, None, default_rpm=60, default_rpd=1000)
+                await check_rate_limits(KEY_ID, None, None, default_rpm=60, default_rpd=1000, max_rpm=100, max_rpd=7500)
         assert exc_info.value.retry_after > 0
         assert isinstance(exc_info.value.retry_after, int)

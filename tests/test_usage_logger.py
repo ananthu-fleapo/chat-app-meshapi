@@ -42,20 +42,29 @@ def _make_write_session():
 
 # ── _our_cost ─────────────────────────────────────────────────────────────────
 
+def _make_model_price_row(
+    is_free: bool = False,
+    prompt: float = 0.002500,
+    completion: float = 0.010000,
+) -> MagicMock:
+    """Build a ModelPrice-like mock for _lookup_model_price return value."""
+    mp = MagicMock()
+    mp.is_free = is_free
+    mp.prompt_usd_per_1k = prompt
+    mp.completion_usd_per_1k = completion
+    return mp
+
+
 class TestOurCost:
 
     async def test_model_prices_hit_returns_computed_cost(self):
         """Row found in model_prices → compute and return our cost."""
         from app.usage.logger import _our_cost
 
-        mock_session = AsyncMock()
-        result = MagicMock()
-        # (prompt_usd_per_1k, completion_usd_per_1k, is_free)
-        result.one_or_none.return_value = (0.002500, 0.010000, False)
-        mock_session.execute = AsyncMock(return_value=result)
-
-        sf = _make_session_factory(mock_session)
-        with patch("app.usage.logger.get_session_factory", sf):
+        row = _make_model_price_row(is_free=False, prompt=0.002500, completion=0.010000)
+        sf = _make_session_factory(AsyncMock())
+        with patch("app.usage.logger.get_session_factory", sf), \
+             patch("app.usage.balance._lookup_model_price", AsyncMock(return_value=row)):
             cost = await _our_cost(MODEL, 1000, 1000)
 
         # 0.0025 + 0.01 = 0.0125
@@ -65,13 +74,9 @@ class TestOurCost:
         """No row in model_prices → falls back to calculate_cost()."""
         from app.usage.logger import _our_cost
 
-        mock_session = AsyncMock()
-        result = MagicMock()
-        result.one_or_none.return_value = None
-        mock_session.execute = AsyncMock(return_value=result)
-
-        sf = _make_session_factory(mock_session)
-        with patch("app.usage.logger.get_session_factory", sf):
+        sf = _make_session_factory(AsyncMock())
+        with patch("app.usage.logger.get_session_factory", sf), \
+             patch("app.usage.balance._lookup_model_price", AsyncMock(return_value=None)):
             cost = await _our_cost(MODEL, 1000, 1000)
 
         # Falls back to static pricing for gpt-4o: 0.0025 + 0.01 = 0.0125
@@ -81,13 +86,10 @@ class TestOurCost:
         """Model marked is_free=True in model_prices → cost = Decimal('0')."""
         from app.usage.logger import _our_cost
 
-        mock_session = AsyncMock()
-        result = MagicMock()
-        result.one_or_none.return_value = (0.0, 0.0, True)
-        mock_session.execute = AsyncMock(return_value=result)
-
-        sf = _make_session_factory(mock_session)
-        with patch("app.usage.logger.get_session_factory", sf):
+        row = _make_model_price_row(is_free=True)
+        sf = _make_session_factory(AsyncMock())
+        with patch("app.usage.logger.get_session_factory", sf), \
+             patch("app.usage.balance._lookup_model_price", AsyncMock(return_value=row)):
             cost = await _our_cost(MODEL, 1000, 1000)
 
         assert cost == Decimal("0")
@@ -107,13 +109,9 @@ class TestOurCost:
         """Unknown model in both DB and static table → None."""
         from app.usage.logger import _our_cost
 
-        mock_session = AsyncMock()
-        result = MagicMock()
-        result.one_or_none.return_value = None
-        mock_session.execute = AsyncMock(return_value=result)
-
-        sf = _make_session_factory(mock_session)
-        with patch("app.usage.logger.get_session_factory", sf):
+        sf = _make_session_factory(AsyncMock())
+        with patch("app.usage.logger.get_session_factory", sf), \
+             patch("app.usage.balance._lookup_model_price", AsyncMock(return_value=None)):
             cost = await _our_cost("unknown/model-xyz", 100, 100)
 
         assert cost is None

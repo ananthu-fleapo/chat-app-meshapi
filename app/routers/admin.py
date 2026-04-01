@@ -81,6 +81,21 @@ def _parse_uuid(value: str) -> uuid.UUID:
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
 
+def _clamp_rate_limits(rpm: int | None, rpd: int | None) -> tuple[int | None, int | None]:
+    """Clamp rpm/rpd to system maximums. Raises 422 if a value exceeds the cap."""
+    if rpm is not None and rpm > settings.max_rpm:
+        raise HTTPException(
+            status_code=422,
+            detail=f"rpm_limit cannot exceed system maximum of {settings.max_rpm}.",
+        )
+    if rpd is not None and rpd > settings.max_rpd:
+        raise HTTPException(
+            status_code=422,
+            detail=f"rpd_limit cannot exceed system maximum of {settings.max_rpd}.",
+        )
+    return rpm, rpd
+
+
 class CreateKeyRequest(BaseModel):
     owner: str
     default_model: str | None = None
@@ -211,6 +226,7 @@ async def create_key(
     The plaintext RouterV key is returned exactly once — store it securely.
     """
     spend_cap = Decimal(str(body.spend_cap_usd)) if body.spend_cap_usd is not None else None
+    rpm, rpd = _clamp_rate_limits(body.rpm_limit, body.rpd_limit)
 
     # Auto-provision an upstream provider key for this owner if needed.
     provider_key = await _auto_provision_for_owner(body.owner, spend_cap, db)
@@ -222,8 +238,8 @@ async def create_key(
         default_model=body.default_model,
         default_params=body.default_params,
         meta=body.meta,
-        rpm_limit=body.rpm_limit,
-        rpd_limit=body.rpd_limit,
+        rpm_limit=rpm,
+        rpd_limit=rpd,
         spend_cap_usd=spend_cap,
         provider_key_id=provider_key.id if provider_key else None,
     )
@@ -275,10 +291,12 @@ async def update_key(
         key.default_params = body.default_params
     if body.meta is not None:
         key.meta = body.meta
-    if body.rpm_limit is not None:
-        key.rpm_limit = body.rpm_limit
-    if body.rpd_limit is not None:
-        key.rpd_limit = body.rpd_limit
+    if body.rpm_limit is not None or body.rpd_limit is not None:
+        rpm, rpd = _clamp_rate_limits(body.rpm_limit, body.rpd_limit)
+        if rpm is not None:
+            key.rpm_limit = rpm
+        if rpd is not None:
+            key.rpd_limit = rpd
     if body.spend_cap_usd is not None:
         key.spend_cap_usd = Decimal(str(body.spend_cap_usd))
 

@@ -5,6 +5,8 @@
 #   _REGION           GCP region, e.g. "us-central1"
 #   _REPO             Artifact Registry repo, e.g. "routersvc"
 #   _SERVICE          Cloud Run service name, e.g. "routersvc"
+#   _SERVICE_URL      Cloud Run service URL for the scheduler job
+#   _ADMIN_SECRET     Value of ADMIN_SECRET env var (for scheduler auth)
 #
 # Steps
 # -----
@@ -12,9 +14,8 @@
 # 2. Push to Artifact Registry
 # 3. Run Alembic migrations as a one-off Cloud Run job
 # 4. Deploy new Cloud Run revision
-#
-# The migration step (3) runs BEFORE the new revision goes live (4),
-# ensuring the schema is always ahead of or in sync with the code.
+# 5. Shift traffic to new revision
+# 6. Ensure Cloud Scheduler job exists for daily model price re-seed
 
 substitutions:
   _REGION: asia-southeast1
@@ -23,6 +24,8 @@ substitutions:
   _DB_CONNECTION: "fair-myth-471110-j2:asia-south1:api-prod-pg"
   _SERVICE_ACCOUNT: "api-routersvc-sa@fair-myth-471110-j2.iam.gserviceaccount.com"
   _DATABASE_URL: ""    # set in trigger: full asyncpg DATABASE_URL
+  _SERVICE_URL: ""     # set in trigger: Cloud Run service URL, e.g. https://routersvc-xxx.a.run.app
+  _ADMIN_SECRET: ""    # set in trigger: value of ADMIN_SECRET env var
 
 steps:
   # ── 1. Build ───────────────────────────────────────────────────────────────
@@ -106,6 +109,47 @@ steps:
         [ -z "$$REGION" ] && REGION=asia-southeast1
         gcloud run services update-traffic ${_SERVICE} --region="$$REGION" --to-latest
     waitFor: [deploy]
+
+  # ── 6. Ensure Cloud Scheduler job for daily model price re-seed ────────────
+  # Creates the job on first run; updates it on subsequent runs (idempotent).
+  # Runs at 02:00 UTC daily — seeds model_prices from OpenRouter /api/v1/models.
+  # Requires _SERVICE_URL and _ADMIN_SECRET to be set in the trigger substitutions.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    id: ensure-scheduler-seed
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        if [ -z "${_SERVICE_URL}" ] || [ -z "${_ADMIN_SECRET}" ]; then
+          echo "Skipping scheduler setup: _SERVICE_URL or _ADMIN_SECRET not set."
+          exit 0
+        fi
+        REGION=${_REGION}
+        [ -z "$$REGION" ] && REGION=asia-southeast1
+        JOB_NAME="${_SERVICE}-seed-model-prices"
+        SCHEDULE="0 2 * * *"
+        URI="${_SERVICE_URL}/admin/model-prices/seed"
+        gcloud scheduler jobs create http "$$JOB_NAME" \
+          --location="$$REGION" \
+          --schedule="$$SCHEDULE" \
+          --uri="$$URI" \
+          --message-body="{}" \
+          --http-method=POST \
+          --headers="Authorization=Bearer ${_ADMIN_SECRET},Content-Type=application/json" \
+          --attempt-deadline=5m \
+          --time-zone="UTC" \
+          2>/dev/null \
+        || \
+        gcloud scheduler jobs update http "$$JOB_NAME" \
+          --location="$$REGION" \
+          --schedule="$$SCHEDULE" \
+          --uri="$$URI" \
+          --message-body="{}" \
+          --http-method=POST \
+          --headers="Authorization=Bearer ${_ADMIN_SECRET},Content-Type=application/json" \
+          --attempt-deadline=5m \
+          --time-zone="UTC"
+    waitFor: [shift-traffic]
 
 images:
   - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"

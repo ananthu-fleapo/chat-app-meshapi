@@ -20,24 +20,31 @@ GET /v1/models/paid   List only paid models
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
 from app.cache.redis_client import get_redis
 from app.config import settings
+from app.db.engine import get_session_factory
+from app.db.models import Discount, ModelPrice
 from app.db.session import get_db_session
 
 router = APIRouter(tags=["models"])
 logger = structlog.get_logger()
 
 _MODELS_CACHE_KEY = "routerv:models:list"
-_MODELS_CACHE_TTL = 300  # seconds — refresh every 5 minutes
+_MODELS_CACHE_TTL = 300           # 5 minutes — OpenRouter model list
+
+_MODEL_PRICES_CACHE_KEY = "routerv:model_prices"
+_MODEL_PRICES_CACHE_TTL = 86_400  # 24 hours — our billing prices
 
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
@@ -73,8 +80,17 @@ def _is_free(pricing: dict) -> bool:
         return False
 
 
-def _parse_model(raw: dict) -> ModelOut:
+def _parse_model(raw: dict, our_prices: dict[str, dict] | None = None) -> ModelOut:
+    """
+    Parse a raw OpenRouter model dict into ModelOut.
+
+    our_prices — optional dict keyed by model_id from our model_prices table.
+    When a row exists for this model, our prices + is_free flag override the
+    OpenRouter values so that what users see matches what they are billed.
+    """
     pricing = raw.get("pricing") or {}
+    model_id = raw["id"]
+
     # OpenRouter reports price per token; multiply by 1 000 to get per-1k.
     def _per_1k(field: str) -> str | None:
         val = pricing.get(field)
@@ -85,9 +101,24 @@ def _parse_model(raw: dict) -> ModelOut:
         except (InvalidOperation, TypeError):
             return str(val)
 
+    our = (our_prices or {}).get(model_id)
+    if our:
+        return ModelOut(
+            id=model_id,
+            name=raw.get("name", model_id),
+            context_length=raw.get("context_length"),
+            is_free=our["is_free"],
+            pricing=ModelPricing(
+                prompt_usd_per_1k=our["prompt"] if not our["is_free"] else "0",
+                completion_usd_per_1k=our["completion"] if not our["is_free"] else "0",
+                image_usd_per_image=_per_1k("image") if pricing.get("image") else None,
+            ),
+            description=raw.get("description"),
+        )
+
     return ModelOut(
-        id=raw["id"],
-        name=raw.get("name", raw["id"]),
+        id=model_id,
+        name=raw.get("name", model_id),
         context_length=raw.get("context_length"),
         is_free=_is_free(pricing),
         pricing=ModelPricing(
@@ -97,6 +128,45 @@ def _parse_model(raw: dict) -> ModelOut:
         ),
         description=raw.get("description"),
     )
+
+
+async def _get_model_prices() -> dict[str, dict]:
+    """
+    Return our model_prices table as {model_id: {prompt, completion, is_free}}.
+    Cached in Redis for 24 hours; falls back to DB on cache miss or Redis error.
+    """
+    redis = get_redis()
+    if redis is not None:
+        try:
+            cached = await redis.get(_MODEL_PRICES_CACHE_KEY)
+            if cached is not None:
+                return json.loads(cached)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("model_prices_cache_read_failed", error=str(exc))
+
+    try:
+        async with get_session_factory()() as session:
+            result = await session.execute(select(ModelPrice))
+            rows = result.scalars().all()
+        prices = {
+            r.model_id: {
+                "prompt": str(r.prompt_usd_per_1k),
+                "completion": str(r.completion_usd_per_1k),
+                "is_free": r.is_free,
+            }
+            for r in rows
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("model_prices_db_fetch_failed", error=str(exc))
+        return {}
+
+    if redis is not None:
+        try:
+            await redis.setex(_MODEL_PRICES_CACHE_KEY, _MODEL_PRICES_CACHE_TTL, json.dumps(prices))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("model_prices_cache_write_failed", error=str(exc))
+
+    return prices
 
 
 async def _fetch_from_openrouter() -> list[dict]:
@@ -133,10 +203,15 @@ async def _get_models() -> list[ModelOut]:
     On OpenRouter failure with a warm cache → return cached data (stale-while-error).
     On total failure → return empty list (never 500 the caller for a models listing).
 
+    Pricing is sourced from our model_prices table (24 hr Redis cache) so
+    that what users see matches what they are billed.  OpenRouter metadata
+    (name, context_length, description) is still taken from the live list.
+
     Internal OpenRouter routing models (openrouter/*) are filtered out so
     they are never exposed to RouterV users.
     """
     redis = get_redis()
+    our_prices = await _get_model_prices()
 
     # ── Cache hit ─────────────────────────────────────────────────────────────
     if redis is not None:
@@ -145,7 +220,7 @@ async def _get_models() -> list[ModelOut]:
             if cached is not None:
                 raw_list = json.loads(cached)
                 return [
-                    _parse_model(m) for m in raw_list
+                    _parse_model(m, our_prices) for m in raw_list
                     if not _is_internal_model(m.get("id", ""))
                 ]
         except Exception as exc:  # noqa: BLE001
@@ -169,7 +244,7 @@ async def _get_models() -> list[ModelOut]:
                 logger.warning("models_cache_write_failed", error=str(exc))
 
         return [
-            _parse_model(m) for m in raw_list
+            _parse_model(m, our_prices) for m in raw_list
             if not _is_internal_model(m.get("id", ""))
         ]
 
@@ -193,13 +268,30 @@ async def _apply_discounts(
     db: AsyncSession,
 ) -> list[ModelOut]:
     """
-    Enrich each model's pricing with the caller's active discount.
+    Enrich each paid model's pricing with the caller's active discount.
 
-    Uses get_active_discount which handles precedence, expiry warnings,
-    and temporal validity — model-level overrides account-level (non-stackable).
+    Fetches all active discounts for the owner in a single query, then applies
+    them in memory — model-level overrides account-level (non-stackable).
     Free models are skipped.
     """
-    from app.usage.balance import get_active_discount
+    now = datetime.now(UTC)
+
+    result_rows = await db.execute(
+        select(Discount.model_id, Discount.discount_pct)
+        .where(
+            Discount.user_id == owner,
+            Discount.is_active.is_(True),
+            Discount.valid_from <= now,
+            or_(Discount.valid_until.is_(None), Discount.valid_until > now),
+        )
+    )
+    model_discounts: dict[str, Decimal] = {}
+    account_discount: Decimal | None = None
+    for model_id, pct in result_rows.all():
+        if model_id is None:
+            account_discount = pct
+        else:
+            model_discounts[model_id] = pct
 
     result = []
     for m in models:
@@ -207,7 +299,7 @@ async def _apply_discounts(
             result.append(m)
             continue
 
-        pct = await get_active_discount(owner, m.id, db)
+        pct = model_discounts.get(m.id) or account_discount
         if pct is None:
             result.append(m)
             continue
