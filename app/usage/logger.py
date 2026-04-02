@@ -33,10 +33,8 @@ import uuid
 from decimal import Decimal, InvalidOperation
 
 import structlog
-from sqlalchemy import select
-
 from app.db.engine import get_session_factory
-from app.db.models import ModelPrice, UsageEvent
+from app.db.models import UsageEvent
 from app.usage.pricing import calculate_cost
 
 logger = structlog.get_logger()
@@ -49,21 +47,23 @@ async def _our_cost(
 ) -> Decimal | None:
     """
     Resolve cost using our model_prices table (what we charge the user).
+
+    Uses _lookup_model_price which handles the ':free' suffix abuse vector —
+    if a paid model was sent with a fake ':free' suffix it still gets billed
+    at the paid rate.
+
     Falls back to static pricing table, then None.
     """
     try:
+        from app.usage.balance import _lookup_model_price
         async with get_session_factory()() as session:
-            result = await session.execute(
-                select(ModelPrice.prompt_usd_per_1k, ModelPrice.completion_usd_per_1k, ModelPrice.is_free)
-                .where(ModelPrice.model_id == model)
-            )
-            row = result.one_or_none()
+            row = await _lookup_model_price(model, session)
 
         if row is not None:
-            if row[2]:  # is_free
+            if row.is_free:
                 return Decimal("0")
-            prompt_cost = Decimal(str(row[0])) * prompt_tokens / 1000
-            completion_cost = Decimal(str(row[1])) * completion_tokens / 1000
+            prompt_cost = Decimal(str(row.prompt_usd_per_1k)) * prompt_tokens / 1000
+            completion_cost = Decimal(str(row.completion_usd_per_1k)) * completion_tokens / 1000
             return (prompt_cost + completion_cost).quantize(Decimal("0.00000001"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("our_cost_lookup_failed", model=model, error=str(exc))
@@ -83,7 +83,7 @@ async def log_usage_event(
     prompt_tokens: int | None,
     completion_tokens: int | None,
     cached_tokens: int | None = None,
-    upstream_cost: float | None = None,   # usage.cost from upstream — internal reference only
+    upstream_cost: float | None = None,   # usage.cost from OpenRouter — stored for reconciliation, not used for billing
     latency_ms: int,
     status: str,                           # "success" | "error"
     error_code: str | None = None,
@@ -111,6 +111,8 @@ async def log_usage_event(
             logger.warning("discount_lookup_failed", owner=owner, model=model, error=str(exc))
 
     try:
+        upstream_cost_decimal = Decimal(str(upstream_cost)).quantize(Decimal("0.00000001")) if upstream_cost is not None else None
+
         async with get_session_factory()() as session:
             event = UsageEvent(
                 key_id=uuid.UUID(key_id),
@@ -123,6 +125,7 @@ async def log_usage_event(
                 total_tokens=total_tokens,
                 cached_tokens=cached_tokens,
                 cost_usd=cost,
+                upstream_cost_usd=upstream_cost_decimal,
                 latency_ms=latency_ms,
                 status=status,
                 error_code=error_code,
@@ -138,6 +141,7 @@ async def log_usage_event(
             completion_tokens=completion_tokens,
             cached_tokens=cached_tokens,
             cost_usd=str(cost) if cost is not None else None,
+            upstream_cost_usd=str(upstream_cost_decimal) if upstream_cost_decimal is not None else None,
             latency_ms=latency_ms,
             status=status,
         )

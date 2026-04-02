@@ -125,7 +125,7 @@ class Template(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    name: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)  # covered by uq_templates_owner_name
     owner: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -174,9 +174,12 @@ class UsageEvent(Base):
     prompt_tokens     Input tokens charged. NULL if upstream didn't report.
     completion_tokens Output tokens charged. NULL if upstream didn't report.
     total_tokens      Sum of prompt + completion tokens.
-    cost_usd          USD cost from usage.cost in the upstream response.
-                      Falls back to static pricing table if upstream omits it.
-                      NULL when neither source is available.
+    cost_usd          What we charged the user (USD), calculated from our
+                      model_prices table. NULL when token counts unavailable.
+    upstream_cost_usd Raw USD amount reported by OpenRouter in usage.cost.
+                      Reference only — not used for billing, kept for margin
+                      reconciliation (our cost vs what we charged). NULL when
+                      upstream omits the field.
     cached_tokens     Prompt tokens served from provider cache. NULL if not reported.
     latency_ms        Wall-clock ms from request start to last byte.
     status            "success" | "error"
@@ -203,6 +206,8 @@ class UsageEvent(Base):
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 8), nullable=True)
+    # Raw upstream cost from OpenRouter usage.cost — reference only, not used for billing.
+    upstream_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 8), nullable=True)
     # Phase 6 — populated from usage.prompt_tokens_details.cached_tokens in
     # the upstream response.  NULL = provider did not report cache data.
     cached_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
