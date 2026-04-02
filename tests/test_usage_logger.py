@@ -37,6 +37,9 @@ def _make_write_session():
     session = AsyncMock()
     session.add = MagicMock()
     session.commit = AsyncMock()
+    # Return a plain MagicMock so that result methods like scalar_one_or_none()
+    # don't produce unawaited coroutines (Python 3.13 warns on this).
+    session.execute = AsyncMock(return_value=MagicMock())
     return session
 
 

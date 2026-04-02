@@ -36,6 +36,8 @@ router = APIRouter(prefix="/v1/keys", tags=["keys"])
 class CreateKeyRequest(BaseModel):
     label: str | None = None          # human name, stored in meta
     default_model: str | None = None
+    rpm: int | None = None
+    rpd: int | None = None
 
 
 class CreateKeyResponse(BaseModel):
@@ -52,6 +54,8 @@ class KeySummary(BaseModel):
     label: str | None
     status: str
     default_model: str | None
+    rpm_limit: int | None
+    rpd_limit: int | None
     created_at: str
 
 
@@ -87,6 +91,8 @@ def _to_summary(k: ApiKey) -> KeySummary:
         label=label,
         status=k.status,
         default_model=k.default_model,
+        rpm_limit=k.rpm_limit,
+        rpd_limit=k.rpd_limit,
         created_at=k.created_at.isoformat(),
     )
 
@@ -116,6 +122,8 @@ async def create_key(
         default_model=body.default_model,
         meta={"label": body.label} if body.label else None,
         provider_key_id=provider_key.id if provider_key else None,
+        rpm_limit=body.rpm,
+        rpd_limit=body.rpd,
     )
     db.add(key)
     await db.flush()

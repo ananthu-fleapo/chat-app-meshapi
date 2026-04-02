@@ -316,16 +316,24 @@ async def delete_key(
 
 # ── Usage reporting (Phase 5) ─────────────────────────────────────────────────
 
+class KeyModelBreakdown(BaseModel):
+    model: str
+    requests: int
+    cost_usd: float
+
+
 class KeyUsageSummary(BaseModel):
     key_id: str
     owner: str
     total_requests: int
     successful_requests: int
     error_requests: int
-    total_tokens: int | None
-    total_cost_usd: str | None
+    total_input_tokens: int
+    total_output_tokens: int
+    total_cost_usd: float
     spend_cap_usd: str | None
     spend_cap_remaining_usd: str | None
+    model_breakdown: list[KeyModelBreakdown]
 
 
 class SystemUsageSummary(BaseModel):
@@ -349,21 +357,25 @@ async def get_key_usage(
     row = await db.execute(
         select(
             func.count(UsageEvent.id).label("total"),
-            func.coalesce(
-                func.sum(UsageEvent.total_tokens), 0
-            ).label("tokens"),
-            func.coalesce(
-                func.sum(UsageEvent.cost_usd), 0
-            ).label("cost"),
-            func.count(UsageEvent.id).filter(
-                UsageEvent.status == "success"
-            ).label("success"),
-            func.count(UsageEvent.id).filter(
-                UsageEvent.status == "error"
-            ).label("errors"),
+            func.coalesce(func.sum(UsageEvent.prompt_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(UsageEvent.completion_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("cost"),
+            func.count(UsageEvent.id).filter(UsageEvent.status == "success").label("success"),
+            func.count(UsageEvent.id).filter(UsageEvent.status == "error").label("errors"),
         ).where(UsageEvent.key_id == uid)
     )
     r = row.one()
+
+    breakdown_rows = await db.execute(
+        select(
+            UsageEvent.model,
+            func.count(UsageEvent.id).label("requests"),
+            func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("cost"),
+        )
+        .where(UsageEvent.key_id == uid)
+        .group_by(UsageEvent.model)
+        .order_by(func.count(UsageEvent.id).desc())
+    )
 
     total_cost = Decimal(str(r.cost))
     remaining = (
@@ -378,11 +390,153 @@ async def get_key_usage(
         total_requests=r.total,
         successful_requests=r.success,
         error_requests=r.errors,
-        total_tokens=r.tokens if r.tokens else None,
-        total_cost_usd=str(total_cost) if total_cost else None,
+        total_input_tokens=r.input_tokens,
+        total_output_tokens=r.output_tokens,
+        total_cost_usd=float(total_cost),
         spend_cap_usd=str(key.spend_cap_usd) if key.spend_cap_usd else None,
         spend_cap_remaining_usd=str(remaining) if remaining is not None else None,
+        model_breakdown=[
+            KeyModelBreakdown(model=b.model, requests=b.requests, cost_usd=float(b.cost))
+            for b in breakdown_rows.all()
+        ],
     )
+
+
+# ── Users list ────────────────────────────────────────────────────────────────
+
+class UserSummary(BaseModel):
+    user_id: str
+    key_count: int
+    active_key_count: int
+    total_spent_usd: str
+    balance_usd: str | None
+    last_activity: str | None
+    created_at: str
+
+
+@router.get("/users", response_model=list[UserSummary])
+async def list_users(
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    List all users derived from api_keys.owner, enriched with balance and spend.
+    """
+    # Aggregate per-owner stats from api_keys
+    keys_q = await db.execute(
+        select(
+            ApiKey.owner.label("owner"),
+            func.count(ApiKey.id).label("key_count"),
+            func.count(ApiKey.id).filter(ApiKey.status == "active").label("active_key_count"),
+            func.min(ApiKey.created_at).label("created_at"),
+        ).group_by(ApiKey.owner)
+    )
+    key_rows = keys_q.all()
+
+    # Spend per owner via api_keys join usage_events
+    spend_q = await db.execute(
+        select(
+            ApiKey.owner.label("owner"),
+            func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("total_spent"),
+            func.max(UsageEvent.created_at).label("last_activity"),
+        )
+        .outerjoin(UsageEvent, UsageEvent.key_id == ApiKey.id)
+        .group_by(ApiKey.owner)
+    )
+    spend_by_owner = {r.owner: r for r in spend_q.all()}
+
+    # Balance per user_id (owner == user_id for Supabase users)
+    bal_q = await db.execute(select(UserBalance))
+    bal_by_user = {str(b.user_id): b for b in bal_q.scalars().all()}
+
+    results = []
+    for r in key_rows:
+        spend_row = spend_by_owner.get(r.owner)
+        bal = bal_by_user.get(r.owner)
+        results.append(UserSummary(
+            user_id=r.owner,
+            key_count=r.key_count,
+            active_key_count=r.active_key_count,
+            total_spent_usd=str(Decimal(str(spend_row.total_spent))) if spend_row else "0",
+            balance_usd=str(bal.balance_usd) if bal else None,
+            last_activity=spend_row.last_activity.isoformat() if spend_row and spend_row.last_activity else None,
+            created_at=r.created_at.isoformat(),
+        ))
+
+    results.sort(key=lambda x: x.last_activity or "", reverse=True)
+    return results
+
+
+# ── Usage breakdowns ──────────────────────────────────────────────────────────
+
+class ModelUsageRow(BaseModel):
+    model: str
+    requests: int
+    successful_requests: int
+    total_tokens: int | None
+    total_cost_usd: str
+
+
+class OwnerUsageRow(BaseModel):
+    owner: str
+    requests: int
+    successful_requests: int
+    total_tokens: int | None
+    total_cost_usd: str
+
+
+@router.get("/usage/by-model", response_model=list[ModelUsageRow])
+async def get_usage_by_model(
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Usage breakdown grouped by model, sorted by cost descending."""
+    rows = await db.execute(
+        select(
+            UsageEvent.model,
+            func.count(UsageEvent.id).label("requests"),
+            func.count(UsageEvent.id).filter(UsageEvent.status == "success").label("success"),
+            func.coalesce(func.sum(UsageEvent.total_tokens), 0).label("tokens"),
+            func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("cost"),
+        ).group_by(UsageEvent.model).order_by(func.sum(UsageEvent.cost_usd).desc().nulls_last())
+    )
+    return [
+        ModelUsageRow(
+            model=r.model,
+            requests=r.requests,
+            successful_requests=r.success,
+            total_tokens=r.tokens if r.tokens else None,
+            total_cost_usd=str(Decimal(str(r.cost))),
+        )
+        for r in rows.all()
+    ]
+
+
+@router.get("/usage/by-owner", response_model=list[OwnerUsageRow])
+async def get_usage_by_owner(
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Usage breakdown grouped by key owner, sorted by cost descending."""
+    rows = await db.execute(
+        select(
+            ApiKey.owner,
+            func.count(UsageEvent.id).label("requests"),
+            func.count(UsageEvent.id).filter(UsageEvent.status == "success").label("success"),
+            func.coalesce(func.sum(UsageEvent.total_tokens), 0).label("tokens"),
+            func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("cost"),
+        )
+        .outerjoin(UsageEvent, UsageEvent.key_id == ApiKey.id)
+        .group_by(ApiKey.owner)
+        .order_by(func.sum(UsageEvent.cost_usd).desc().nulls_last())
+    )
+    return [
+        OwnerUsageRow(
+            owner=r.owner,
+            requests=r.requests,
+            successful_requests=r.success,
+            total_tokens=r.tokens if r.tokens else None,
+            total_cost_usd=str(Decimal(str(r.cost))),
+        )
+        for r in rows.all()
+    ]
 
 
 @router.get("/usage/summary", response_model=SystemUsageSummary)
@@ -463,6 +617,12 @@ class AdminProviderKeyOut(BaseModel):
     secret_reachable: bool | None = None
 
 
+def _mask_secret_ref(ref: str) -> str:
+    if len(ref) > 15:
+        return f"{ref[:10]}**********{ref[-5:]}"
+    return ref
+
+
 def _to_pk_out(
     pk: ProviderKey, *, secret_reachable: bool | None = None
 ) -> AdminProviderKeyOut:
@@ -470,7 +630,7 @@ def _to_pk_out(
         id=str(pk.id),
         owner=pk.owner,
         provider=pk.provider,
-        secret_ref=pk.secret_ref,
+        secret_ref=_mask_secret_ref(pk.secret_ref),
         label=pk.label,
         is_active=pk.is_active,
         created_at=pk.created_at.isoformat(),
