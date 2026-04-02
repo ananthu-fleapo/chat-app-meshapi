@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
+from app.auth.dependencies import get_any_auth_owner
 from app.db.models import Template
 from app.db.session import get_db_session
 from app.exceptions import NotFoundError
@@ -75,13 +75,13 @@ class TemplateSummary(BaseModel):
 @router.post("", response_model=TemplateSummary, status_code=201)
 async def create_template(
     body: CreateTemplateRequest,
-    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    owner: str = Depends(get_any_auth_owner),
     db: AsyncSession = Depends(get_db_session),
 ):
     """Create a template scoped to the authenticated user's owner."""
     template = Template(
         name=body.name,
-        owner=identity.owner,
+        owner=owner,
         description=body.description,
         system=body.system,
         messages=body.messages,
@@ -97,7 +97,7 @@ async def create_template(
         await db.rollback()
         raise HTTPException(
             status_code=409,
-            detail=f"A template named '{body.name}' already exists for owner '{identity.owner}'.",
+            detail=f"A template named '{body.name}' already exists for owner '{owner}'.",
         )
 
     logger.info(
@@ -111,13 +111,13 @@ async def create_template(
 
 @router.get("", response_model=list[TemplateSummary])
 async def list_templates(
-    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    owner: str = Depends(get_any_auth_owner),
     db: AsyncSession = Depends(get_db_session),
 ):
     """List all templates belonging to the authenticated user's owner."""
     result = await db.execute(
         select(Template)
-        .where(Template.owner == identity.owner)
+        .where(Template.owner == owner)
         .order_by(Template.created_at.desc())
     )
     return [_to_summary(t) for t in result.scalars().all()]
@@ -126,11 +126,11 @@ async def list_templates(
 @router.get("/{template_id}", response_model=TemplateSummary)
 async def get_template(
     template_id: str,
-    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    owner: str = Depends(get_any_auth_owner),
     db: AsyncSession = Depends(get_db_session),
 ):
     """Get a single template by UUID. Must belong to the caller's owner."""
-    template = await _get_own_or_404(db, template_id, identity.owner)
+    template = await _get_own_or_404(db, template_id, owner)
     return _to_summary(template)
 
 
@@ -138,11 +138,11 @@ async def get_template(
 async def update_template(
     template_id: str,
     body: UpdateTemplateRequest,
-    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    owner: str = Depends(get_any_auth_owner),
     db: AsyncSession = Depends(get_db_session),
 ):
     """Update a template. Only the owning user can edit."""
-    template = await _get_own_or_404(db, template_id, identity.owner)
+    template = await _get_own_or_404(db, template_id, owner)
 
     if body.name is not None:
         template.name = body.name
@@ -166,7 +166,7 @@ async def update_template(
         await db.rollback()
         raise HTTPException(
             status_code=409,
-            detail=f"A template named '{body.name}' already exists for owner '{identity.owner}'.",
+            detail=f"A template named '{body.name}' already exists for owner '{owner}'.",
         )
 
     logger.info(
@@ -181,11 +181,11 @@ async def update_template(
 @router.delete("/{template_id}", status_code=204)
 async def delete_template(
     template_id: str,
-    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    owner: str = Depends(get_any_auth_owner),
     db: AsyncSession = Depends(get_db_session),
 ):
     """Hard delete. Only the owning user can delete."""
-    template = await _get_own_or_404(db, template_id, identity.owner)
+    template = await _get_own_or_404(db, template_id, owner)
     await db.delete(template)
     logger.info(
         "template_deleted",

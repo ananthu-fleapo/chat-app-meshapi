@@ -26,6 +26,7 @@ import hmac
 
 import structlog
 from fastapi import Depends, Header
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +36,8 @@ from app.db.session import get_db_session
 from app.exceptions import ForbiddenError, UnauthorizedError
 
 from app.config import settings
+
+_bearer = HTTPBearer(auto_error=False)
 
 logger = structlog.get_logger()
 
@@ -97,6 +100,53 @@ async def get_authenticated_key(
     logger.debug("auth_cache_miss_populated", key_id=str(key.id), owner=key.owner)
 
     return key
+
+
+async def get_any_auth_owner(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    db: AsyncSession = Depends(get_db_session),
+) -> str:
+    """
+    Flexible auth dependency that accepts either auth plane.
+
+    Tries Supabase JWT (control plane) first; if that fails, falls back to
+    rsk_ API key lookup (data plane). Returns the resolved owner string.
+
+    Use this on endpoints that should be callable from both the dashboard
+    (JWT) and directly via an API key (e.g. /v1/templates, /v1/models).
+    """
+    if credentials is None:
+        raise UnauthorizedError(
+            "Authorization header required. "
+            "Provide a Supabase session token or a RouterV API key."
+        )
+
+    from app.auth.control_plane import get_control_plane_user
+
+    # ── Try JWT first (no DB needed) ──────────────────────────────────────────
+    try:
+        identity = await get_control_plane_user(credentials)
+        return identity.owner
+    except UnauthorizedError:
+        pass
+
+    # ── Fall back to data-plane key ───────────────────────────────────────────
+    token = credentials.credentials
+    key_hash = _hash_key(token)
+
+    cached = await get_cached_key(key_hash)
+    if cached is not None:
+        _check_active(cached, token)
+        return cached.owner
+
+    result = await db.execute(select(ApiKey).where(ApiKey.key_hash == key_hash))
+    key = result.scalar_one_or_none()
+    if key is None:
+        raise UnauthorizedError()
+
+    _check_active(key, token)
+    await set_cached_key(key)
+    return key.owner
 
 
 async def verify_webhook_key(

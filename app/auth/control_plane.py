@@ -50,13 +50,16 @@ from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import settings
-from app.exceptions import UnauthorizedError
+from app.exceptions import ForbiddenError, UnauthorizedError
 
 logger = structlog.get_logger()
 
 # HTTPBearer with auto_error=False so we can return a clean RouterV 401
 # instead of FastAPI's default 403 on missing credentials.
 _bearer = HTTPBearer(auto_error=False)
+
+
+ADMIN_PERMISSION = "mesh_api:admin"
 
 
 @dataclass
@@ -192,6 +195,45 @@ async def get_control_plane_user(
 
     logger.debug(
         "control_plane_authed",
+        sub=identity.sub[:8] + "...",
+        owner=identity.owner,
+    )
+    return identity
+
+
+async def get_admin_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> ControlPlaneIdentity:
+    """
+    FastAPI dependency for admin endpoints.
+
+    Requires a valid Supabase JWT whose app_metadata.permissions list
+    contains "mesh_api:admin".  Raises 401 on invalid/missing token,
+    403 on missing permission.
+    """
+    if credentials is None:
+        raise UnauthorizedError(
+            "Authorization header required. "
+            "Provide a valid Supabase session token: Authorization: Bearer <token>"
+        )
+
+    token = credentials.credentials
+    claims = _verify_jwt(token)
+
+    permissions: list = (claims.get("app_metadata") or {}).get("permissions") or []
+    if ADMIN_PERMISSION not in permissions:
+        raise ForbiddenError(
+            f"Admin access denied. Requires '{ADMIN_PERMISSION}' permission."
+        )
+
+    identity = ControlPlaneIdentity(
+        sub=claims["sub"],
+        owner=_resolve_owner(claims),
+        email=claims.get("email"),
+    )
+
+    logger.debug(
+        "admin_authed",
         sub=identity.sub[:8] + "...",
         owner=identity.owner,
     )

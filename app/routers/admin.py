@@ -1,9 +1,9 @@
 """
-Admin router — dev-only key management + usage reporting.
+Admin router — key management + usage reporting.
 
-Available in ENV=dev only. In prod the router is not registered at all,
-so every /admin/* URL returns 404 from the framework (no route match).
-No ADMIN_SECRET needed: the ENV guard is the protection.
+Protected by JWT auth: the caller must present a valid Supabase JWT whose
+app_metadata.permissions list contains "mesh_api:admin".
+Always enforced — no dev bypass.
 
 Endpoints
 ---------
@@ -28,17 +28,18 @@ import uuid
 from decimal import Decimal
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from ulid import ULID
 
+from app.auth.control_plane import get_admin_user
 from app.cache.key_cache import invalidate_cached_key
 from app.config import settings
 from app.db.models import ApiKey, Discount, ModelPrice, ProviderKey, UsageEvent, UserBalance
 from app.db.session import get_db_session
-from app.exceptions import ForbiddenError, NotFoundError
+from app.exceptions import NotFoundError
 from app.providers.provisioner import (
     ProvisionedKey,
     create_or_key,
@@ -49,17 +50,7 @@ from app.providers.secret_manager import fetch_secret, invalidate_secret_cache, 
 
 logger = structlog.get_logger()
 
-def _require_admin(authorization: str = Header(default="")) -> None:
-    """
-    In prod, require Authorization: Bearer <ADMIN_SECRET>.
-    In dev with no ADMIN_SECRET set, all admin routes are open.
-    """
-    if settings.admin_secret:
-        if authorization != f"Bearer {settings.admin_secret}":
-            raise ForbiddenError("Admin access denied.")
-
-
-router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(_require_admin)])
+router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_admin_user)])
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

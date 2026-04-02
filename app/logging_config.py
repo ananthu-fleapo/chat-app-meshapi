@@ -23,6 +23,15 @@ from typing import Any
 
 import structlog
 
+_HEALTH_PATHS = ("/healthz", "/readyz", "/favicon.ico")
+
+
+class _HealthCheckFilter(logging.Filter):
+    """Drop uvicorn access log records for health-probe paths."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not any(path in record.getMessage() for path in _HEALTH_PATHS)
+
 
 # Map structlog level names → GCP severity values.
 _GCP_SEVERITY: dict[str, str] = {
@@ -121,3 +130,6 @@ def configure_logging() -> None:
         logger_factory=structlog.PrintLoggerFactory(sys.stdout),
         cache_logger_on_first_use=True,
     )
+
+    # Suppress uvicorn's built-in access log for health-probe paths.
+    logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())

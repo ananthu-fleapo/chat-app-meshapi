@@ -30,7 +30,7 @@ from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
+from app.auth.dependencies import get_any_auth_owner
 from app.cache.redis_client import get_redis
 from app.config import settings
 from app.db.engine import get_session_factory
@@ -328,13 +328,13 @@ async def list_models(
         default=None,
         description="Filter: true = free models only, false = paid only, omit = all",
     ),
-    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    owner: str = Depends(get_any_auth_owner),
     db: AsyncSession = Depends(get_db_session),
 ):
     """
     List available models with per-user discounted pricing when applicable.
 
-    Requires a valid dashboard session (Supabase JWT).
+    Accepts either a dashboard JWT or an API key.
     Includes pricing per 1 000 tokens and a convenience ``is_free`` flag.
     If the caller has an active discount, discounted prices are included.
     Response is cached for 5 minutes.
@@ -346,24 +346,24 @@ async def list_models(
     elif free is False:
         models = [m for m in models if not m.is_free]
 
-    return await _apply_discounts(models, identity.owner, db)
+    return await _apply_discounts(models, owner, db)
 
 
 @router.get("/v1/models/free", response_model=list[ModelOut])
 async def list_free_models(
-    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    owner: str = Depends(get_any_auth_owner),
     db: AsyncSession = Depends(get_db_session),
 ):
     """Shortcut: list only models with zero prompt + completion cost."""
     models = [m for m in await _get_models() if m.is_free]
-    return await _apply_discounts(models, identity.owner, db)
+    return await _apply_discounts(models, owner, db)
 
 
 @router.get("/v1/models/paid", response_model=list[ModelOut])
 async def list_paid_models(
-    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
+    owner: str = Depends(get_any_auth_owner),
     db: AsyncSession = Depends(get_db_session),
 ):
     """Shortcut: list only models that have a non-zero cost."""
     models = [m for m in await _get_models() if not m.is_free]
-    return await _apply_discounts(models, identity.owner, db)
+    return await _apply_discounts(models, owner, db)

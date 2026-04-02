@@ -7,6 +7,7 @@ Covers:
   _check_active           — active key passes, suspended key raises ForbiddenError
   get_authenticated_key   — cache hit, cache miss+DB hit, cache miss+DB miss, suspended
   verify_webhook_key      — correct secret, wrong secret, no WEBHOOK_API_KEY configured
+  get_any_auth_owner      — no credentials, JWT success, JWT→API key fallback paths
 """
 
 import hashlib
@@ -205,3 +206,155 @@ class TestVerifyWebhookKey:
             mock_settings.webhook_api_key = None
             with pytest.raises(ForbiddenError):
                 await verify_webhook_key(authorization="Bearer test-webhook-secret")
+
+
+# ── get_any_auth_owner ────────────────────────────────────────────────────────
+
+def _make_credentials(token: str):
+    """Build a mock HTTPAuthorizationCredentials with the given bearer token."""
+    creds = MagicMock()
+    creds.credentials = token
+    return creds
+
+
+class TestGetAnyAuthOwner:
+
+    async def test_no_credentials_raises_unauthorized(self, mock_db):
+        """Missing Authorization header → 401."""
+        from app.auth.dependencies import get_any_auth_owner
+        with pytest.raises(UnauthorizedError):
+            await get_any_auth_owner(credentials=None, db=mock_db)
+
+    async def test_jwt_dev_bypass_returns_token_as_owner(self, mock_db):
+        """
+        With SUPABASE_JWT_SECRET unset (dev bypass), any bearer string is
+        accepted as the owner — DB is never touched.
+        """
+        from app.auth.dependencies import get_any_auth_owner
+        owner = await get_any_auth_owner(
+            credentials=_make_credentials("acme-corp"),
+            db=mock_db,
+        )
+        assert owner == "acme-corp"
+        mock_db.execute.assert_not_called()
+
+    async def test_jwt_fails_falls_back_to_api_key_cache_hit(self, mock_db):
+        """JWT auth fails → falls back to API key; cache hit returns owner."""
+        from app.auth.dependencies import get_any_auth_owner
+
+        cached_key = MagicMock()
+        cached_key.status = "active"
+        cached_key.id = uuid.uuid4()
+        cached_key.owner = "key-owner"
+
+        with patch(
+            "app.auth.control_plane.get_control_plane_user",
+            AsyncMock(side_effect=UnauthorizedError()),
+        ), patch(
+            "app.auth.dependencies.get_cached_key",
+            AsyncMock(return_value=cached_key),
+        ):
+            owner = await get_any_auth_owner(
+                credentials=_make_credentials("rsk_someapikey"),
+                db=mock_db,
+            )
+
+        assert owner == "key-owner"
+        mock_db.execute.assert_not_called()
+
+    async def test_jwt_fails_falls_back_to_api_key_db_hit(self, mock_db):
+        """JWT auth fails → cache miss → DB hit returns owner and populates cache."""
+        from app.auth.dependencies import get_any_auth_owner
+
+        db_key = MagicMock()
+        db_key.status = "active"
+        db_key.id = uuid.uuid4()
+        db_key.owner = "db-owner"
+        mock_db.execute.return_value = make_execute_result(scalar=db_key)
+
+        with patch(
+            "app.auth.control_plane.get_control_plane_user",
+            AsyncMock(side_effect=UnauthorizedError()),
+        ), patch(
+            "app.auth.dependencies.get_cached_key",
+            AsyncMock(return_value=None),
+        ), patch(
+            "app.auth.dependencies.set_cached_key",
+            AsyncMock(),
+        ) as mock_set:
+            owner = await get_any_auth_owner(
+                credentials=_make_credentials("rsk_someapikey"),
+                db=mock_db,
+            )
+
+        assert owner == "db-owner"
+        mock_set.assert_called_once_with(db_key)
+
+    async def test_jwt_fails_api_key_not_found_raises_unauthorized(self, mock_db):
+        """JWT auth fails + key not in cache or DB → 401."""
+        from app.auth.dependencies import get_any_auth_owner
+
+        mock_db.execute.return_value = make_execute_result(scalar=None)
+
+        with patch(
+            "app.auth.control_plane.get_control_plane_user",
+            AsyncMock(side_effect=UnauthorizedError()),
+        ), patch(
+            "app.auth.dependencies.get_cached_key",
+            AsyncMock(return_value=None),
+        ):
+            with pytest.raises(UnauthorizedError):
+                await get_any_auth_owner(
+                    credentials=_make_credentials("rsk_unknownkey"),
+                    db=mock_db,
+                )
+
+    async def test_jwt_fails_suspended_api_key_raises_forbidden(self, mock_db):
+        """JWT auth fails → DB returns a suspended key → 403."""
+        from app.auth.dependencies import get_any_auth_owner
+
+        db_key = MagicMock()
+        db_key.status = "suspended"
+        db_key.id = uuid.uuid4()
+        db_key.owner = "suspended-owner"
+        mock_db.execute.return_value = make_execute_result(scalar=db_key)
+
+        with patch(
+            "app.auth.control_plane.get_control_plane_user",
+            AsyncMock(side_effect=UnauthorizedError()),
+        ), patch(
+            "app.auth.dependencies.get_cached_key",
+            AsyncMock(return_value=None),
+        ), patch(
+            "app.auth.dependencies.set_cached_key",
+            AsyncMock(),
+        ), patch("app.metrics.AUTH_FAILURES", MagicMock()):
+            with pytest.raises(ForbiddenError):
+                await get_any_auth_owner(
+                    credentials=_make_credentials("rsk_suspendedkey"),
+                    db=mock_db,
+                )
+
+    async def test_jwt_fails_suspended_api_key_in_cache_raises_forbidden(self, mock_db):
+        """JWT auth fails → cache returns a suspended key → 403, no DB call."""
+        from app.auth.dependencies import get_any_auth_owner
+
+        cached_key = MagicMock()
+        cached_key.status = "suspended"
+        cached_key.id = uuid.uuid4()
+        cached_key.owner = "suspended-owner"
+
+        with patch(
+            "app.auth.control_plane.get_control_plane_user",
+            AsyncMock(side_effect=UnauthorizedError()),
+        ), patch(
+            "app.auth.dependencies.get_cached_key",
+            AsyncMock(return_value=cached_key),
+        ), patch("app.metrics.AUTH_FAILURES", MagicMock()):
+            with pytest.raises(ForbiddenError):
+                await get_any_auth_owner(
+                    credentials=_make_credentials("rsk_suspendedkey"),
+                    db=mock_db,
+                )
+
+        mock_db.execute.assert_not_called()

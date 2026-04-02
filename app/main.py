@@ -198,9 +198,9 @@ def create_app() -> FastAPI:
     # FX rate refresh: internal scheduler endpoint, guarded by WEBHOOK_API_KEY.
     app.include_router(fx_rates.router)
 
-    # Admin router: always registered, but gated differently per environment.
-    # Dev  → no auth required (ENV guard is the protection)
-    # Prod → requires Authorization: Bearer <ADMIN_SECRET> (must be set)
+
+    # Admin router: JWT-gated. Caller must have app_metadata.permissions
+    # containing "mesh_api:admin". Dev bypass active when SUPABASE_JWT_SECRET unset.
     from app.routers import admin
     app.include_router(admin.router)
 

@@ -110,12 +110,6 @@ class Settings(BaseSettings):
     # Example: set to "routerv_owner" and add that field to Supabase user_metadata.
     supabase_owner_claim: str = ""
 
-    # ── Admin secret ──────────────────────────────────────────────────────────
-    # When set, registers /admin/* routes in prod gated behind:
-    #   Authorization: Bearer <ADMIN_SECRET>
-    # Leave empty in dev (routes are always available without auth).
-    admin_secret: str = ""
-
     # ── FX rate refresh ───────────────────────────────────────────────────────
     # URL for the exchange rate API called by POST /internal/fx-rates/refresh.
     exchange_rate_api_url: str = ""
