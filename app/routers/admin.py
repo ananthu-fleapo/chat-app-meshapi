@@ -622,6 +622,8 @@ async def admin_rotate_provider_key(
 
 class ModelPriceIn(BaseModel):
     model_id: str
+    provider: str = "openrouter"
+    is_default: bool = False
     prompt_usd_per_1k: float
     completion_usd_per_1k: float
     is_free: bool = False
@@ -631,10 +633,13 @@ class ModelPriceUpdateIn(BaseModel):
     prompt_usd_per_1k: float | None = None
     completion_usd_per_1k: float | None = None
     is_free: bool | None = None
+    is_default: bool | None = None
 
 
 class ModelPriceOut(BaseModel):
     model_id: str
+    provider: str
+    is_default: bool
     prompt_usd_per_1k: str
     completion_usd_per_1k: str
     is_free: bool
@@ -644,6 +649,8 @@ class ModelPriceOut(BaseModel):
 def _to_price_out(p: ModelPrice) -> ModelPriceOut:
     return ModelPriceOut(
         model_id=p.model_id,
+        provider=p.provider,
+        is_default=p.is_default,
         prompt_usd_per_1k=str(p.prompt_usd_per_1k),
         completion_usd_per_1k=str(p.completion_usd_per_1k),
         is_free=p.is_free,
@@ -651,32 +658,68 @@ def _to_price_out(p: ModelPrice) -> ModelPriceOut:
     )
 
 
+async def _clear_default(model_id: str, db: AsyncSession) -> None:
+    """Clear is_default on all rows for model_id (called before setting a new default)."""
+    result = await db.execute(
+        select(ModelPrice).where(
+            ModelPrice.model_id == model_id,
+            ModelPrice.is_default.is_(True),
+        )
+    )
+    for row in result.scalars().all():
+        row.is_default = False
+
+
 @router.post("/model-prices", response_model=ModelPriceOut, status_code=201)
 async def create_model_price(
     body: ModelPriceIn,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Set pricing for a model. Replaces existing entry if model_id already exists."""
+    """
+    Create or replace pricing for a (model_id, provider) pair.
+
+    Setting is_default=true atomically clears the flag on any other provider
+    row for this model_id so exactly one default exists per model.
+    """
     from decimal import Decimal
-    existing = await db.execute(select(ModelPrice).where(ModelPrice.model_id == body.model_id))
+
+    existing = await db.execute(
+        select(ModelPrice).where(
+            ModelPrice.model_id == body.model_id,
+            ModelPrice.provider == body.provider,
+        )
+    )
     price = existing.scalar_one_or_none()
+
+    # If making this the default, clear any existing default first
+    if body.is_default:
+        await _clear_default(body.model_id, db)
 
     if price is None:
         price = ModelPrice(
             model_id=body.model_id,
+            provider=body.provider,
+            is_default=body.is_default,
             prompt_usd_per_1k=Decimal(str(body.prompt_usd_per_1k)),
             completion_usd_per_1k=Decimal(str(body.completion_usd_per_1k)),
             is_free=body.is_free,
         )
         db.add(price)
     else:
+        price.is_default = body.is_default
         price.prompt_usd_per_1k = Decimal(str(body.prompt_usd_per_1k))
         price.completion_usd_per_1k = Decimal(str(body.completion_usd_per_1k))
         price.is_free = body.is_free
 
     await db.flush()
     await db.refresh(price)
-    logger.info("model_price_set", model_id=body.model_id, is_free=body.is_free)
+    logger.info(
+        "model_price_set",
+        model_id=body.model_id,
+        provider=body.provider,
+        is_default=body.is_default,
+        is_free=body.is_free,
+    )
     return _to_price_out(price)
 
 
@@ -684,23 +727,40 @@ async def create_model_price(
 async def list_model_prices(
     db: AsyncSession = Depends(get_db_session),
 ):
-    """List all model prices."""
-    result = await db.execute(select(ModelPrice).order_by(ModelPrice.model_id))
+    """List all model prices (all providers per model)."""
+    result = await db.execute(
+        select(ModelPrice).order_by(ModelPrice.model_id, ModelPrice.provider)
+    )
     return [_to_price_out(p) for p in result.scalars().all()]
 
 
-@router.patch("/model-prices/{model_id}", response_model=ModelPriceOut)
+@router.patch("/model-prices/{model_id}/{provider}", response_model=ModelPriceOut)
 async def update_model_price(
     model_id: str,
+    provider: str,
     body: ModelPriceUpdateIn,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Update pricing fields for an existing model."""
+    """
+    Update pricing fields for an existing (model_id, provider) row.
+
+    Setting is_default=true atomically clears the flag on any other provider
+    row for this model_id.
+    """
     from decimal import Decimal
-    result = await db.execute(select(ModelPrice).where(ModelPrice.model_id == model_id))
+
+    result = await db.execute(
+        select(ModelPrice).where(
+            ModelPrice.model_id == model_id,
+            ModelPrice.provider == provider,
+        )
+    )
     price = result.scalar_one_or_none()
     if price is None:
-        raise NotFoundError(f"Model price for '{model_id}' not found.")
+        raise NotFoundError(f"Model price for '{model_id}/{provider}' not found.")
+
+    if body.is_default is not None and body.is_default:
+        await _clear_default(model_id, db)
 
     if body.prompt_usd_per_1k is not None:
         price.prompt_usd_per_1k = Decimal(str(body.prompt_usd_per_1k))
@@ -708,25 +768,33 @@ async def update_model_price(
         price.completion_usd_per_1k = Decimal(str(body.completion_usd_per_1k))
     if body.is_free is not None:
         price.is_free = body.is_free
+    if body.is_default is not None:
+        price.is_default = body.is_default
 
     await db.flush()
     await db.refresh(price)
-    logger.info("model_price_updated", model_id=model_id)
+    logger.info("model_price_updated", model_id=model_id, provider=provider)
     return _to_price_out(price)
 
 
-@router.delete("/model-prices/{model_id}", status_code=204)
+@router.delete("/model-prices/{model_id}/{provider}", status_code=204)
 async def delete_model_price(
     model_id: str,
+    provider: str,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Remove a model from the price table."""
-    result = await db.execute(select(ModelPrice).where(ModelPrice.model_id == model_id))
+    """Remove a (model_id, provider) row from the price table."""
+    result = await db.execute(
+        select(ModelPrice).where(
+            ModelPrice.model_id == model_id,
+            ModelPrice.provider == provider,
+        )
+    )
     price = result.scalar_one_or_none()
     if price is None:
-        raise NotFoundError(f"Model price for '{model_id}' not found.")
+        raise NotFoundError(f"Model price for '{model_id}/{provider}' not found.")
     await db.delete(price)
-    logger.info("model_price_deleted", model_id=model_id)
+    logger.info("model_price_deleted", model_id=model_id, provider=provider)
 
 
 class SeedPricesResponse(BaseModel):
@@ -790,13 +858,15 @@ async def seed_model_prices(
 
         stmt = pg_insert(ModelPrice).values(
             model_id=model_id,
+            provider="openrouter",
+            is_default=True,
             prompt_usd_per_1k=prompt_per_1k,
             completion_usd_per_1k=completion_per_1k,
             is_free=is_free,
         )
         if overwrite:
             stmt = stmt.on_conflict_do_update(
-                index_elements=["model_id"],
+                index_elements=["model_id", "provider"],
                 set_={
                     "prompt_usd_per_1k": stmt.excluded.prompt_usd_per_1k,
                     "completion_usd_per_1k": stmt.excluded.completion_usd_per_1k,
@@ -805,7 +875,7 @@ async def seed_model_prices(
                 },
             )
         else:
-            stmt = stmt.on_conflict_do_nothing(index_elements=["model_id"])
+            stmt = stmt.on_conflict_do_nothing(index_elements=["model_id", "provider"])
 
         await db.execute(stmt)
         seeded_ids.append(model_id)

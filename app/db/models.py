@@ -190,6 +190,7 @@ class UsageEvent(Base):
     __table_args__ = (
         # Composite index: per-key time-range queries (most common access pattern)
         Index("ix_usage_events_key_created", "key_id", "created_at"),
+        Index("ix_usage_events_provider", "provider"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -211,6 +212,11 @@ class UsageEvent(Base):
     # Phase 6 — populated from usage.prompt_tokens_details.cached_tokens in
     # the upstream response.  NULL = provider did not report cache data.
     cached_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Provider that handled this request — matches model_prices.provider.
+    # Populated from resolve_provider() in the inference router.
+    provider: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="openrouter"
+    )
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -313,11 +319,17 @@ class UserBalance(Base):
 
 class ModelPrice(Base):
     """
-    Admin-managed pricing for each model.
+    Admin-managed pricing for each model, keyed by (model_id, provider).
 
     Columns
     -------
     model_id               Exact model identifier, e.g. "openai/gpt-4o-mini".
+    provider               Upstream provider slug: "openrouter", "vertex",
+                           "bedrock", "openai". Part of composite primary key.
+    is_default             True for the provider that handles this model when
+                           no explicit provider preference is given. At most one
+                           row per model_id may have is_default=True (enforced
+                           by the partial unique index ix_model_prices_one_default).
     prompt_usd_per_1k      Our charge per 1 000 prompt tokens.
     completion_usd_per_1k  Our charge per 1 000 completion tokens.
     is_free                When True, requests are never billed regardless of
@@ -327,6 +339,12 @@ class ModelPrice(Base):
     __tablename__ = "model_prices"
 
     model_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    provider: Mapped[str] = mapped_column(
+        Text, primary_key=True, server_default="openrouter"
+    )
+    is_default: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
     prompt_usd_per_1k: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False)
     completion_usd_per_1k: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False)
     is_free: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
@@ -339,8 +357,8 @@ class ModelPrice(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<ModelPrice model_id={self.model_id!r} "
-            f"prompt={self.prompt_usd_per_1k} free={self.is_free}>"
+            f"<ModelPrice model_id={self.model_id!r} provider={self.provider!r} "
+            f"default={self.is_default} prompt={self.prompt_usd_per_1k} free={self.is_free}>"
         )
 
 

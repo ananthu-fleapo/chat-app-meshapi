@@ -47,7 +47,9 @@
       "Bash(.venv/bin/python -m pytest tests/test_balance.py tests/test_usage_logger.py -q)",
       "Bash(.venv/bin/alembic heads:*)",
       "Bash(grep -n \"revision\\\\|down_revision\" /Users/aifiesta/Downloads/code/routersvc/alembic/versions/0013*.py /Users/aifiesta/Downloads/code/routersvc/alembic/versions/0014*.py)",
-      "Bash(.venv/bin/alembic history:*)"
+      "Bash(.venv/bin/alembic history:*)",
+      "Bash(ls alembic/versions/*.py)",
+      "Bash(head -5:*)"
     ]
   }
 }

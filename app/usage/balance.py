@@ -52,14 +52,24 @@ async def _lookup_model_price(model: str, db: AsyncSession) -> ModelPrice | None
     This keeps OpenRouter's legitimate ':free' variants working (they have
     their own exact rows in model_prices) while closing the abuse vector.
     """
-    result = await db.execute(select(ModelPrice).where(ModelPrice.model_id == model))
+    result = await db.execute(
+        select(ModelPrice).where(
+            ModelPrice.model_id == model,
+            ModelPrice.is_default.is_(True),
+        )
+    )
     row = result.scalar_one_or_none()
     if row is not None:
         return row
 
     if model.endswith(":free"):
         base = model.removesuffix(":free")
-        result = await db.execute(select(ModelPrice).where(ModelPrice.model_id == base))
+        result = await db.execute(
+            select(ModelPrice).where(
+                ModelPrice.model_id == base,
+                ModelPrice.is_default.is_(True),
+            )
+        )
         base_row = result.scalar_one_or_none()
         # Only return the base row when it is a paid model — that means the
         # ':free' suffix was fabricated to evade the balance check.

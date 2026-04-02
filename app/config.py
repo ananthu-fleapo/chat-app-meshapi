@@ -58,6 +58,38 @@ class Settings(BaseSettings):
     default_free_rpm: int = 20
     default_free_rpd: int = 200
 
+    # ── Vertex AI ─────────────────────────────────────────────────────────────
+    # Set these to route models to Vertex AI.
+    # vertex_ai_service_account_json: full JSON string of a service account key,
+    #   typically injected from a GCP Secret or environment variable.
+    # Leave all empty to disable Vertex AI routing.
+    vertex_ai_project_id: str = ""
+    vertex_ai_location: str = "us-central1"
+    vertex_ai_service_account_json: str = ""  # full JSON string
+    vertex_ai_timeout_s: float = 120.0
+
+    # ── AWS Bedrock ───────────────────────────────────────────────────────────
+    # Set these to route models to AWS Bedrock via the Converse API.
+    # Leave all empty to disable Bedrock routing.
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_region: str = "us-east-1"
+    bedrock_timeout_s: float = 120.0
+
+    # ── OpenAI Direct ─────────────────────────────────────────────────────────
+    # Set openai_api_key to route models directly to OpenAI (bypassing OpenRouter).
+    openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_timeout_s: float = 120.0
+
+    # ── Qwen / DashScope ──────────────────────────────────────────────────────
+    # Set qwen_api_key to route Qwen models via Alibaba Cloud DashScope API.
+    # DashScope exposes an OpenAI-compatible endpoint:
+    #   https://dashscope.aliyuncs.com/compatible-mode/v1
+    qwen_api_key: str = ""
+    qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    qwen_timeout_s: float = 120.0
+
     # ── GCP (Phase 7+) ────────────────────────────────────────────────────────
     gcp_project_id: str = ""
 
