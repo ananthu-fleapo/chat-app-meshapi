@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     # Leave empty in dev (routes are always available without auth).
     admin_secret: str = ""
 
+    # ── FX rate refresh ───────────────────────────────────────────────────────
+    # URL for the exchange rate API called by POST /internal/fx-rates/refresh.
+    exchange_rate_api_url: str = ""
+
     # ── Webhook auth ─────────────────────────────────────────────────────────
     # Static secret for inbound webhook calls (e.g. payment provider callbacks).
     # Set WEBHOOK_API_KEY in .env. Requests must pass it as: Bearer <key>.

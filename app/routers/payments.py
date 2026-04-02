@@ -138,12 +138,14 @@ async def create_payment(
                     detail=f"No conversion rate found for currency '{currency}'",
                 )
             # Amount is in the smallest unit (e.g. paise for INR).
-            # Divide by 100 to get major units, then multiply by rate to get USD.
-            amount_usd = (Decimal(body.amount) / 100) * rate_row.rate
+            # Divide by 100 to get major units, then divide by total_rate
+            # (INR-per-USD with markup) to get USD.
+            effective_rate = rate_row.total_rate or rate_row.rate
+            amount_usd = (Decimal(body.amount) / 100) / effective_rate
             logger.info(
                 "payment_currency_converted",
                 currency=currency,
-                rate=str(rate_row.rate),
+                total_rate=str(effective_rate),
                 amount_original=body.amount,
                 amount_usd=str(amount_usd),
                 user_id=body.userId,

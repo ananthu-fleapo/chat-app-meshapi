@@ -350,16 +350,23 @@ class CurrencyConversionRate(Base):
 
     Columns
     -------
-    currency   ISO 4217 currency code (e.g. "INR", "EUR"). Primary key.
-    rate       How many USD 1 unit of this currency is worth (e.g. INR: ~0.012).
-               For USD itself this should be 1.0.
-    updated_at Timestamp of the last rate update.
+    currency    ISO 4217 currency code (e.g. "INR", "EUR"). Primary key.
+    rate        Raw units of this currency per 1 USD as returned by the exchange
+                rate API (e.g. INR: 93.8571).  For USD itself this should be 1.0.
+    markup_fee  0.2 % of rate — the absolute markup added on top of the raw rate.
+    total_rate  rate + markup_fee — the effective rate used when converting
+                payment amounts to USD (divide INR amount by total_rate).
+    updated_at  Timestamp of the last rate update.
     """
 
     __tablename__ = "currency_conversion_rates"
 
     currency: Mapped[str] = mapped_column(Text, primary_key=True)
     rate: Mapped[Decimal] = mapped_column(Numeric(18, 10), nullable=False)
+    # 0.2 % markup expressed as an absolute amount (rate * 0.002)
+    markup_fee: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    # rate + markup_fee — the effective rate charged to callers
+    total_rate: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

@@ -13,7 +13,7 @@ from app.middleware import CloudflareOriginGuard, RequestIdMiddleware
 from app.providers.openrouter import OpenRouterAdapter
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from app.routers import balance, inference, keys, models, payments, usage
+from app.routers import balance, inference, keys, models, payments, usage, fx_rates
 
 from fastapi.middleware.cors import CORSMiddleware 
 
@@ -115,6 +115,9 @@ def create_app() -> FastAPI:
 
     # Models listing: unauthenticated, public info.
     app.include_router(models.router)
+
+    # FX rate refresh: internal scheduler endpoint, guarded by WEBHOOK_API_KEY.
+    app.include_router(fx_rates.router)
 
     # Admin router: always registered, but gated differently per environment.
     # Dev  → no auth required (ENV guard is the protection)

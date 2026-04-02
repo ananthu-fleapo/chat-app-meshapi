@@ -34,7 +34,17 @@ class RouterVError(Exception):
     error_code: str = "internal_error"
     message: str = "An unexpected error occurred."
 
-    def __init__(self, message: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        status_code: int | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        if status_code is not None:
+            self.status_code = status_code
+        if error_code is not None:
+            self.error_code = error_code
         self.message = message or self.__class__.message
         super().__init__(self.message)
 
