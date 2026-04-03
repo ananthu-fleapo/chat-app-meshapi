@@ -3,8 +3,8 @@
 Add provider + is_default to model_prices (composite PK),
 and provider column to usage_events for per-request audit trail.
 
-Revision ID: 0016
-Revises: 0015
+Revision ID: 0016a
+Revises: 0016
 Create Date: 2026-03-31
 """
 
@@ -12,8 +12,8 @@ from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision = "0016"
-down_revision = "0015"
+revision = "0016a"
+down_revision = "0016"
 branch_labels = None
 depends_on = None
 

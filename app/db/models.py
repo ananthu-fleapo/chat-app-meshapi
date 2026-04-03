@@ -317,6 +317,55 @@ class UserBalance(Base):
         return f"<UserBalance user_id={self.user_id!r} balance={self.balance_usd}>"
 
 
+class Model(Base):
+    """
+    Admin-managed model registry — the canonical whitelist for GET /v1/models.
+
+    Only models with a row here are returned by the public models API.
+    model_prices owns pricing and provider routing independently; the two
+    tables are joined at query time (model_prices.is_default=true row provides
+    the pricing shown to users).
+
+    Columns
+    -------
+    model_id        Exact model identifier, e.g. "openai/gpt-4o-mini".
+                    Must match the model_id used in model_prices rows.
+    name            Human-readable display name, e.g. "GPT-4o Mini".
+    context_length  Max context window in tokens. NULL if unknown.
+    description     Optional marketing/capability description.
+    is_enabled      False = hidden from the public listing (soft disable).
+                    Pricing and routing still function for keys that already
+                    use this model; only the discovery API filters it out.
+    """
+
+    __tablename__ = "models"
+
+    model_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    context_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true", index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Model model_id={self.model_id!r} name={self.name!r} "
+            f"enabled={self.is_enabled}>"
+        )
+
+
 class ModelPrice(Base):
     """
     Admin-managed pricing for each model, keyed by (model_id, provider).

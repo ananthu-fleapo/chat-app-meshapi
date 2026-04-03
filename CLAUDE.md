@@ -112,8 +112,38 @@ tests/              pytest unit tests (mock DB via AsyncMock, env vars set befor
 | `usage_events` | Per-request logs: model, tokens, cost_usd, latency_ms |
 | `provider_keys` | Per-owner upstream key references (GCP Secret Manager) |
 | `payment_events` | Payment/billing event log |
-| `model_prices` | Per-model input/output token pricing (USD) |
+| `models` | Model registry whitelist — name, context_length, description, is_enabled |
+| `model_prices` | Per-model per-provider pricing (composite PK: model_id + provider) |
 | `user_balances` | Credit balance per owner |
+| `discounts` | Per-user/per-model discount percentages |
+| `currency_conversion_rates` | FX rates to USD with markup |
+
+### Model Listing Design
+
+`GET /v1/models` is **DB-only** — no upstream provider calls:
+
+- **`models` table** — whitelist + metadata (name, context_length, description, is_enabled)
+- **`model_prices` table** — pricing and provider routing (composite PK: model_id + provider)
+- Query joins both tables on `is_default=true` and `is_enabled=true`
+- Redis cache: 5-minute TTL (invalidated immediately on any admin write)
+- Discounts applied per-request from `discounts` table — never cached
+
+**Admin flow to add a model:**
+1. `POST /admin/models` — register metadata
+2. `POST /admin/model-prices` — add pricing (model_id must exist in `models`)
+3. Alternatively: `POST /admin/model-prices/seed` — bulk import from OpenRouter (seeds both tables)
+
+### Providers
+
+Five upstream providers, routing is DB-driven via `model_prices.provider`:
+
+| Provider | Slug | Auth |
+|---|---|---|
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
+| Vertex AI | `vertex` | Service account JSON |
+| AWS Bedrock | `bedrock` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
+| OpenAI Direct | `openai` | `OPENAI_API_KEY` |
+| Qwen / DashScope | `qwen` | `QWEN_API_KEY` |
 
 ---
 

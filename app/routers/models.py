@@ -1,20 +1,20 @@
 """
 Models API — GET /v1/models
 
-Returns the list of models available through the upstream provider (OpenRouter),
-augmented with a ``is_free`` flag.  The response is cached in Redis for
-``MODELS_CACHE_TTL`` seconds to avoid hammering the OpenRouter models endpoint.
+Returns only models registered in the `models` table (is_enabled=true),
+joined with their default pricing row from `model_prices`.
 
-OpenRouter model pricing format:
-  "pricing": {"prompt": "0.000005", "completion": "0.000015", ...}
+This is a pure DB read — no upstream provider calls are made.
+The result is cached in Redis for 5 minutes (short TTL acceptable because
+the data source is an in-house Postgres instance, not an external API).
+Discount enrichment is applied per-request from the `discounts` table
+and is never cached (user-specific).
 
-A model is considered free when both prompt and completion prices are "0".
-
-Endpoint
---------
-GET /v1/models        List all models (no auth required — public info)
-GET /v1/models/free   List only free-tier models
-GET /v1/models/paid   List only paid models
+Endpoints
+---------
+GET /v1/models              List all enabled models (auth required)
+GET /v1/models/free         List only free-tier models
+GET /v1/models/paid         List only paid models
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
-import httpx
 import structlog
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -32,19 +31,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_any_auth_owner
 from app.cache.redis_client import get_redis
-from app.config import settings
 from app.db.engine import get_session_factory
-from app.db.models import Discount, ModelPrice
+from app.db.models import Discount, Model, ModelPrice
 from app.db.session import get_db_session
 
 router = APIRouter(tags=["models"])
 logger = structlog.get_logger()
 
+# In-house DB — 5-minute TTL is a safe balance between freshness and DB load.
+# Admin writes to `models` or `model_prices` invalidate this key immediately.
 _MODELS_CACHE_KEY = "routerv:models:list"
-_MODELS_CACHE_TTL = 300           # 5 minutes — OpenRouter model list
-
-_MODEL_PRICES_CACHE_KEY = "routerv:model_prices"
-_MODEL_PRICES_CACHE_TTL = 86_400  # 24 hours — our billing prices
+_MODELS_CACHE_TTL = 300  # 5 minutes
 
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
@@ -70,194 +67,82 @@ class ModelOut(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _is_free(pricing: dict) -> bool:
-    """Return True when both prompt and completion are priced at zero."""
-    try:
-        prompt = Decimal(pricing.get("prompt", "1"))
-        completion = Decimal(pricing.get("completion", "1"))
-        return prompt == 0 and completion == 0
-    except (InvalidOperation, TypeError):
-        return False
-
-
-def _parse_model(raw: dict, our_prices: dict[str, dict] | None = None) -> ModelOut:
-    """
-    Parse a raw OpenRouter model dict into ModelOut.
-
-    our_prices — optional dict keyed by model_id from our model_prices table.
-    When a row exists for this model, our prices + is_free flag override the
-    OpenRouter values so that what users see matches what they are billed.
-    """
-    pricing = raw.get("pricing") or {}
-    model_id = raw["id"]
-
-    # OpenRouter reports price per token; multiply by 1 000 to get per-1k.
-    def _per_1k(field: str) -> str | None:
-        val = pricing.get(field)
-        if val is None:
-            return None
-        try:
-            return str(Decimal(val) * 1000)
-        except (InvalidOperation, TypeError):
-            return str(val)
-
-    our = (our_prices or {}).get(model_id)
-    if our:
-        return ModelOut(
-            id=model_id,
-            name=raw.get("name", model_id),
-            context_length=raw.get("context_length"),
-            is_free=our["is_free"],
-            pricing=ModelPricing(
-                prompt_usd_per_1k=our["prompt"] if not our["is_free"] else "0",
-                completion_usd_per_1k=our["completion"] if not our["is_free"] else "0",
-                image_usd_per_image=_per_1k("image") if pricing.get("image") else None,
-            ),
-            description=raw.get("description"),
+def _row_to_model_out(m: Model, mp: ModelPrice) -> ModelOut:
+    """Map a (Model, ModelPrice) ORM pair to the public ModelOut schema."""
+    if mp.is_free:
+        pricing = ModelPricing(prompt_usd_per_1k="0", completion_usd_per_1k="0")
+    else:
+        pricing = ModelPricing(
+            prompt_usd_per_1k=str(mp.prompt_usd_per_1k),
+            completion_usd_per_1k=str(mp.completion_usd_per_1k),
         )
 
     return ModelOut(
-        id=model_id,
-        name=raw.get("name", model_id),
-        context_length=raw.get("context_length"),
-        is_free=_is_free(pricing),
-        pricing=ModelPricing(
-            prompt_usd_per_1k=_per_1k("prompt"),
-            completion_usd_per_1k=_per_1k("completion"),
-            image_usd_per_image=_per_1k("image") if pricing.get("image") else None,
-        ),
-        description=raw.get("description"),
+        id=m.model_id,
+        name=m.name,
+        context_length=m.context_length,
+        is_free=mp.is_free,
+        pricing=pricing,
+        description=m.description,
     )
-
-
-async def _get_model_prices() -> dict[str, dict]:
-    """
-    Return our model_prices table as {model_id: {prompt, completion, is_free}}.
-    Cached in Redis for 24 hours; falls back to DB on cache miss or Redis error.
-    """
-    redis = get_redis()
-    if redis is not None:
-        try:
-            cached = await redis.get(_MODEL_PRICES_CACHE_KEY)
-            if cached is not None:
-                return json.loads(cached)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("model_prices_cache_read_failed", error=str(exc))
-
-    try:
-        async with get_session_factory()() as session:
-            result = await session.execute(select(ModelPrice))
-            rows = result.scalars().all()
-        prices = {
-            r.model_id: {
-                "prompt": str(r.prompt_usd_per_1k),
-                "completion": str(r.completion_usd_per_1k),
-                "is_free": r.is_free,
-            }
-            for r in rows
-        }
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("model_prices_db_fetch_failed", error=str(exc))
-        return {}
-
-    if redis is not None:
-        try:
-            await redis.setex(_MODEL_PRICES_CACHE_KEY, _MODEL_PRICES_CACHE_TTL, json.dumps(prices))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("model_prices_cache_write_failed", error=str(exc))
-
-    return prices
-
-
-async def _fetch_from_openrouter() -> list[dict]:
-    """Fetch raw model list from OpenRouter /models endpoint."""
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.get(
-            f"{settings.openrouter_base_url}/models",
-            headers={
-                "Authorization": f"Bearer {settings.openrouter_api_key}",
-                "HTTP-Referer": "https://routerv.com",
-                "X-Title": "RouterV",
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data.get("data", [])
-
-
-def _is_internal_model(model_id: str) -> bool:
-    """
-    Return True for models that reveal our upstream provider identity.
-
-    Users should not see openrouter/* routing shortcuts (openrouter/auto,
-    openrouter/free) — these would expose that OpenRouter is our backend.
-    """
-    return model_id.startswith("openrouter/")
 
 
 async def _get_models() -> list[ModelOut]:
     """
-    Return the parsed model list, using Redis cache when available.
+    Return enabled models joined with their default pricing row.
 
-    Cache miss or Redis unavailable → fetch from OpenRouter → populate cache.
-    On OpenRouter failure with a warm cache → return cached data (stale-while-error).
-    On total failure → return empty list (never 500 the caller for a models listing).
+    Cache hit  → deserialise from Redis (5-min TTL).
+    Cache miss → query Postgres, populate cache, return results.
+    DB failure → return empty list (never 500 the caller for a listing).
 
-    Pricing is sourced from our model_prices table (24 hr Redis cache) so
-    that what users see matches what they are billed.  OpenRouter metadata
-    (name, context_length, description) is still taken from the live list.
-
-    Internal OpenRouter routing models (openrouter/*) are filtered out so
-    they are never exposed to RouterV users.
+    Discounts are NOT included here — they are applied per-user at request
+    time by _apply_discounts() and must not be cached.
     """
     redis = get_redis()
-    our_prices = await _get_model_prices()
 
     # ── Cache hit ─────────────────────────────────────────────────────────────
     if redis is not None:
         try:
             cached = await redis.get(_MODELS_CACHE_KEY)
             if cached is not None:
-                raw_list = json.loads(cached)
-                return [
-                    _parse_model(m, our_prices) for m in raw_list
-                    if not _is_internal_model(m.get("id", ""))
-                ]
+                return [ModelOut(**m) for m in json.loads(cached)]
         except Exception as exc:  # noqa: BLE001
             logger.warning("models_cache_read_failed", error=str(exc))
 
-    # ── OpenRouter fetch ──────────────────────────────────────────────────────
+    # ── DB query ──────────────────────────────────────────────────────────────
     try:
-        raw_list = await _fetch_from_openrouter()
-        logger.info("models_fetched_from_upstream", count=len(raw_list))
-
-        # Populate cache with the full list (filter at read time so cache
-        # stays complete in case the filter logic changes).
-        if redis is not None:
-            try:
-                await redis.setex(
-                    _MODELS_CACHE_KEY,
-                    _MODELS_CACHE_TTL,
-                    json.dumps(raw_list),
+        async with get_session_factory()() as session:
+            result = await session.execute(
+                select(Model, ModelPrice)
+                .join(
+                    ModelPrice,
+                    (ModelPrice.model_id == Model.model_id)
+                    & ModelPrice.is_default.is_(True),
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("models_cache_write_failed", error=str(exc))
+                .where(Model.is_enabled.is_(True))
+                .order_by(Model.model_id)
+            )
+            rows = result.all()
 
-        return [
-            _parse_model(m, our_prices) for m in raw_list
-            if not _is_internal_model(m.get("id", ""))
-        ]
+        models = [_row_to_model_out(m, mp) for m, mp in rows]
+        logger.info("models_fetched_from_db", count=len(models))
 
-    except httpx.HTTPStatusError as exc:
-        logger.warning(
-            "models_upstream_http_error",
-            status=exc.response.status_code,
-            body=exc.response.text[:200],
-        )
-        return []
     except Exception as exc:  # noqa: BLE001
-        logger.warning("models_upstream_failed", error=str(exc))
+        logger.warning("models_db_fetch_failed", error=str(exc))
         return []
+
+    # ── Populate cache ────────────────────────────────────────────────────────
+    if redis is not None:
+        try:
+            await redis.setex(
+                _MODELS_CACHE_KEY,
+                _MODELS_CACHE_TTL,
+                json.dumps([m.model_dump() for m in models]),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("models_cache_write_failed", error=str(exc))
+
+    return models
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -334,10 +219,11 @@ async def list_models(
     """
     List available models with per-user discounted pricing when applicable.
 
-    Accepts either a dashboard JWT or an API key.
+    Only models registered in the `models` table with is_enabled=true are
+    returned. Accepts either a dashboard JWT or an API key.
     Includes pricing per 1 000 tokens and a convenience ``is_free`` flag.
     If the caller has an active discount, discounted prices are included.
-    Response is cached for 5 minutes.
+    Response is cached for 5 minutes; admin writes invalidate the cache immediately.
     """
     models = await _get_models()
 

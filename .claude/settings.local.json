@@ -49,7 +49,12 @@
       "Bash(grep -n \"revision\\\\|down_revision\" /Users/aifiesta/Downloads/code/routersvc/alembic/versions/0013*.py /Users/aifiesta/Downloads/code/routersvc/alembic/versions/0014*.py)",
       "Bash(.venv/bin/alembic history:*)",
       "Bash(ls alembic/versions/*.py)",
-      "Bash(head -5:*)"
+      "Bash(head -5:*)",
+      "Bash(source .venv/bin/activate)",
+      "Bash(python scripts/test_models.py --help)",
+      "Bash(python3 /Users/aifiesta/Downloads/code/routersvc/scripts/test_models.py --help)",
+      "Bash(source /Users/aifiesta/Downloads/code/routersvc/.venv/bin/activate)",
+      "Bash(python /Users/aifiesta/Downloads/code/routersvc/scripts/test_models.py --help)"
     ]
   }
 }

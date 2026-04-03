@@ -36,8 +36,9 @@ from ulid import ULID
 
 from app.auth.control_plane import get_admin_user
 from app.cache.key_cache import invalidate_cached_key
+from app.cache.redis_client import get_redis
 from app.config import settings
-from app.db.models import ApiKey, Discount, ModelPrice, ProviderKey, UsageEvent, UserBalance
+from app.db.models import ApiKey, Discount, Model, ModelPrice, ProviderKey, UsageEvent, UserBalance
 from app.db.session import get_db_session
 from app.exceptions import NotFoundError
 from app.providers.provisioner import (
@@ -809,6 +810,24 @@ def _to_price_out(p: ModelPrice) -> ModelPriceOut:
     )
 
 
+_MODELS_CACHE_KEY = "routerv:models:list"
+
+
+async def _invalidate_models_cache() -> None:
+    """
+    Evict the public models list cache so the next request fetches fresh data.
+
+    Called after any admin write to `models` or `model_prices` so that
+    changes are visible within seconds rather than waiting for the 5-min TTL.
+    """
+    redis = get_redis()
+    if redis is not None:
+        try:
+            await redis.delete(_MODELS_CACHE_KEY)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("models_cache_invalidation_failed", error=str(exc))
+
+
 async def _clear_default(model_id: str, db: AsyncSession) -> None:
     """Clear is_default on all rows for model_id (called before setting a new default)."""
     result = await db.execute(
@@ -864,6 +883,7 @@ async def create_model_price(
 
     await db.flush()
     await db.refresh(price)
+    await _invalidate_models_cache()
     logger.info(
         "model_price_set",
         model_id=body.model_id,
@@ -924,6 +944,7 @@ async def update_model_price(
 
     await db.flush()
     await db.refresh(price)
+    await _invalidate_models_cache()
     logger.info("model_price_updated", model_id=model_id, provider=provider)
     return _to_price_out(price)
 
@@ -945,6 +966,7 @@ async def delete_model_price(
     if price is None:
         raise NotFoundError(f"Model price for '{model_id}/{provider}' not found.")
     await db.delete(price)
+    await _invalidate_models_cache()
     logger.info("model_price_deleted", model_id=model_id, provider=provider)
 
 
@@ -1007,7 +1029,8 @@ async def seed_model_prices(
         completion_per_1k = Decimal(str(round(completion_per_token * 1000, 8)))
         is_free = prompt_per_token == 0 and completion_per_token == 0
 
-        stmt = pg_insert(ModelPrice).values(
+        # ── Seed model_prices ──────────────────────────────────────────────
+        price_stmt = pg_insert(ModelPrice).values(
             model_id=model_id,
             provider="openrouter",
             is_default=True,
@@ -1016,24 +1039,186 @@ async def seed_model_prices(
             is_free=is_free,
         )
         if overwrite:
-            stmt = stmt.on_conflict_do_update(
+            price_stmt = price_stmt.on_conflict_do_update(
                 index_elements=["model_id", "provider"],
                 set_={
-                    "prompt_usd_per_1k": stmt.excluded.prompt_usd_per_1k,
-                    "completion_usd_per_1k": stmt.excluded.completion_usd_per_1k,
-                    "is_free": stmt.excluded.is_free,
+                    "prompt_usd_per_1k": price_stmt.excluded.prompt_usd_per_1k,
+                    "completion_usd_per_1k": price_stmt.excluded.completion_usd_per_1k,
+                    "is_free": price_stmt.excluded.is_free,
                     "updated_at": func.now(),
                 },
             )
         else:
-            stmt = stmt.on_conflict_do_nothing(index_elements=["model_id", "provider"])
+            price_stmt = price_stmt.on_conflict_do_nothing(index_elements=["model_id", "provider"])
 
-        await db.execute(stmt)
+        await db.execute(price_stmt)
+
+        # ── Seed models (metadata) ─────────────────────────────────────────
+        # name/context_length/description from OpenRouter; is_enabled=true by default.
+        model_name: str = model.get("name") or model_id
+        context_length: int | None = model.get("context_length")
+        description: str | None = model.get("description")
+
+        model_stmt = pg_insert(Model).values(
+            model_id=model_id,
+            name=model_name,
+            context_length=context_length,
+            description=description,
+            is_enabled=True,
+        )
+        if overwrite:
+            model_stmt = model_stmt.on_conflict_do_update(
+                index_elements=["model_id"],
+                set_={
+                    "name": model_stmt.excluded.name,
+                    "context_length": model_stmt.excluded.context_length,
+                    "description": model_stmt.excluded.description,
+                    "updated_at": func.now(),
+                },
+            )
+        else:
+            # Never overwrite is_enabled — admin may have toggled it deliberately
+            model_stmt = model_stmt.on_conflict_do_nothing(index_elements=["model_id"])
+
+        await db.execute(model_stmt)
         seeded_ids.append(model_id)
 
     await db.commit()
+    await _invalidate_models_cache()
     logger.info("model_prices_seeded", count=len(seeded_ids), skipped=skipped, overwrite=overwrite)
     return SeedPricesResponse(seeded=len(seeded_ids), skipped=skipped, models=seeded_ids)
+
+
+# ── Admin: model registry ─────────────────────────────────────────────────────
+
+class ModelIn(BaseModel):
+    model_id: str
+    name: str
+    context_length: int | None = None
+    description: str | None = None
+    is_enabled: bool = True
+
+
+class ModelUpdateIn(BaseModel):
+    name: str | None = None
+    context_length: int | None = None
+    description: str | None = None
+    is_enabled: bool | None = None
+
+
+class ModelRegistryOut(BaseModel):
+    model_id: str
+    name: str
+    context_length: int | None
+    description: str | None
+    is_enabled: bool
+    created_at: str
+    updated_at: str
+
+
+def _to_model_out(m: Model) -> ModelRegistryOut:
+    return ModelRegistryOut(
+        model_id=m.model_id,
+        name=m.name,
+        context_length=m.context_length,
+        description=m.description,
+        is_enabled=m.is_enabled,
+        created_at=m.created_at.isoformat(),
+        updated_at=m.updated_at.isoformat(),
+    )
+
+
+@router.post("/models", response_model=ModelRegistryOut, status_code=201)
+async def create_model(
+    body: ModelIn,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Register a model in the discovery whitelist.
+
+    The model_id must match the identifier used in model_prices so that
+    GET /v1/models can join the two tables. Creating a model here does not
+    automatically create pricing — use POST /admin/model-prices for that.
+    """
+    existing = await db.get(Model, body.model_id)
+    if existing is not None:
+        raise HTTPException(status_code=409, detail=f"Model '{body.model_id}' already exists.")
+
+    model = Model(
+        model_id=body.model_id,
+        name=body.name,
+        context_length=body.context_length,
+        description=body.description,
+        is_enabled=body.is_enabled,
+    )
+    db.add(model)
+    await db.flush()
+    await db.refresh(model)
+    await _invalidate_models_cache()
+    logger.info("model_created", model_id=body.model_id, is_enabled=body.is_enabled)
+    return _to_model_out(model)
+
+
+@router.get("/models", response_model=list[ModelRegistryOut])
+async def list_models_admin(
+    db: AsyncSession = Depends(get_db_session),
+):
+    """List all models (including disabled). For the public listing use GET /v1/models."""
+    result = await db.execute(select(Model).order_by(Model.model_id))
+    return [_to_model_out(m) for m in result.scalars().all()]
+
+
+@router.patch("/models/{model_id}", response_model=ModelRegistryOut)
+async def update_model(
+    model_id: str,
+    body: ModelUpdateIn,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Update model metadata or toggle visibility.
+
+    Setting is_enabled=false hides the model from GET /v1/models immediately
+    (cache is invalidated). Existing API keys using this model continue to
+    work — only discovery is affected.
+    """
+    model = await db.get(Model, model_id)
+    if model is None:
+        raise NotFoundError(f"Model '{model_id}' not found.")
+
+    if body.name is not None:
+        model.name = body.name
+    if body.context_length is not None:
+        model.context_length = body.context_length
+    if body.description is not None:
+        model.description = body.description
+    if body.is_enabled is not None:
+        model.is_enabled = body.is_enabled
+
+    await db.flush()
+    await db.refresh(model)
+    await _invalidate_models_cache()
+    logger.info("model_updated", model_id=model_id, is_enabled=model.is_enabled)
+    return _to_model_out(model)
+
+
+@router.delete("/models/{model_id}", status_code=204)
+async def delete_model(
+    model_id: str,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Hard-delete a model from the registry.
+
+    This does NOT remove model_prices rows — pricing and routing data are
+    retained for historical usage_events reconciliation. Consider using
+    PATCH /admin/models/{model_id} with is_enabled=false instead.
+    """
+    model = await db.get(Model, model_id)
+    if model is None:
+        raise NotFoundError(f"Model '{model_id}' not found.")
+    await db.delete(model)
+    await _invalidate_models_cache()
+    logger.info("model_deleted", model_id=model_id)
 
 
 # ── Discounts ─────────────────────────────────────────────────────────────────
