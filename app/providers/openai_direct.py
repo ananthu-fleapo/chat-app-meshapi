@@ -89,9 +89,10 @@ class OpenAIDirectAdapter(ProviderAdapter):
         *,
         api_key: str | None = None,
         owner: str | None = None,
+        provider_model_id: str | None = None,
     ) -> dict:
         payload = _build_payload(request, stream=False, owner=owner)
-        payload["model"] = _openai_model_id(payload["model"])
+        payload["model"] = provider_model_id or _openai_model_id(payload["model"])
         log = logger.bind(model=request.model, openai_model=payload["model"])
 
         try:
@@ -118,9 +119,10 @@ class OpenAIDirectAdapter(ProviderAdapter):
         *,
         api_key: str | None = None,
         owner: str | None = None,
+        provider_model_id: str | None = None,
     ) -> AsyncGenerator[bytes, None]:
         payload = _build_payload(request, stream=True, owner=owner)
-        payload["model"] = _openai_model_id(payload["model"])
+        payload["model"] = provider_model_id or _openai_model_id(payload["model"])
         log = logger.bind(model=request.model, openai_model=payload["model"])
 
         try:

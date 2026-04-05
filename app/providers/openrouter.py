@@ -116,8 +116,11 @@ class OpenRouterAdapter(ProviderAdapter):
         *,
         api_key: str | None = None,
         owner: str | None = None,
+        provider_model_id: str | None = None,
     ) -> dict:
         payload = _build_payload(request, stream=False, owner=owner)
+        if provider_model_id:
+            payload["model"] = provider_model_id
         log = logger.bind(model=request.model)
 
         try:
@@ -144,8 +147,11 @@ class OpenRouterAdapter(ProviderAdapter):
         *,
         api_key: str | None = None,
         owner: str | None = None,
+        provider_model_id: str | None = None,
     ) -> AsyncGenerator[bytes, None]:
         payload = _build_payload(request, stream=True, owner=owner)
+        if provider_model_id:
+            payload["model"] = provider_model_id
         log = logger.bind(model=request.model)
 
         try:

@@ -375,6 +375,10 @@ class ModelPrice(Base):
     model_id               Exact model identifier, e.g. "openai/gpt-4o-mini".
     provider               Upstream provider slug: "openrouter", "vertex",
                            "bedrock", "openai". Part of composite primary key.
+    provider_model_id      The exact model ID the upstream provider expects,
+                           e.g. "us.anthropic.claude-3-haiku-20240307-v1:0".
+                           NULL = not set; adapters fall back to their internal
+                           _MODEL_MAP translation in that case.
     is_default             True for the provider that handles this model when
                            no explicit provider preference is given. At most one
                            row per model_id may have is_default=True (enforced
@@ -391,12 +395,17 @@ class ModelPrice(Base):
     provider: Mapped[str] = mapped_column(
         Text, primary_key=True, server_default="openrouter"
     )
+    provider_model_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_default: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
     prompt_usd_per_1k: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False)
     completion_usd_per_1k: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False)
     is_free: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    # What the upstream provider charges us per 1 000 tokens.
+    # NULL = not configured; logger cannot calculate upstream_cost_usd for this row.
+    upstream_prompt_usd_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(12, 8), nullable=True)
+    upstream_completion_usd_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(12, 8), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

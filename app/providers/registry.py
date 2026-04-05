@@ -6,13 +6,18 @@ in model_prices.provider.  The model_prices table is the single source of
 truth for provider selection — change the provider column (and flip is_default)
 to route a model to a different upstream without any code changes.
 
+resolve_routing(model, db)
+    Queries model_prices for the is_default row and returns both the provider
+    slug AND the stored provider_model_id in a single DB round-trip.
+    Falls back to ("openrouter", None) if the model has no price row.
+
 resolve_provider(model, db)
-    Queries model_prices for the row where (model_id=model, is_default=True).
-    Falls back to any row for that model_id, then to "openrouter" if not found.
+    Thin wrapper around resolve_routing — returns only the provider slug.
+    Kept for backward-compatibility.
 
 get_adapter(provider)
     Returns the singleton ProviderAdapter for the given provider slug.
-    Raises UnsupportedModelError for unknown provider names.
+    Raises ProviderNotAvailableError for unknown provider names.
 """
 
 from __future__ import annotations
@@ -21,7 +26,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.exceptions import UnsupportedModelError
+from app.exceptions import ProviderNotAvailableError
 from app.providers.base import ProviderAdapter
 from app.providers.openrouter import OpenRouterAdapter
 
@@ -48,64 +53,65 @@ def get_adapter(provider: str) -> ProviderAdapter:
     """
     cls = _REGISTRY.get(provider)
     if cls is None:
-        raise UnsupportedModelError(
-            f"No adapter registered for provider '{provider}'. "
-            "Check that the required credentials are configured."
-        )
+        raise ProviderNotAvailableError(provider)
     return cls.get()
 
 
-async def resolve_provider(model: str, db: AsyncSession) -> str:
+async def resolve_routing(
+    model: str, db: AsyncSession
+) -> tuple[str, str | None]:
     """
-    Return the provider slug to use for *model*.
+    Return (provider, provider_model_id) for *model* in a single DB query.
+
+    provider_model_id is the exact upstream model ID stored in
+    model_prices.provider_model_id (e.g. "us.anthropic.claude-3-haiku-20240307-v1:0").
+    It is None when the column is unset — adapters fall back to their internal
+    _MODEL_MAP translation in that case.
 
     Lookup order:
       1. Row where (model_id=model, is_default=True)   — explicit default
       2. Any row where model_id=model                  — first available
-      3. "openrouter"                                   — safe fallback
-
-    Parameters
-    ----------
-    model : str
-        Canonical RouterV model identifier (e.g. "openai/gpt-4o-mini").
-    db : AsyncSession
-        Active DB session from the request lifecycle.
-
-    Returns
-    -------
-    str
-        Provider slug, e.g. "openrouter", "vertex", "bedrock", "openai".
+      3. ("openrouter", None)                          — safe fallback
     """
     from app.db.models import ModelPrice
 
-    # Prefer the is_default row
+    # Prefer the is_default row; fetch both columns in one round-trip
     result = await db.execute(
-        select(ModelPrice.provider)
+        select(ModelPrice.provider, ModelPrice.provider_model_id)
         .where(
             ModelPrice.model_id == model,
             ModelPrice.is_default.is_(True),
         )
         .limit(1)
     )
-    row = result.scalar_one_or_none()
+    row = result.one_or_none()
     if row is not None:
-        return row
+        return row.provider, row.provider_model_id
 
     # Fall back to any row for this model
     result = await db.execute(
-        select(ModelPrice.provider)
+        select(ModelPrice.provider, ModelPrice.provider_model_id)
         .where(ModelPrice.model_id == model)
         .limit(1)
     )
-    row = result.scalar_one_or_none()
+    row = result.one_or_none()
     if row is not None:
         logger.debug(
             "provider_resolved_no_default",
             model=model,
-            provider=row,
+            provider=row.provider,
         )
-        return row
+        return row.provider, row.provider_model_id
 
     # Model not in price table — default to OpenRouter
     logger.debug("provider_resolved_fallback_openrouter", model=model)
-    return "openrouter"
+    return "openrouter", None
+
+
+async def resolve_provider(model: str, db: AsyncSession) -> str:
+    """
+    Return the provider slug for *model*.
+    Thin wrapper around resolve_routing kept for backward-compatibility.
+    """
+    provider, _ = await resolve_routing(model, db)
+    return provider

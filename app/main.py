@@ -52,18 +52,21 @@ async def lifespan(app: FastAPI):
         )
 
     # ── AWS Bedrock adapter (optional) ────────────────────────────────────────
-    if settings.aws_access_key_id and settings.aws_secret_access_key:
+    # Enabled if either a bearer API key or IAM credentials are configured.
+    if settings.bedrock_api_key or (settings.aws_access_key_id and settings.aws_secret_access_key):
         from app.providers.bedrock import BedrockAdapter
         BedrockAdapter.init(
+            region=settings.aws_region,
+            timeout=settings.bedrock_timeout_s,
+            api_key=settings.bedrock_api_key,
             aws_access_key_id=settings.aws_access_key_id,
             aws_secret_access_key=settings.aws_secret_access_key,
-            region=settings.aws_region,
         )
         register_adapter("bedrock", BedrockAdapter)
     else:
         logger.info(
             "bedrock_adapter_skipped",
-            hint="Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to enable",
+            hint="Set BEDROCK_API_KEY (bearer) or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (SigV4)",
         )
 
     # ── OpenAI Direct adapter (optional) ──────────────────────────────────────

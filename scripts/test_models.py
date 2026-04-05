@@ -31,13 +31,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
 import httpx
+
+# All output files go here, relative to the repo root (or script location)
+_OUTPUTS_DIR = Path(__file__).parent / "outputs"
+_OUTPUTS_DIR.mkdir(exist_ok=True)
 
 # ── ANSI ──────────────────────────────────────────────────────────────────────
 
@@ -450,8 +456,8 @@ def _parse_args() -> argparse.Namespace:
 
 async def _main(args: argparse.Namespace) -> int:
     ts         = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    json_path  = _make_stem(args.output, ts)
-    passed_path = f"passed_{ts}.txt"
+    json_path   = str(_OUTPUTS_DIR / _make_stem(args.output, ts))
+    passed_path = str(_OUTPUTS_DIR / f"passed_{ts}.txt")
 
     print(bold("\n  RouterSVC Model Tester"))
     print(f"  Base URL:     {args.base_url}")

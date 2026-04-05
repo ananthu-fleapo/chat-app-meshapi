@@ -109,6 +109,24 @@ class RateLimitError(RouterVError):
 
 # ── 5xx ──────────────────────────────────────────────────────────────────────
 
+class ProviderNotAvailableError(RouterVError):
+    """
+    A provider slug is configured in model_prices but its adapter is not
+    registered — meaning the required credentials (e.g. VERTEX_AI_PROJECT_ID)
+    are missing from the server environment.  This is a server-side config
+    error, not a user error, so it returns 503.
+    """
+    status_code = 503
+    error_code = "provider_not_available"
+    message = "The upstream provider for this model is not available."
+
+    def __init__(self, provider: str) -> None:
+        super().__init__(
+            f"Provider '{provider}' is not available. "
+            "The required credentials may not be configured on this server."
+        )
+
+
 class UpstreamError(RouterVError):
     status_code = 500
     error_code = "upstream_error"

@@ -54,7 +54,18 @@
       "Bash(python scripts/test_models.py --help)",
       "Bash(python3 /Users/aifiesta/Downloads/code/routersvc/scripts/test_models.py --help)",
       "Bash(source /Users/aifiesta/Downloads/code/routersvc/.venv/bin/activate)",
-      "Bash(python /Users/aifiesta/Downloads/code/routersvc/scripts/test_models.py --help)"
+      "Bash(python /Users/aifiesta/Downloads/code/routersvc/scripts/test_models.py --help)",
+      "Bash(ls /Users/aifiesta/Downloads/code/routersvc/alembic/versions/0017*)",
+      "Bash(alembic heads:*)",
+      "Bash(alembic history:*)",
+      "Bash(pytest tests/test_providers.py tests/test_usage_logger.py tests/test_balance.py -v)",
+      "Bash(pytest tests/ -q)",
+      "WebFetch(domain:developers.openai.com)",
+      "Bash(pytest tests/test_providers.py -q)",
+      "Bash(python3 -c \"from app.routers.admin import router; print\\(''OK''\\)\")",
+      "Bash(alembic upgrade:*)",
+      "Bash(pytest tests/ -v --tb=no -q)",
+      "Bash(pytest tests/test_providers.py::TestRegistry -v)"
     ]
   }
 }

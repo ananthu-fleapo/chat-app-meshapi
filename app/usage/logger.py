@@ -40,6 +40,42 @@ from app.usage.pricing import calculate_cost
 logger = structlog.get_logger()
 
 
+async def _calc_upstream_cost(
+    model: str,
+    provider: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> Decimal | None:
+    """
+    Calculate upstream cost from model_prices.upstream_*_usd_per_1k.
+
+    Used for providers that don't report cost in their API response
+    (Vertex AI, Bedrock, OpenAI Direct, Qwen).  Returns None when upstream
+    pricing is not configured for this (model, provider) pair.
+    """
+    try:
+        from app.db.models import ModelPrice
+        from sqlalchemy import select
+        async with get_session_factory()() as session:
+            result = await session.execute(
+                select(ModelPrice).where(
+                    ModelPrice.model_id == model,
+                    ModelPrice.provider == provider,
+                )
+            )
+            row = result.scalar_one_or_none()
+
+        if row is None or row.upstream_prompt_usd_per_1k is None or row.upstream_completion_usd_per_1k is None:
+            return None
+
+        prompt_cost = Decimal(str(row.upstream_prompt_usd_per_1k)) * prompt_tokens / 1000
+        completion_cost = Decimal(str(row.upstream_completion_usd_per_1k)) * completion_tokens / 1000
+        return (prompt_cost + completion_cost).quantize(Decimal("0.00000001"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("upstream_cost_calc_failed", model=model, provider=provider, error=str(exc))
+        return None
+
+
 async def _our_cost(
     model: str,
     prompt_tokens: int,
@@ -111,8 +147,17 @@ async def log_usage_event(
         except Exception as exc:  # noqa: BLE001
             logger.warning("discount_lookup_failed", owner=owner, model=model, error=str(exc))
 
+    # Resolve upstream cost: use what the provider reported (OpenRouter), or
+    # calculate from our manually configured upstream rates (all other providers).
+    upstream_cost_decimal: Decimal | None
+    if upstream_cost is not None:
+        upstream_cost_decimal = Decimal(str(upstream_cost)).quantize(Decimal("0.00000001"))
+    elif prompt_tokens is not None and completion_tokens is not None:
+        upstream_cost_decimal = await _calc_upstream_cost(model, provider, prompt_tokens, completion_tokens)
+    else:
+        upstream_cost_decimal = None
+
     try:
-        upstream_cost_decimal = Decimal(str(upstream_cost)).quantize(Decimal("0.00000001")) if upstream_cost is not None else None
 
         async with get_session_factory()() as session:
             event = UsageEvent(

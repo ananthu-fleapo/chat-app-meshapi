@@ -696,9 +696,9 @@ class TestBedrockAdapter:
         from app.providers.bedrock import BedrockAdapter
         BedrockAdapter._instance = None
         return BedrockAdapter.init(
+            region="us-east-1",
             aws_access_key_id="test-key",
             aws_secret_access_key="test-secret",
-            region="us-east-1",
         )
 
     def _make_bedrock_converse_response(self, text: str = "Pong") -> dict:
@@ -724,7 +724,7 @@ class TestBedrockAdapter:
         cm = MagicMock()
         cm.__aenter__ = AsyncMock(return_value=mock_client)
         cm.__aexit__ = AsyncMock(return_value=False)
-        adapter._make_session = MagicMock(return_value=cm)
+        adapter._make_sigv4_session = MagicMock(return_value=cm)
 
         result = await adapter.chat_completion(
             _make_chat_request("anthropic/claude-3-5-sonnet")
@@ -745,7 +745,7 @@ class TestBedrockAdapter:
         cm = MagicMock()
         cm.__aenter__ = AsyncMock(return_value=mock_client)
         cm.__aexit__ = AsyncMock(return_value=False)
-        adapter._make_session = MagicMock(return_value=cm)
+        adapter._make_sigv4_session = MagicMock(return_value=cm)
 
         await adapter.chat_completion(_make_chat_request("anthropic/claude-3-5-haiku"))
 
@@ -762,7 +762,7 @@ class TestBedrockAdapter:
         cm = MagicMock()
         cm.__aenter__ = AsyncMock(return_value=mock_client)
         cm.__aexit__ = AsyncMock(return_value=False)
-        adapter._make_session = MagicMock(return_value=cm)
+        adapter._make_sigv4_session = MagicMock(return_value=cm)
 
         with pytest.raises(UpstreamError):
             await adapter.chat_completion(_make_chat_request())
@@ -781,7 +781,7 @@ class TestBedrockAdapter:
         cm = MagicMock()
         cm.__aenter__ = AsyncMock(return_value=mock_client)
         cm.__aexit__ = AsyncMock(return_value=False)
-        adapter._make_session = MagicMock(return_value=cm)
+        adapter._make_sigv4_session = MagicMock(return_value=cm)
 
         chunks = []
         async for chunk in adapter.stream_chat_completion(
@@ -808,7 +808,7 @@ class TestBedrockAdapter:
         cm = MagicMock()
         cm.__aenter__ = AsyncMock(return_value=mock_client)
         cm.__aexit__ = AsyncMock(return_value=False)
-        adapter._make_session = MagicMock(return_value=cm)
+        adapter._make_sigv4_session = MagicMock(return_value=cm)
 
         chunks = []
         async for chunk in adapter.stream_chat_completion(_make_chat_request()):
@@ -818,32 +818,329 @@ class TestBedrockAdapter:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Bedrock — bearer token path + eventstream parser
+# ─────────────────────────────────────────────────────────────────────────────
+
+import struct as _struct
+
+
+def _make_eventstream_frame(event_type: str, payload: dict) -> bytes:
+    """
+    Build a minimal valid AWS EventStream frame with zeroed CRCs.
+    Used to test _parse_eventstream_frames without a live Bedrock connection.
+    """
+    name = b":event-type"
+    value = event_type.encode()
+    header = (
+        _struct.pack("B", len(name)) + name
+        + _struct.pack("B", 7)               # value type: string
+        + _struct.pack(">H", len(value)) + value
+    )
+    import json as _json
+    payload_bytes = _json.dumps(payload).encode()
+    headers_len = len(header)
+    total_len = 12 + headers_len + len(payload_bytes) + 4  # prelude + headers + payload + msg_crc
+    return (
+        _struct.pack(">I", total_len)
+        + _struct.pack(">I", headers_len)
+        + _struct.pack(">I", 0)   # prelude CRC — skipped by parser
+        + header
+        + payload_bytes
+        + _struct.pack(">I", 0)   # message CRC — skipped by parser
+    )
+
+
+class TestParseEventstreamFrames:
+
+    def test_parses_content_block_delta(self):
+        """contentBlockDelta event is parsed into the expected dict shape."""
+        from app.providers.bedrock import _parse_eventstream_frames
+
+        payload = {"delta": {"text": "Hello"}, "contentBlockIndex": 0}
+        frame = _make_eventstream_frame("contentBlockDelta", payload)
+
+        events, remaining = _parse_eventstream_frames(frame)
+
+        assert remaining == b""
+        assert len(events) == 1
+        assert "contentBlockDelta" in events[0]
+        assert events[0]["contentBlockDelta"]["delta"]["text"] == "Hello"
+
+    def test_parses_message_stop_event(self):
+        from app.providers.bedrock import _parse_eventstream_frames
+
+        frame = _make_eventstream_frame("messageStop", {"stopReason": "end_turn"})
+        events, remaining = _parse_eventstream_frames(frame)
+
+        assert len(events) == 1
+        assert events[0]["messageStop"]["stopReason"] == "end_turn"
+
+    def test_parses_metadata_usage_event(self):
+        from app.providers.bedrock import _parse_eventstream_frames
+
+        payload = {"usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15}}
+        frame = _make_eventstream_frame("metadata", payload)
+        events, _ = _parse_eventstream_frames(frame)
+
+        assert events[0]["metadata"]["usage"]["inputTokens"] == 10
+
+    def test_partial_frame_returned_as_remaining(self):
+        """An incomplete frame is held in remaining_bytes, not yielded as an event."""
+        from app.providers.bedrock import _parse_eventstream_frames
+
+        frame = _make_eventstream_frame("messageStop", {"stopReason": "end_turn"})
+        partial = frame[:10]  # chop the frame mid-way
+
+        events, remaining = _parse_eventstream_frames(partial)
+
+        assert events == []
+        assert remaining == partial
+
+    def test_two_frames_in_one_buffer(self):
+        """Multiple frames in a single buffer are all parsed."""
+        from app.providers.bedrock import _parse_eventstream_frames
+
+        f1 = _make_eventstream_frame("contentBlockDelta", {"delta": {"text": "Hi"}})
+        f2 = _make_eventstream_frame("messageStop", {"stopReason": "end_turn"})
+
+        events, remaining = _parse_eventstream_frames(f1 + f2)
+
+        assert len(events) == 2
+        assert "contentBlockDelta" in events[0]
+        assert "messageStop" in events[1]
+        assert remaining == b""
+
+
+@pytest.mark.asyncio
+class TestBedrockBearerPath:
+
+    def _make_bearer_adapter(self) -> "BedrockAdapter":
+        from app.providers.bedrock import BedrockAdapter
+        BedrockAdapter._instance = None
+        return BedrockAdapter.init(
+            region="ap-south-1",
+            api_key="br-test-bearer-key",
+        )
+
+    def _make_bedrock_converse_response(self, text: str = "Pong") -> dict:
+        return {
+            "output": {"message": {"role": "assistant", "content": [{"text": text}]}},
+            "usage": {"inputTokens": 5, "outputTokens": 3, "totalTokens": 8},
+            "stopReason": "end_turn",
+        }
+
+    async def test_chat_completion_bearer_posts_to_correct_url(self):
+        """Bearer path POSTs to /model/{bedrock_model_id}/converse with Authorization header."""
+        from app.providers.bedrock import BedrockAdapter
+        adapter = self._make_bearer_adapter()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = self._make_bedrock_converse_response()
+        adapter._http_client = AsyncMock()
+        adapter._http_client.post = AsyncMock(return_value=mock_response)
+
+        result = await adapter.chat_completion(
+            _make_chat_request("anthropic/claude-3-5-sonnet")
+        )
+
+        assert result["object"] == "chat.completion"
+        assert result["choices"][0]["message"]["content"] == "Pong"
+        call_args = adapter._http_client.post.call_args
+        assert "/converse" in call_args[0][0]
+        assert call_args[1]["headers"]["Authorization"] == "Bearer br-test-bearer-key"
+
+    async def test_chat_completion_bearer_uses_per_request_key_if_provided(self):
+        """Per-request api_key overrides the system bearer key."""
+        from app.providers.bedrock import BedrockAdapter
+        adapter = self._make_bearer_adapter()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = self._make_bedrock_converse_response()
+        adapter._http_client = AsyncMock()
+        adapter._http_client.post = AsyncMock(return_value=mock_response)
+
+        await adapter.chat_completion(
+            _make_chat_request("anthropic/claude-3-5-sonnet"),
+            api_key="br-owner-key",
+        )
+
+        call_args = adapter._http_client.post.call_args
+        assert call_args[1]["headers"]["Authorization"] == "Bearer br-owner-key"
+
+    async def test_stream_chat_completion_bearer_yields_done(self):
+        """Bearer streaming path yields [DONE] after all events."""
+        from app.providers.bedrock import BedrockAdapter
+        adapter = self._make_bearer_adapter()
+
+        stop_frame = _make_eventstream_frame("messageStop", {"stopReason": "end_turn"})
+
+        async def _fake_aiter_raw():
+            yield stop_frame
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.aiter_raw = _fake_aiter_raw
+
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=mock_response)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        adapter._http_client = AsyncMock()
+        adapter._http_client.stream = MagicMock(return_value=cm)
+
+        chunks = []
+        async for chunk in adapter.stream_chat_completion(
+            _make_chat_request("anthropic/claude-3-5-sonnet")
+        ):
+            chunks.append(chunk)
+
+        assert chunks[-1] == b"data: [DONE]\n\n"
+
+    async def test_stream_chat_completion_bearer_emits_usage_chunk(self):
+        """Bearer streaming: metadata event → usage SSE chunk readable by inference.py."""
+        from app.providers.bedrock import BedrockAdapter
+        adapter = self._make_bearer_adapter()
+
+        delta_frame = _make_eventstream_frame(
+            "contentBlockDelta", {"delta": {"text": "Hi"}, "contentBlockIndex": 0}
+        )
+        meta_frame = _make_eventstream_frame(
+            "metadata", {"usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15}}
+        )
+        stop_frame = _make_eventstream_frame("messageStop", {"stopReason": "end_turn"})
+
+        async def _fake_aiter_raw():
+            yield delta_frame + meta_frame + stop_frame
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.aiter_raw = _fake_aiter_raw
+
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=mock_response)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        adapter._http_client = AsyncMock()
+        adapter._http_client.stream = MagicMock(return_value=cm)
+
+        import json as _json
+        all_chunks = b"".join([
+            c async for c in adapter.stream_chat_completion(
+                _make_chat_request("anthropic/claude-3-5-sonnet")
+            )
+        ])
+
+        # Find the usage chunk — choices=[] and usage={} present
+        usage_found = False
+        for line in all_chunks.split(b"\n"):
+            if not line.startswith(b"data: ") or line.strip() == b"data: [DONE]":
+                continue
+            obj = _json.loads(line[6:])
+            if obj.get("usage") and obj.get("choices") == []:
+                assert obj["usage"]["prompt_tokens"] == 10
+                assert obj["usage"]["completion_tokens"] == 5
+                usage_found = True
+                break
+        assert usage_found, "No usage SSE chunk found in stream output"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Provider Registry
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _make_routing_row(provider: str, provider_model_id: str | None = None):
+    """Build a mock SQLAlchemy Row with .provider and .provider_model_id attributes."""
+    row = MagicMock()
+    row.provider = provider
+    row.provider_model_id = provider_model_id
+    return row
+
+
+def _make_routing_result(provider: str | None, provider_model_id: str | None = None):
+    """make_execute_result variant for resolve_routing (uses .one_or_none())."""
+    result = MagicMock()
+    result.one_or_none.return_value = (
+        _make_routing_row(provider, provider_model_id) if provider is not None else None
+    )
+    return result
+
+
 class TestRegistry:
 
+    # ── resolve_routing ──────────────────────────────────────────────────────
+
+    async def test_resolve_routing_returns_provider_and_model_id(self, mock_db):
+        """is_default=True row → returns (provider, provider_model_id) tuple."""
+        from app.providers.registry import resolve_routing
+
+        mock_db.execute.return_value = _make_routing_result(
+            "bedrock", "us.anthropic.claude-3-haiku-20240307-v1:0"
+        )
+
+        provider, model_id = await resolve_routing("anthropic/claude-3-haiku", mock_db)
+
+        assert provider == "bedrock"
+        assert model_id == "us.anthropic.claude-3-haiku-20240307-v1:0"
+        assert mock_db.execute.call_count == 1
+
+    async def test_resolve_routing_none_provider_model_id_when_unset(self, mock_db):
+        """Row exists but provider_model_id is NULL → second tuple element is None."""
+        from app.providers.registry import resolve_routing
+
+        mock_db.execute.return_value = _make_routing_result("openrouter", None)
+
+        provider, model_id = await resolve_routing("openai/gpt-4o", mock_db)
+
+        assert provider == "openrouter"
+        assert model_id is None
+
+    async def test_resolve_routing_falls_back_to_openrouter_if_not_in_db(self, mock_db):
+        """Model absent from model_prices → ('openrouter', None)."""
+        from app.providers.registry import resolve_routing
+
+        no_row = _make_routing_result(None)
+        mock_db.execute.side_effect = [no_row, no_row]
+
+        provider, model_id = await resolve_routing("unknown/model", mock_db)
+
+        assert provider == "openrouter"
+        assert model_id is None
+
+    async def test_resolve_routing_falls_back_to_any_row(self, mock_db):
+        """No is_default row → any row for this model is used."""
+        from app.providers.registry import resolve_routing
+
+        mock_db.execute.side_effect = [
+            _make_routing_result(None),              # is_default miss
+            _make_routing_result("vertex", None),    # any-row hit
+        ]
+
+        provider, model_id = await resolve_routing("google/gemini-flash-1.5", mock_db)
+
+        assert provider == "vertex"
+        assert mock_db.execute.call_count == 2
+
+    # ── resolve_provider (compat wrapper) ───────────────────────────────────
+
     async def test_resolve_provider_returns_is_default_row(self, mock_db):
-        """When an is_default=True row exists, its provider is returned."""
+        """resolve_provider wraps resolve_routing — returns only the provider slug."""
         from app.providers.registry import resolve_provider
 
-        # First execute: is_default row found → "vertex"
-        mock_db.execute.return_value = make_execute_result(scalar="vertex")
+        mock_db.execute.return_value = _make_routing_result("vertex")
 
         result = await resolve_provider("google/gemini-flash-1.5", mock_db)
 
         assert result == "vertex"
-        assert mock_db.execute.call_count == 1  # only the is_default query needed
+        assert mock_db.execute.call_count == 1
 
     async def test_resolve_provider_falls_back_to_any_row(self, mock_db):
         """No is_default row → any row for this model is used."""
         from app.providers.registry import resolve_provider
 
-        # First execute: is_default row not found
-        # Second execute: fallback row found → "openrouter"
-        first_result = make_execute_result(scalar=None)
-        second_result = make_execute_result(scalar="openrouter")
-        mock_db.execute.side_effect = [first_result, second_result]
+        mock_db.execute.side_effect = [
+            _make_routing_result(None),
+            _make_routing_result("openrouter"),
+        ]
 
         result = await resolve_provider("openai/gpt-4o-mini", mock_db)
 
@@ -854,7 +1151,7 @@ class TestRegistry:
         """Model not in model_prices → defaults to 'openrouter'."""
         from app.providers.registry import resolve_provider
 
-        no_row = make_execute_result(scalar=None)
+        no_row = _make_routing_result(None)
         mock_db.execute.side_effect = [no_row, no_row]
 
         result = await resolve_provider("unknown/model-xyz", mock_db)
@@ -873,11 +1170,11 @@ class TestRegistry:
         assert _REGISTRY["openrouter"] is OpenRouterAdapter
 
     def test_get_adapter_unknown_provider_raises(self):
-        """Unknown provider slug raises UnsupportedModelError."""
+        """Unknown provider slug raises ProviderNotAvailableError (503)."""
         from app.providers.registry import get_adapter
-        from app.exceptions import UnsupportedModelError
+        from app.exceptions import ProviderNotAvailableError
 
-        with pytest.raises(UnsupportedModelError, match="no-such-provider"):
+        with pytest.raises(ProviderNotAvailableError, match="no-such-provider"):
             get_adapter("no-such-provider")
 
     def test_register_adapter_adds_to_registry(self):

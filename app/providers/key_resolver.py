@@ -110,7 +110,9 @@ def _system_default_key(provider: str) -> str:
         return settings.openai_api_key
     if provider == "qwen":
         return settings.qwen_api_key
-    # vertex / bedrock — adapters manage auth internally
+    if provider == "bedrock":
+        return settings.bedrock_api_key  # empty string = adapter falls back to SigV4
+    # vertex — adapter manages auth internally via service account token
     return ""
 
 

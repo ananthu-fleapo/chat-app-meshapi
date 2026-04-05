@@ -25,7 +25,7 @@ from app.config import settings
 from app.db.models import ApiKey
 from app.db.session import get_db_session
 from app.providers.key_resolver import resolve_upstream_key
-from app.providers.registry import get_adapter, resolve_provider
+from app.providers.registry import get_adapter, resolve_routing
 from app.schemas.chat import ChatCompletionRequest
 from app.templates.renderer import render_template
 from app.templates.resolver import resolve_template
@@ -98,7 +98,7 @@ async def chat_completions(
         template=raw_body.template,
     )
     # ── Phase 6: Resolve provider + per-owner upstream API key ───────────────
-    provider = await resolve_provider(body.model, db)
+    provider, provider_model_id = await resolve_routing(body.model, db)
     upstream_key = await resolve_upstream_key(owner=key.owner, provider=provider, db=db)
 
     adapter = get_adapter(provider)
@@ -126,7 +126,8 @@ async def chat_completions(
 
             try:
                 async for chunk in adapter.stream_chat_completion(
-                    body, api_key=upstream_key, owner=key.owner
+                    body, api_key=upstream_key, owner=key.owner,
+                    provider_model_id=provider_model_id,
                 ):
                     # Phase 4: early exit on client disconnect
                     if await request.is_disconnected():
@@ -213,7 +214,10 @@ async def chat_completions(
     error_code_val: str | None = None
 
     try:
-        response_body = await adapter.chat_completion(body, api_key=upstream_key, owner=key.owner)
+        response_body = await adapter.chat_completion(
+            body, api_key=upstream_key, owner=key.owner,
+            provider_model_id=provider_model_id,
+        )
     except Exception as exc:
         status = "error"
         error_code_val = getattr(exc, "error_code", "upstream_error")

@@ -23,14 +23,20 @@ Phase 5: usage reporting endpoints
 Phase 6: admin provider key management
 """
 
+import asyncio
 import hashlib
+import json
+import time
 import uuid
+from collections.abc import AsyncGenerator
 from decimal import Decimal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from ulid import ULID
 
@@ -779,6 +785,12 @@ class ModelPriceIn(BaseModel):
     prompt_usd_per_1k: float
     completion_usd_per_1k: float
     is_free: bool = False
+    # What the upstream provider charges us — used to calculate upstream_cost_usd
+    # in usage_events for providers that don't report cost in their API response
+    # (Vertex AI, Bedrock, OpenAI Direct, Qwen).  Leave unset for OpenRouter
+    # (it reports upstream cost directly in the response).
+    upstream_prompt_usd_per_1k: float | None = None
+    upstream_completion_usd_per_1k: float | None = None
 
 
 class ModelPriceUpdateIn(BaseModel):
@@ -786,6 +798,8 @@ class ModelPriceUpdateIn(BaseModel):
     completion_usd_per_1k: float | None = None
     is_free: bool | None = None
     is_default: bool | None = None
+    upstream_prompt_usd_per_1k: float | None = None
+    upstream_completion_usd_per_1k: float | None = None
 
 
 class ModelPriceOut(BaseModel):
@@ -795,6 +809,8 @@ class ModelPriceOut(BaseModel):
     prompt_usd_per_1k: str
     completion_usd_per_1k: str
     is_free: bool
+    upstream_prompt_usd_per_1k: str | None
+    upstream_completion_usd_per_1k: str | None
     updated_at: str
 
 
@@ -806,6 +822,8 @@ def _to_price_out(p: ModelPrice) -> ModelPriceOut:
         prompt_usd_per_1k=str(p.prompt_usd_per_1k),
         completion_usd_per_1k=str(p.completion_usd_per_1k),
         is_free=p.is_free,
+        upstream_prompt_usd_per_1k=str(p.upstream_prompt_usd_per_1k) if p.upstream_prompt_usd_per_1k is not None else None,
+        upstream_completion_usd_per_1k=str(p.upstream_completion_usd_per_1k) if p.upstream_completion_usd_per_1k is not None else None,
         updated_at=p.updated_at.isoformat(),
     )
 
@@ -865,6 +883,9 @@ async def create_model_price(
     if body.is_default:
         await _clear_default(body.model_id, db)
 
+    up_prompt = Decimal(str(body.upstream_prompt_usd_per_1k)) if body.upstream_prompt_usd_per_1k is not None else None
+    up_completion = Decimal(str(body.upstream_completion_usd_per_1k)) if body.upstream_completion_usd_per_1k is not None else None
+
     if price is None:
         price = ModelPrice(
             model_id=body.model_id,
@@ -873,6 +894,8 @@ async def create_model_price(
             prompt_usd_per_1k=Decimal(str(body.prompt_usd_per_1k)),
             completion_usd_per_1k=Decimal(str(body.completion_usd_per_1k)),
             is_free=body.is_free,
+            upstream_prompt_usd_per_1k=up_prompt,
+            upstream_completion_usd_per_1k=up_completion,
         )
         db.add(price)
     else:
@@ -880,6 +903,8 @@ async def create_model_price(
         price.prompt_usd_per_1k = Decimal(str(body.prompt_usd_per_1k))
         price.completion_usd_per_1k = Decimal(str(body.completion_usd_per_1k))
         price.is_free = body.is_free
+        price.upstream_prompt_usd_per_1k = up_prompt
+        price.upstream_completion_usd_per_1k = up_completion
 
     await db.flush()
     await db.refresh(price)
@@ -941,6 +966,10 @@ async def update_model_price(
         price.is_free = body.is_free
     if body.is_default is not None:
         price.is_default = body.is_default
+    if body.upstream_prompt_usd_per_1k is not None:
+        price.upstream_prompt_usd_per_1k = Decimal(str(body.upstream_prompt_usd_per_1k))
+    if body.upstream_completion_usd_per_1k is not None:
+        price.upstream_completion_usd_per_1k = Decimal(str(body.upstream_completion_usd_per_1k))
 
     await db.flush()
     await db.refresh(price)
@@ -1465,4 +1494,227 @@ async def get_balance(user_id: str, db: AsyncSession = Depends(get_db_session)):
             {"model": r.model, "requests": r.requests, "cost_usd": str(r.cost_usd)}
             for r in by_model_rows2
         ],
+    )
+
+
+# ── Test & register models ─────────────────────────────────────────────────────
+
+class TestModelItem(BaseModel):
+    model_id: str
+    """Canonical RouterSVC model ID, e.g. 'anthropic/claude-3-haiku'."""
+    provider_model_id: str | None = None
+    """
+    Exact upstream model ID the provider expects, e.g.
+    'us.anthropic.claude-3-haiku-20240307-v1:0' for Bedrock.
+    If omitted, the adapter falls back to its internal _MODEL_MAP translation.
+    Stored in model_prices.provider_model_id on success.
+    """
+
+
+class TestModelsRequest(BaseModel):
+    provider: str
+    """
+    Provider slug to test against: openrouter | vertex | bedrock | openai | qwen.
+    Credentials are read from server config — no keys in the request body.
+    """
+    models: list[TestModelItem]
+    """List of models to test."""
+    prompt: str = "Reply with just the word OK and nothing else."
+    timeout: float = 30.0
+
+
+def _derive_model_name(model_id: str) -> str:
+    """Derive a human-readable display name from a canonical model ID."""
+    slug = model_id.split("/", 1)[-1]
+    return slug.replace("-", " ").replace("_", " ").replace(".", " ").title()
+
+
+async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, None]:
+    """
+    Async generator that tests each model against the provider, writes results
+    to the DB, and yields SSE events.
+
+    Per-model DB logic
+    ------------------
+    models row       — INSERT if not exists (is_enabled=false); on pass → SET is_enabled=true
+    model_prices row — INSERT if not exists (price=0, is_default=false); on pass →
+                       if no other row for this model_id has is_default=true → SET is_default=true
+    Both inserts use ON CONFLICT DO NOTHING — existing rows are never overwritten.
+    """
+    from app.db.engine import get_session_factory
+    from app.providers.registry import get_adapter
+    from app.schemas.chat import ChatCompletionRequest, Message
+
+    # Validate provider has a registered adapter before streaming anything
+    try:
+        adapter = get_adapter(body.provider)
+    except Exception as exc:
+        yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n".encode()
+        return
+
+    session_factory = get_session_factory()
+    passed = failed = 0
+
+    for item in body.models:
+        model_id          = item.model_id
+        provider_model_id = item.provider_model_id
+        t0                = time.monotonic()
+        status            = "fail"
+        error: str | None = None
+
+        # ── Test the model ─────────────────────────────────────────────────
+        req = ChatCompletionRequest(
+            model=model_id,
+            messages=[Message(role="user", content=body.prompt)],
+            max_tokens=32,
+            stream=False,
+        )
+        try:
+            resp = await asyncio.wait_for(
+                adapter.chat_completion(
+                    req, api_key=None, owner=None,
+                    provider_model_id=provider_model_id,
+                ),
+                timeout=body.timeout,
+            )
+            # Verify there is actual content in the response
+            text = (
+                (resp.get("choices") or [{}])[0]
+                .get("message", {})
+                .get("content") or ""
+            ).strip()
+            if text:
+                status = "pass"
+            else:
+                status = "fail"
+                error  = "Empty response content"
+        except asyncio.TimeoutError:
+            status = "timeout"
+            error  = f"Timed out after {body.timeout:.0f}s"
+        except Exception as exc:  # noqa: BLE001
+            status = "fail"
+            error  = str(exc)[:200]
+
+        latency_ms   = int((time.monotonic() - t0) * 1000)
+        test_passed  = status == "pass"
+        is_default   = False
+
+        if test_passed:
+            passed += 1
+        else:
+            failed += 1
+
+        # ── DB writes ──────────────────────────────────────────────────────
+        name = _derive_model_name(model_id)
+        try:
+            async with session_factory() as db:
+                # 1. Insert model row if it doesn't exist (disabled by default)
+                await db.execute(
+                    pg_insert(Model).values(
+                        model_id=model_id,
+                        name=name,
+                        context_length=None,
+                        description=None,
+                        is_enabled=False,
+                    ).on_conflict_do_nothing(index_elements=["model_id"])
+                )
+
+                # 2. Insert model_prices row if (model_id, provider) not present
+                await db.execute(
+                    pg_insert(ModelPrice).values(
+                        model_id=model_id,
+                        provider=body.provider,
+                        provider_model_id=provider_model_id,
+                        is_default=False,
+                        prompt_usd_per_1k=Decimal("0"),
+                        completion_usd_per_1k=Decimal("0"),
+                        is_free=False,
+                    ).on_conflict_do_nothing(index_elements=["model_id", "provider"])
+                )
+
+                if test_passed:
+                    # 3. Enable the model
+                    await db.execute(
+                        update(Model)
+                        .where(Model.model_id == model_id)
+                        .values(is_enabled=True)
+                    )
+
+                    # 4. Make this the default provider if no default exists yet
+                    existing_default = await db.scalar(
+                        select(func.count()).where(
+                            ModelPrice.model_id == model_id,
+                            ModelPrice.is_default.is_(True),
+                        )
+                    )
+                    if not existing_default:
+                        await db.execute(
+                            update(ModelPrice)
+                            .where(
+                                ModelPrice.model_id == model_id,
+                                ModelPrice.provider == body.provider,
+                            )
+                            .values(is_default=True)
+                        )
+                        is_default = True
+
+                await db.commit()
+        except Exception as db_exc:  # noqa: BLE001
+            logger.error(
+                "test_models_db_error",
+                model_id=model_id,
+                provider=body.provider,
+                error=str(db_exc),
+            )
+
+        # ── Yield SSE event ────────────────────────────────────────────────
+        event = {
+            "model_id":   model_id,
+            "status":     status,
+            "latency_ms": latency_ms,
+            "is_default": is_default,
+            "error":      error,
+        }
+        yield f"data: {json.dumps(event)}\n\n".encode()
+
+    # Invalidate models cache so GET /v1/models reflects new state immediately
+    try:
+        redis = await get_redis()
+        await redis.delete("routerv:models:list")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Final summary event
+    yield f"data: {json.dumps({'type': 'summary', 'total': len(body.models), 'passed': passed, 'failed': failed})}\n\n".encode()
+    yield b"data: [DONE]\n\n"
+
+
+@router.post("/test-models", summary="Test models against a provider and register results")
+async def test_models(body: TestModelsRequest) -> StreamingResponse:
+    """
+    Test each model in the list against the specified provider using server-side
+    credentials, then register the results in the DB.
+
+    Streams SSE events — one per model — as they complete, followed by a summary.
+
+    **SSE event format (per model)**
+    ```json
+    {"model_id": "anthropic/claude-3-haiku", "status": "pass", "latency_ms": 342, "is_default": true, "error": null}
+    ```
+
+    **SSE summary event**
+    ```json
+    {"type": "summary", "total": 5, "passed": 4, "failed": 1}
+    ```
+
+    **DB behaviour**
+    - `models` row: inserted with `is_enabled=false` if new; set to `is_enabled=true` on pass
+    - `model_prices` row: inserted with `price=0, is_default=false` if new (model_id, provider) pair;
+      `is_default` set to `true` on pass only if no other provider already holds the default
+    - Existing rows are never overwritten (ON CONFLICT DO NOTHING)
+    """
+    return StreamingResponse(
+        _test_models_stream(body),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

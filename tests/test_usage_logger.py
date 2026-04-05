@@ -49,13 +49,75 @@ def _make_model_price_row(
     is_free: bool = False,
     prompt: float = 0.002500,
     completion: float = 0.010000,
+    upstream_prompt: float | None = None,
+    upstream_completion: float | None = None,
 ) -> MagicMock:
     """Build a ModelPrice-like mock for _lookup_model_price return value."""
     mp = MagicMock()
     mp.is_free = is_free
     mp.prompt_usd_per_1k = prompt
     mp.completion_usd_per_1k = completion
+    mp.upstream_prompt_usd_per_1k = upstream_prompt
+    mp.upstream_completion_usd_per_1k = upstream_completion
     return mp
+
+
+# ── _calc_upstream_cost ───────────────────────────────────────────────────────
+
+class TestCalcUpstreamCost:
+
+    async def test_returns_calculated_cost_when_upstream_rates_configured(self):
+        """upstream_*_usd_per_1k set → cost = tokens × rates."""
+        from app.usage.logger import _calc_upstream_cost
+
+        row = _make_model_price_row(upstream_prompt=0.003, upstream_completion=0.015)
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=row)))
+        sf = _make_session_factory(session)
+
+        with patch("app.usage.logger.get_session_factory", sf):
+            cost = await _calc_upstream_cost("anthropic/claude-3-5-sonnet", "bedrock", 1000, 500)
+
+        # (0.003 * 1000/1000) + (0.015 * 500/1000) = 0.003 + 0.0075 = 0.0105
+        assert cost == Decimal("0.01050000")
+
+    async def test_returns_none_when_no_row_found(self):
+        """Model not in model_prices → None."""
+        from app.usage.logger import _calc_upstream_cost
+
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None)))
+        sf = _make_session_factory(session)
+
+        with patch("app.usage.logger.get_session_factory", sf):
+            cost = await _calc_upstream_cost("unknown/model", "vertex", 1000, 500)
+
+        assert cost is None
+
+    async def test_returns_none_when_upstream_rates_not_set(self):
+        """Row exists but upstream_prompt_usd_per_1k is None → None."""
+        from app.usage.logger import _calc_upstream_cost
+
+        row = _make_model_price_row(upstream_prompt=None, upstream_completion=None)
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=row)))
+        sf = _make_session_factory(session)
+
+        with patch("app.usage.logger.get_session_factory", sf):
+            cost = await _calc_upstream_cost("openai/gpt-4o", "openai", 1000, 500)
+
+        assert cost is None
+
+    async def test_db_error_returns_none_silently(self):
+        """DB failure returns None without raising."""
+        from app.usage.logger import _calc_upstream_cost
+
+        sf = MagicMock(side_effect=RuntimeError("db down"))
+
+        with patch("app.usage.logger.get_session_factory", sf):
+            cost = await _calc_upstream_cost("some/model", "bedrock", 100, 50)
+
+        assert cost is None
 
 
 class TestOurCost:
@@ -213,6 +275,55 @@ class TestLogUsageEvent:
              patch("app.usage.logger.get_session_factory", sf):
             # Must not raise
             await log_usage_event(**self._log_kwargs(status="success"))
+
+
+    async def test_upstream_cost_calculated_from_rates_when_not_provided(self):
+        """
+        When upstream_cost is None (non-OpenRouter) but tokens are known,
+        upstream_cost_usd in the written event should come from _calc_upstream_cost.
+        """
+        from app.usage.logger import log_usage_event
+
+        write_session = _make_write_session()
+        sf = _make_session_factory(write_session)
+        calc_result = Decimal("0.00750000")
+
+        with patch("app.usage.logger._our_cost", AsyncMock(return_value=Decimal("0.01"))), \
+             patch("app.usage.logger._calc_upstream_cost", AsyncMock(return_value=calc_result)) as mock_calc, \
+             patch("app.usage.logger.get_session_factory", sf), \
+             patch("app.usage.balance.deduct_balance", AsyncMock()), \
+             patch("app.metrics.record_inference", MagicMock()):
+            await log_usage_event(**self._log_kwargs(
+                status="success",
+                provider="bedrock",
+                upstream_cost=None,       # provider didn't report cost
+                prompt_tokens=500,
+                completion_tokens=250,
+            ))
+
+        mock_calc.assert_called_once_with(MODEL, "bedrock", 500, 250)
+        # Verify the UsageEvent was created with the calculated upstream cost
+        added_event = write_session.add.call_args[0][0]
+        assert added_event.upstream_cost_usd == calc_result
+
+    async def test_upstream_cost_from_provider_takes_priority_over_calculated(self):
+        """When upstream_cost is provided (OpenRouter), _calc_upstream_cost is not called."""
+        from app.usage.logger import log_usage_event
+
+        write_session = _make_write_session()
+        sf = _make_session_factory(write_session)
+
+        with patch("app.usage.logger._our_cost", AsyncMock(return_value=Decimal("0.01"))), \
+             patch("app.usage.logger._calc_upstream_cost", AsyncMock()) as mock_calc, \
+             patch("app.usage.logger.get_session_factory", sf), \
+             patch("app.usage.balance.deduct_balance", AsyncMock()), \
+             patch("app.metrics.record_inference", MagicMock()):
+            await log_usage_event(**self._log_kwargs(
+                status="success",
+                upstream_cost=0.0085,     # OpenRouter reported it directly
+            ))
+
+        mock_calc.assert_not_called()
 
 
 # ── fire_usage_log ────────────────────────────────────────────────────────────

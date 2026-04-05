@@ -70,8 +70,13 @@ class Settings(BaseSettings):
     vertex_ai_timeout_s: float = 120.0
 
     # ── AWS Bedrock ───────────────────────────────────────────────────────────
-    # Set these to route models to AWS Bedrock via the Converse API.
-    # Leave all empty to disable Bedrock routing.
+    # Two auth modes (set one):
+    #   Bearer token  — bedrock_api_key (long-term key from Bedrock console → API keys)
+    #                   Uses httpx; simpler, no IAM needed.
+    #   SigV4/IAM     — aws_access_key_id + aws_secret_access_key
+    #                   Uses aiobotocore; required for cross-account or fine-grained IAM.
+    # bedrock_api_key takes priority when both are set.
+    bedrock_api_key: str = ""
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     aws_region: str = "us-east-1"
@@ -85,10 +90,13 @@ class Settings(BaseSettings):
 
     # ── Qwen / DashScope ──────────────────────────────────────────────────────
     # Set qwen_api_key to route Qwen models via Alibaba Cloud DashScope API.
-    # DashScope exposes an OpenAI-compatible endpoint:
+    # DashScope exposes an OpenAI-compatible endpoint.
+    # Use the international endpoint if your key is from modelstudio.console.alibabacloud.com:
+    #   https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+    # Use the China endpoint if your key is from dashscope.console.aliyun.com:
     #   https://dashscope.aliyuncs.com/compatible-mode/v1
     qwen_api_key: str = ""
-    qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    qwen_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     qwen_timeout_s: float = 120.0
 
     # ── GCP (Phase 7+) ────────────────────────────────────────────────────────
