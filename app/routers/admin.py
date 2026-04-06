@@ -29,13 +29,14 @@ import json
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from ulid import ULID
@@ -44,7 +45,9 @@ from app.auth.control_plane import get_admin_user
 from app.cache.key_cache import invalidate_cached_key
 from app.cache.redis_client import get_redis
 from app.config import settings
-from app.db.models import ApiKey, Discount, Model, ModelPrice, ProviderKey, UsageEvent, User, UserBalance
+from app.cache.analytics_cache import get_analytics_cached, set_analytics_cached
+from app.db.models import ApiKey, CurrencyConversionRate, Discount, Model, ModelPrice, PaymentEvent, ProviderKey, UsageEvent, UserBalance
+from app.routers.usage import UsageEventOut, UsageEventsPage, _parse_dt, _split_model, _tokens_per_second
 from app.db.session import get_db_session
 from app.exceptions import NotFoundError
 from app.providers.provisioner import (
@@ -456,9 +459,7 @@ async def list_users(
     bal_q = await db.execute(select(UserBalance))
     bal_by_user = {str(b.user_id): b for b in bal_q.scalars().all()}
 
-    # Email per user_id from users table
-    email_q = await db.execute(select(User.id, User.email))
-    email_by_user = {row.id: row.email for row in email_q.all()}
+    # Email lookup is skipped — users table not created in migrations
 
     results = []
     for r in key_rows:
@@ -466,7 +467,7 @@ async def list_users(
         bal = bal_by_user.get(r.owner)
         results.append(UserSummary(
             user_id=r.owner,
-            email=email_by_user.get(r.owner),
+            email=None,
             key_count=r.key_count,
             active_key_count=r.active_key_count,
             total_spent_usd=str(Decimal(str(spend_row.total_spent))) if spend_row else "0",
@@ -1693,6 +1694,580 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
     # Final summary event
     yield f"data: {json.dumps({'type': 'summary', 'total': len(body.models), 'passed': passed, 'failed': failed})}\n\n".encode()
     yield b"data: [DONE]\n\n"
+
+
+# ── User detail analytics ─────────────────────────────────────────────────────
+
+class UserDetailSummary(BaseModel):
+    user_id: str
+    key_count: int
+    active_key_count: int
+    api_calls: int
+    total_spent_usd: str
+    balance_usd: str | None
+    last_activity: str | None
+    created_at: str
+
+
+class UsageTimeSeries(BaseModel):
+    bucket: str   # ISO 8601 datetime string
+    requests: int
+    cost_usd: str
+
+
+def _range_since(range_: str) -> datetime:
+    now = datetime.now(timezone.utc)
+    if range_ == "24h":
+        return now - timedelta(hours=24)
+    if range_ == "7d":
+        return now - timedelta(days=7)
+    return now - timedelta(days=30)  # default: 30d
+
+
+@router.get("/users/{user_id}/summary", response_model=UserDetailSummary)
+async def get_user_summary(
+    user_id: str,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Per-user summary card data. Cached for 5 minutes."""
+    redis = get_redis()
+    cache_key = f"routerv:analytics:user_summary:{user_id}"
+
+    if redis is not None:
+        cached = await get_analytics_cached(redis, cache_key)
+        if cached is not None:
+            return UserDetailSummary(**json.loads(cached))
+
+    # Keys owned by this user
+    keys_result = await db.execute(
+        select(
+            func.count(ApiKey.id).label("key_count"),
+            func.count(ApiKey.id).filter(ApiKey.status == "active").label("active_key_count"),
+            func.min(ApiKey.created_at).label("created_at"),
+        ).where(ApiKey.owner == user_id)
+    )
+    keys_row = keys_result.one()
+
+    key_ids_result = await db.execute(
+        select(ApiKey.id).where(ApiKey.owner == user_id)
+    )
+    key_ids = [r[0] for r in key_ids_result.all()]
+
+    if key_ids:
+        spend_result = await db.execute(
+            select(
+                func.count(UsageEvent.id).label("api_calls"),
+                func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("total_spent"),
+                func.max(UsageEvent.created_at).label("last_activity"),
+            ).where(UsageEvent.key_id.in_(key_ids))
+        )
+        spend_row = spend_result.one()
+        api_calls = spend_row.api_calls or 0
+        total_spent = Decimal(str(spend_row.total_spent))
+        last_activity = spend_row.last_activity.isoformat() if spend_row.last_activity else None
+    else:
+        api_calls = 0
+        total_spent = Decimal("0")
+        last_activity = None
+
+    bal_result = await db.execute(
+        select(UserBalance.balance_usd).where(UserBalance.user_id == user_id)
+    )
+    bal = bal_result.scalar_one_or_none()
+
+    result = UserDetailSummary(
+        user_id=user_id,
+        key_count=keys_row.key_count or 0,
+        active_key_count=keys_row.active_key_count or 0,
+        api_calls=api_calls,
+        total_spent_usd=str(total_spent),
+        balance_usd=str(bal) if bal is not None else None,
+        last_activity=last_activity,
+        created_at=keys_row.created_at.isoformat() if keys_row.created_at else datetime.now(timezone.utc).isoformat(),
+    )
+
+    if redis is not None:
+        await set_analytics_cached(redis, cache_key, result.model_dump_json())
+
+    return result
+
+
+@router.get("/users/{user_id}/usage", response_model=list[UsageTimeSeries])
+async def get_user_usage_timeseries(
+    user_id: str,
+    range: str = "7d",
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Requests + cost grouped by hour (24h) or day (7d/30d) for a single user.
+    Cached for 5 minutes.
+    """
+    redis = get_redis()
+    cache_key = f"routerv:analytics:user_usage:{user_id}:{range}"
+
+    if redis is not None:
+        cached = await get_analytics_cached(redis, cache_key)
+        if cached is not None:
+            return [UsageTimeSeries(**r) for r in json.loads(cached)]
+
+    since = _range_since(range)
+    group_by = "hour" if range == "24h" else "day"
+
+    key_ids_result = await db.execute(
+        select(ApiKey.id).where(ApiKey.owner == user_id)
+    )
+    key_ids = [r[0] for r in key_ids_result.all()]
+
+    if not key_ids:
+        return []
+
+    trunc_unit = text(f"'{group_by}'")
+    rows = await db.execute(
+        select(
+            func.date_trunc(trunc_unit, UsageEvent.created_at).label("bucket"),
+            func.count(UsageEvent.id).label("requests"),
+            func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("cost_usd"),
+        )
+        .where(UsageEvent.key_id.in_(key_ids))
+        .where(UsageEvent.created_at >= since)
+        .group_by(func.date_trunc(trunc_unit, UsageEvent.created_at))
+        .order_by(func.date_trunc(trunc_unit, UsageEvent.created_at))
+    )
+
+    result = [
+        UsageTimeSeries(
+            bucket=r.bucket.isoformat(),
+            requests=r.requests,
+            cost_usd=str(Decimal(str(r.cost_usd))),
+        )
+        for r in rows.all()
+    ]
+
+    if redis is not None:
+        await set_analytics_cached(redis, cache_key, json.dumps([r.model_dump() for r in result]))
+
+    return result
+
+
+@router.get("/users/{user_id}/models", response_model=list[ModelUsageRow])
+async def get_user_model_breakdown(
+    user_id: str,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Model usage breakdown for a single user. Cached for 5 minutes."""
+    redis = get_redis()
+    cache_key = f"routerv:analytics:user_models:{user_id}"
+
+    if redis is not None:
+        cached = await get_analytics_cached(redis, cache_key)
+        if cached is not None:
+            return [ModelUsageRow(**r) for r in json.loads(cached)]
+
+    key_ids_result = await db.execute(
+        select(ApiKey.id).where(ApiKey.owner == user_id)
+    )
+    key_ids = [r[0] for r in key_ids_result.all()]
+
+    if not key_ids:
+        return []
+
+    rows = await db.execute(
+        select(
+            UsageEvent.model,
+            func.count(UsageEvent.id).label("requests"),
+            func.count(UsageEvent.id).filter(UsageEvent.status == "success").label("success"),
+            func.coalesce(func.sum(UsageEvent.total_tokens), 0).label("tokens"),
+            func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("cost"),
+        )
+        .where(UsageEvent.key_id.in_(key_ids))
+        .group_by(UsageEvent.model)
+        .order_by(func.sum(UsageEvent.cost_usd).desc().nulls_last())
+    )
+
+    result = [
+        ModelUsageRow(
+            model=r.model,
+            requests=r.requests,
+            successful_requests=r.success,
+            total_tokens=r.tokens if r.tokens else None,
+            total_cost_usd=str(Decimal(str(r.cost))),
+        )
+        for r in rows.all()
+    ]
+
+    if redis is not None:
+        await set_analytics_cached(redis, cache_key, json.dumps([r.model_dump() for r in result]))
+
+    return result
+
+
+@router.get("/users/{user_id}/events", response_model=UsageEventsPage)
+async def get_user_events(
+    user_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    since: str | None = None,
+    until: str | None = None,
+    model: str | None = None,
+    status: str | None = None,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Paginated usage event log for a single user (admin-scoped)."""
+    key_ids_result = await db.execute(
+        select(ApiKey.id, ApiKey.meta).where(ApiKey.owner == user_id)
+    )
+    key_rows = key_ids_result.all()
+    key_map = {row[0]: (row[1] or {}).get("label") for row in key_rows}
+    key_ids = list(key_map)
+
+    if not key_ids:
+        return UsageEventsPage(events=[], total=0, limit=limit, offset=offset)
+
+    since_dt = _parse_dt(since)
+    until_dt = _parse_dt(until, end_of_day=True)
+
+    base = select(UsageEvent).where(UsageEvent.key_id.in_(key_ids))
+    count_base = select(func.count(UsageEvent.id)).where(UsageEvent.key_id.in_(key_ids))
+
+    if since_dt:
+        base = base.where(UsageEvent.created_at >= since_dt)
+        count_base = count_base.where(UsageEvent.created_at >= since_dt)
+    if until_dt:
+        base = base.where(UsageEvent.created_at <= until_dt)
+        count_base = count_base.where(UsageEvent.created_at <= until_dt)
+    if model:
+        base = base.where(UsageEvent.model == model)
+        count_base = count_base.where(UsageEvent.model == model)
+    if status:
+        base = base.where(UsageEvent.status == status)
+        count_base = count_base.where(UsageEvent.status == status)
+
+    total = (await db.execute(count_base)).scalar_one()
+    events = (await db.execute(
+        base.order_by(UsageEvent.created_at.desc()).offset(offset).limit(limit)
+    )).scalars().all()
+
+    return UsageEventsPage(
+        events=[
+            UsageEventOut(
+                id=str(e.id),
+                key_id=str(e.key_id),
+                key_label=key_map.get(e.key_id),
+                request_id=e.request_id,
+                model=e.model,
+                model_name=_split_model(e.model)[0],
+                model_provider=_split_model(e.model)[1],
+                stream=e.stream,
+                prompt_tokens=e.prompt_tokens,
+                completion_tokens=e.completion_tokens,
+                total_tokens=e.total_tokens,
+                cost_usd=str(e.cost_usd) if e.cost_usd else None,
+                latency_ms=e.latency_ms,
+                tokens_per_second=_tokens_per_second(e.completion_tokens, e.latency_ms),
+                status=e.status,
+                error_code=e.error_code,
+                created_at=e.created_at.isoformat(),
+            )
+            for e in events
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+# ── System-wide usage time-series ─────────────────────────────────────────────
+
+@router.get("/usage/timeseries", response_model=list[UsageTimeSeries])
+async def get_usage_timeseries(
+    range: str = "7d",
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    System-wide requests + cost grouped by hour (24h) or day (7d/30d).
+    Cached for 5 minutes.
+    """
+    redis = get_redis()
+    cache_key = f"routerv:analytics:usage_timeseries:{range}"
+
+    if redis is not None:
+        cached = await get_analytics_cached(redis, cache_key)
+        if cached is not None:
+            return [UsageTimeSeries(**r) for r in json.loads(cached)]
+
+    since = _range_since(range)
+    group_by = "hour" if range == "24h" else "day"
+
+    trunc_unit = text(f"'{group_by}'")
+    rows = await db.execute(
+        select(
+            func.date_trunc(trunc_unit, UsageEvent.created_at).label("bucket"),
+            func.count(UsageEvent.id).label("requests"),
+            func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("cost_usd"),
+        )
+        .where(UsageEvent.created_at >= since)
+        .group_by(func.date_trunc(trunc_unit, UsageEvent.created_at))
+        .order_by(func.date_trunc(trunc_unit, UsageEvent.created_at))
+    )
+
+    result = [
+        UsageTimeSeries(
+            bucket=r.bucket.isoformat(),
+            requests=r.requests,
+            cost_usd=str(Decimal(str(r.cost_usd))),
+        )
+        for r in rows.all()
+    ]
+
+    if redis is not None:
+        await set_analytics_cached(redis, cache_key, json.dumps([r.model_dump() for r in result]))
+
+    return result
+
+
+# ── Payment analytics ─────────────────────────────────────────────────────────
+
+class PaymentSummary(BaseModel):
+    total_revenue: str
+    today_revenue: str
+    month_revenue: str
+
+
+class RevenueTimeSeries(BaseModel):
+    date: str        # ISO 8601 date string
+    amount: str      # USD, e.g. "12.50"
+    currency: str
+
+
+class CountryBreakdown(BaseModel):
+    country: str     # ISO 3166-1 alpha-2 or "Unknown"
+    count: int
+    amount: str      # USD
+
+
+@router.get("/payments/summary", response_model=PaymentSummary)
+async def get_payment_summary(
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Total, today, and this-month revenue from payment_events. Cached for 5 minutes."""
+    redis = get_redis()
+    cache_key = "routerv:analytics:payment_summary"
+
+    if redis is not None:
+        cached = await get_analytics_cached(redis, cache_key)
+        if cached is not None:
+            return PaymentSummary(**json.loads(cached))
+
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    # Scalar subquery: latest total_rate for this payment's currency.
+    # USD has no row in currency_conversion_rates, so COALESCE defaults to 1.0.
+    # Formula: amount (smallest unit) / 100.0 / total_rate = USD value.
+    latest_rate_sq = (
+        select(CurrencyConversionRate.total_rate)
+        .where(CurrencyConversionRate.currency == PaymentEvent.currency)
+        .order_by(CurrencyConversionRate.created_at.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    usd_amount = PaymentEvent.amount / 100.0 / func.coalesce(latest_rate_sq, 1.0)
+
+    total_result = await db.execute(
+        select(func.coalesce(func.sum(usd_amount), 0).label("total"))
+    )
+    today_result = await db.execute(
+        select(func.coalesce(func.sum(usd_amount), 0).label("total"))
+        .where(PaymentEvent.created_at >= today_start)
+    )
+    month_result = await db.execute(
+        select(func.coalesce(func.sum(usd_amount), 0).label("total"))
+        .where(PaymentEvent.created_at >= month_start)
+    )
+
+    def _to_usd_str(raw: Decimal | float) -> str:
+        return str(Decimal(str(raw)).quantize(Decimal("0.0001")))
+
+    summary = PaymentSummary(
+        total_revenue=_to_usd_str(total_result.scalar_one()),
+        today_revenue=_to_usd_str(today_result.scalar_one()),
+        month_revenue=_to_usd_str(month_result.scalar_one()),
+    )
+
+    if redis is not None:
+        await set_analytics_cached(redis, cache_key, summary.model_dump_json())
+
+    return summary
+
+
+@router.get("/payments/revenue", response_model=list[RevenueTimeSeries])
+async def get_payment_revenue(
+    range: str = "30d",
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Daily revenue in USD (all currencies converted). Cached for 5 minutes."""
+    redis = get_redis()
+    cache_key = f"routerv:analytics:payment_revenue:{range}"
+
+    if redis is not None:
+        cached = await get_analytics_cached(redis, cache_key)
+        if cached is not None:
+            return [RevenueTimeSeries(**r) for r in json.loads(cached)]
+
+    now = datetime.now(timezone.utc)
+    if range == "7d":
+        since = now - timedelta(days=7)
+    elif range == "90d":
+        since = now - timedelta(days=90)
+    else:
+        since = now - timedelta(days=30)
+
+    # Convert each payment to USD using the latest rate for its currency.
+    # USD payments have no row in currency_conversion_rates → COALESCE defaults to 1.0.
+    latest_rate_sq = (
+        select(CurrencyConversionRate.total_rate)
+        .where(CurrencyConversionRate.currency == PaymentEvent.currency)
+        .order_by(CurrencyConversionRate.created_at.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    usd_amount = PaymentEvent.amount / 100.0 / func.coalesce(latest_rate_sq, 1.0)
+
+    day_unit = text("'day'")
+    rows = await db.execute(
+        select(
+            func.date_trunc(day_unit, PaymentEvent.created_at).label("date"),
+            func.coalesce(func.sum(usd_amount), 0).label("amount"),
+        )
+        .where(PaymentEvent.created_at >= since)
+        .group_by(func.date_trunc(day_unit, PaymentEvent.created_at))
+        .order_by(func.date_trunc(day_unit, PaymentEvent.created_at))
+    )
+
+    result = [
+        RevenueTimeSeries(
+            date=r.date.isoformat(),
+            amount=str(Decimal(str(r.amount)).quantize(Decimal("0.0001"))),
+            currency="USD",
+        )
+        for r in rows.all()
+    ]
+
+    if redis is not None:
+        await set_analytics_cached(redis, cache_key, json.dumps([r.model_dump() for r in result]))
+
+    return result
+
+
+@router.get("/payments/countries", response_model=list[CountryBreakdown])
+async def get_payment_countries(
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Revenue grouped by country extracted from payment_metadata->>'country'.
+    Rows without a country are bucketed as 'Unknown'. Cached for 5 minutes.
+    """
+    from sqlalchemy import cast, String
+    from sqlalchemy.dialects.postgresql import JSONB
+
+    redis = get_redis()
+    cache_key = "routerv:analytics:payment_countries"
+
+    if redis is not None:
+        cached = await get_analytics_cached(redis, cache_key)
+        if cached is not None:
+            return [CountryBreakdown(**r) for r in json.loads(cached)]
+
+    country_expr = func.coalesce(
+        cast(PaymentEvent.payment_metadata["country"].astext, String),
+        "Unknown",
+    )
+
+    latest_rate_sq = (
+        select(CurrencyConversionRate.total_rate)
+        .where(CurrencyConversionRate.currency == PaymentEvent.currency)
+        .order_by(CurrencyConversionRate.created_at.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    usd_amount = PaymentEvent.amount / 100.0 / func.coalesce(latest_rate_sq, 1.0)
+
+    rows = await db.execute(
+        select(
+            country_expr.label("country"),
+            func.count(PaymentEvent.id).label("count"),
+            func.coalesce(func.sum(usd_amount), 0).label("amount"),
+        )
+        .group_by(country_expr)
+        .order_by(func.sum(usd_amount).desc().nulls_last())
+    )
+
+    result = [
+        CountryBreakdown(
+            country=r.country,
+            count=r.count,
+            amount=str(Decimal(str(r.amount)).quantize(Decimal("0.0001"))),
+        )
+        for r in rows.all()
+    ]
+
+    if redis is not None:
+        await set_analytics_cached(redis, cache_key, json.dumps([r.model_dump() for r in result]))
+
+    return result
+
+
+@router.get("/payments/top-users", response_model=list[OwnerUsageRow])
+async def get_payment_top_users(
+    limit: int = 10,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Top users by total payment amount. Cached for 5 minutes."""
+    redis = get_redis()
+    cache_key = f"routerv:analytics:payment_top_users:{limit}"
+
+    if redis is not None:
+        cached = await get_analytics_cached(redis, cache_key)
+        if cached is not None:
+            return [OwnerUsageRow(**r) for r in json.loads(cached)]
+
+    latest_rate_sq = (
+        select(CurrencyConversionRate.total_rate)
+        .where(CurrencyConversionRate.currency == PaymentEvent.currency)
+        .order_by(CurrencyConversionRate.created_at.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    usd_amount = PaymentEvent.amount / 100.0 / func.coalesce(latest_rate_sq, 1.0)
+
+    rows = await db.execute(
+        select(
+            PaymentEvent.user_id.label("owner"),
+            func.count(PaymentEvent.id).label("requests"),
+            func.count(PaymentEvent.id).label("success"),  # all payments are successful
+            func.coalesce(func.sum(usd_amount), 0).label("cost"),
+        )
+        .group_by(PaymentEvent.user_id)
+        .order_by(func.sum(usd_amount).desc().nulls_last())
+        .limit(limit)
+    )
+
+    result = [
+        OwnerUsageRow(
+            owner=r.owner,
+            requests=r.requests,
+            successful_requests=r.success,
+            total_tokens=None,
+            total_cost_usd=str(Decimal(str(r.cost)).quantize(Decimal("0.0001"))),
+        )
+        for r in rows.all()
+    ]
+
+    if redis is not None:
+        await set_analytics_cached(redis, cache_key, json.dumps([r.model_dump() for r in result]))
+
+    return result
 
 
 @router.post("/test-models", summary="Test models against a provider and register results")
