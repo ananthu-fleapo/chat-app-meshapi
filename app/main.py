@@ -14,7 +14,7 @@ from app.providers.openrouter import OpenRouterAdapter
 from app.providers.registry import register_adapter
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from app.routers import auth, balance, inference, keys, models, payments, usage, fx_rates
+from app.routers import auth, balance, inference, keys, models, payments, usage, fx_rates, gstin
 
 from fastapi.middleware.cors import CORSMiddleware 
 
@@ -202,6 +202,8 @@ def create_app() -> FastAPI:
     # FX rate refresh: internal scheduler endpoint, guarded by WEBHOOK_API_KEY.
     app.include_router(fx_rates.router)
 
+    # GSTIN verification: user-authenticated, results cached 6 months in Redis.
+    app.include_router(gstin.router)
 
     # Admin router: JWT-gated. Caller must have app_metadata.permissions
     # containing "mesh_api:admin".

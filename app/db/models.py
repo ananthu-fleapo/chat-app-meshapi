@@ -486,6 +486,7 @@ class PaymentEvent(Base):
     order_id         Provider-side order / invoice identifier.
     currency         ISO 4217 currency code (e.g. "USD", "EUR").
     amount           Charged amount in the smallest currency unit (e.g. cents).
+    amount_usd       Converted USD value in cents credited to the user's balance (post GST deduction).
     metadata         Arbitrary provider-specific data (e.g. cashfree_importer_details_submitted).
     """
 
@@ -502,7 +503,10 @@ class PaymentEvent(Base):
     order_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     currency: Mapped[str | None] = mapped_column(Text, nullable=True)
     amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    amount_usd: Mapped[int | None] = mapped_column(Integer, nullable=True)
     payment_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    country: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -515,6 +519,45 @@ class PaymentEvent(Base):
             f"<PaymentEvent id={self.id} user_id={self.user_id!r} "
             f"payment_id={self.payment_id!r} provider={self.provider!r}>"
         )
+    
+class GstinRecord(Base):
+    """
+    GST record linked to a payment event.
+
+    Columns
+    -------
+    payment_event_id  FK → payment_events.id. Identifies which payment this GST
+                      record belongs to.
+    gstin             The verified GST Identification Number. NULL when GST was
+                      charged (no GSTIN provided) — meaning the user did not
+                      supply a GSTIN and 18% GST was added.
+    gst_amount        GST component in INR (major units). 0.00 when a valid GSTIN
+                      was provided and GST was waived. base_amount * 0.18 otherwise.
+    """
+
+    __tablename__ = "gstin_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    payment_event_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True
+    )
+    gstin: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gst_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<GstinRecord id={self.id} payment_event_id={self.payment_event_id} "
+            f"gstin={self.gstin!r} gst_amount={self.gst_amount}>"
+        )    
 
 
 class User(Base):

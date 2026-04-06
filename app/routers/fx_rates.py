@@ -23,6 +23,7 @@ import httpx
 import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import verify_webhook_key
@@ -44,6 +45,37 @@ class FxRefreshResponse(BaseModel):
     rate: str
     markup_fee: str
     total_rate: str
+
+
+@router.get("", response_model=FxRefreshResponse)
+async def get_fx_rates(
+    db: AsyncSession = Depends(get_db_session),
+) -> FxRefreshResponse:
+    """
+    Return the current INR→USD conversion rate stored in the DB.
+    Used by the frontend to show estimated USD credit for a given INR amount.
+    """
+    result = await db.execute(
+        select(CurrencyConversionRate)
+        .where(CurrencyConversionRate.currency == _BASE_CURRENCY)
+        .order_by(CurrencyConversionRate.created_at.desc())
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+
+    if row is None:
+        raise RouterVError(
+            status_code=404,
+            error_code="fx_rate_not_found",
+            message="FX rate not yet available. Please try again later.",
+        )
+
+    return FxRefreshResponse(
+        currency=row.currency,
+        rate=str(row.rate),
+        markup_fee=str(row.markup_fee),
+        total_rate=str(row.total_rate),
+    )
 
 
 @router.post("/refresh", response_model=FxRefreshResponse)

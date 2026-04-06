@@ -126,11 +126,17 @@ class Settings(BaseSettings):
     # URL for the exchange rate API called by POST /internal/fx-rates/refresh.
     exchange_rate_api_url: str = ""
 
+    # ── GSTIN verification ────────────────────────────────────────────────────
+    # Base URL for the GSTIN verification API. The GSTIN is appended as a path
+    # segment: <gstin_verify_api_url>/<gstin>
+    gstin_verify_api_url: str = ""
+
     # ── Webhook auth ─────────────────────────────────────────────────────────
     # Static secret for inbound webhook calls (e.g. payment provider callbacks).
     # Set WEBHOOK_API_KEY in .env. Requests must pass it as: Bearer <key>.
     # Leave empty in dev to disable the check.
     webhook_api_key: str = ""
+
 
     # ── CORS ─────────────────────────────────────────────────────────────────
     # Comma-separated list of allowed origins for browser requests.

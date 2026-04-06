@@ -25,7 +25,7 @@ from decimal import Decimal
 
 from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
 from app.auth.dependencies import verify_webhook_key
-from app.db.models import CurrencyConversionRate, PaymentEvent
+from app.db.models import CurrencyConversionRate, GstinRecord, PaymentEvent
 from app.db.session import get_db_session
 from app.usage.balance import credit_balance
 
@@ -42,6 +42,13 @@ class PaymentRequest(BaseModel):
     orderId: str | None = None
     currency: str | None = None
     amount: int | None = None
+    # Geographic context — populated by the webhook service from payment metadata.
+    ipAddress: str | None = None
+    country: str | None = None
+    # GST fields — India-only. gstin is NULL when 18% GST was charged (no GSTIN
+    # supplied). gstAmount is the GST component in INR major units (0 when waived).
+    gstin: str | None = None
+    gstAmount: float | None = None
 
 
 class PaymentEventOut(BaseModel):
@@ -52,6 +59,7 @@ class PaymentEventOut(BaseModel):
     order_id: str | None
     currency: str | None
     amount: int | None
+    amount_usd: int | None
     created_at: str
 
 
@@ -82,6 +90,7 @@ def _to_out(event: PaymentEvent) -> PaymentEventOut:
         order_id=event.order_id,
         currency=event.currency,
         amount=event.amount,
+        amount_usd=event.amount_usd,
         created_at=event.created_at.isoformat(),
     )
 
@@ -146,13 +155,22 @@ async def create_payment(
             # Amount is in the smallest unit (e.g. paise for INR).
             # Divide by 100 to get major units, then divide by total_rate
             # (INR-per-USD with markup) to get USD.
+            #
+            # GST is a tax collected on behalf of the government — exclude it
+            # from the balance credit so users are only credited for the base
+            # amount they actually paid for.
             effective_rate = rate_row.total_rate or rate_row.rate
-            amount_usd = (Decimal(body.amount) / 100) / effective_rate
+            amount_major = Decimal(body.amount) / 100
+            if body.gstAmount is not None and body.gstAmount > 0:
+                amount_major = amount_major - Decimal(str(body.gstAmount)) / 100
+            amount_usd = amount_major / effective_rate
             logger.info(
                 "payment_currency_converted",
                 currency=currency,
                 total_rate=str(effective_rate),
                 amount_original=body.amount,
+                gst_amount=str(body.gstAmount),
+                amount_after_gst_deduction=str(amount_major),
                 amount_usd=str(amount_usd),
                 user_id=body.userId,
             )
@@ -164,9 +182,27 @@ async def create_payment(
         order_id=body.orderId,
         currency=body.currency,
         amount=body.amount,
+        amount_usd=int(amount_usd * 100) if amount_usd is not None else None,
+        ip_address=body.ipAddress,
+        country=body.country,
     )
     db.add(event)
     await db.flush()
+
+    # Create a GST record for Indian payments.
+    if body.country and body.country.upper() == "IN" and body.gstAmount is not None:
+        gstin_record = GstinRecord(
+            payment_event_id=event.id,
+            gstin=body.gstin or None,
+            gst_amount=Decimal(str(body.gstAmount)),
+        )
+        db.add(gstin_record)
+        logger.info(
+            "gstin_record_created",
+            payment_event_id=str(event.id),
+            gstin=body.gstin,
+            gst_amount=str(body.gstAmount),
+        )
 
     if amount_usd is not None and amount_usd > 0:
         await credit_balance(body.userId, amount_usd, db)
