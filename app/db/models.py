@@ -422,27 +422,46 @@ class ModelPrice(Base):
 
 class CurrencyConversionRate(Base):
     """
-    Admin-managed currency conversion rates to USD.
+    Append-only log of FX rate snapshots fetched by the scheduler.
+
+    Each call to POST /v1/fx-rates/refresh inserts a new row; rows are never
+    updated in place.  Readers always query the latest row for a given currency
+    (ORDER BY created_at DESC LIMIT 1).
 
     Columns
     -------
-    currency    ISO 4217 currency code (e.g. "INR", "EUR"). Primary key.
+    id          UUID primary key.
+    currency    ISO 4217 currency code (e.g. "INR", "EUR"). Indexed, not unique.
     rate        Raw units of this currency per 1 USD as returned by the exchange
-                rate API (e.g. INR: 93.8571).  For USD itself this should be 1.0.
+                rate API (e.g. INR: 93.8571).
     markup_fee  0.2 % of rate — the absolute markup added on top of the raw rate.
     total_rate  rate + markup_fee — the effective rate used when converting
                 payment amounts to USD (divide INR amount by total_rate).
-    updated_at  Timestamp of the last rate update.
+    created_at  Timestamp of this snapshot. Used to resolve the latest rate.
     """
 
     __tablename__ = "currency_conversion_rates"
+    __table_args__ = (
+        Index("ix_currency_conversion_rates_currency_created", "currency", "created_at"),
+    )
 
-    currency: Mapped[str] = mapped_column(Text, primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    currency: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     rate: Mapped[Decimal] = mapped_column(Numeric(18, 10), nullable=False)
     # 0.2 % markup expressed as an absolute amount (rate * 0.002)
     markup_fee: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     # rate + markup_fee — the effective rate charged to callers
     total_rate: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

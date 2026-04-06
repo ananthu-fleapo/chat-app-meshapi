@@ -23,7 +23,6 @@ import httpx
 import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import verify_webhook_key
@@ -97,20 +96,14 @@ async def refresh_fx_rates(
         total_rate=str(total_rate),
     )
 
-    # ── 3. Upsert into DB ─────────────────────────────────────────────────────
-    result = await db.execute(
-        select(CurrencyConversionRate).where(CurrencyConversionRate.currency == _BASE_CURRENCY)
+    # ── 3. Insert new snapshot row ────────────────────────────────────────────
+    row = CurrencyConversionRate(
+        currency=_BASE_CURRENCY,
+        rate=rate,
+        markup_fee=markup_fee,
+        total_rate=total_rate,
     )
-    row = result.scalar_one_or_none()
-
-    if row is None:
-        row = CurrencyConversionRate(currency=_BASE_CURRENCY)
-        db.add(row)
-
-    row.rate = rate
-    row.markup_fee = markup_fee
-    row.total_rate = total_rate
-
+    db.add(row)
     await db.commit()
     await db.refresh(row)
 

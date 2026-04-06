@@ -13,7 +13,6 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import make_execute_result
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -24,7 +23,7 @@ def mock_db_session():
     session.add = MagicMock()
     session.commit = AsyncMock()
     session.refresh = AsyncMock()
-    session.execute = AsyncMock(return_value=make_execute_result(scalar=None))
+    session.execute = AsyncMock()
     return session
 
 
@@ -112,11 +111,9 @@ class TestRefreshFxRates:
 
     def test_insert_new_row_returns_correct_values(self, client, mock_db_session):
         """
-        First-ever refresh (no existing row): creates a new CurrencyConversionRate
-        and returns rate/markup_fee/total_rate with correct 4-dp truncation.
+        Refresh inserts a new CurrencyConversionRate and returns rate/markup_fee/total_rate
+        with correct 4-dp truncation.
         """
-        mock_db_session.execute.return_value = make_execute_result(scalar=None)
-
         with _mock_httpx_get(_GOOD_API_PAYLOAD):
             resp = client.post("/v1/fx-rates/refresh", headers=WEBHOOK_HEADERS)
 
@@ -138,21 +135,16 @@ class TestRefreshFxRates:
         mock_db_session.add.assert_called_once()
         mock_db_session.commit.assert_called_once()
 
-    def test_update_existing_row_does_not_add(self, client, mock_db_session):
+    def test_always_inserts_new_row(self, client, mock_db_session):
         """
-        Existing row: values are updated in-place; db.add must NOT be called.
+        Every refresh call inserts a new row regardless of existing data;
+        db.add must always be called.
         """
-        from app.db.models import CurrencyConversionRate
-
-        existing_row = MagicMock(spec=CurrencyConversionRate)
-        existing_row.currency = "INR"
-        mock_db_session.execute.return_value = make_execute_result(scalar=existing_row)
-
         with _mock_httpx_get(_GOOD_API_PAYLOAD):
             resp = client.post("/v1/fx-rates/refresh", headers=WEBHOOK_HEADERS)
 
         assert resp.status_code == 200
-        mock_db_session.add.assert_not_called()
+        mock_db_session.add.assert_called_once()
         mock_db_session.commit.assert_called_once()
 
 

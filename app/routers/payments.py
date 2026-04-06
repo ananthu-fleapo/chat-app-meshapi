@@ -125,7 +125,13 @@ async def create_payment(
             # Amount is in cents; normalize to dollars.
             amount_usd = Decimal(body.amount) / 100
         else:
-            rate_row = await db.get(CurrencyConversionRate, currency)
+            rate_result = await db.execute(
+                select(CurrencyConversionRate)
+                .where(CurrencyConversionRate.currency == currency)
+                .order_by(CurrencyConversionRate.created_at.desc())
+                .limit(1)
+            )
+            rate_row = rate_result.scalar_one_or_none()
             if rate_row is None:
                 logger.warning(
                     "payment_currency_rate_missing",
