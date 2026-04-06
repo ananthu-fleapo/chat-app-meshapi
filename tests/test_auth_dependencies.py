@@ -225,17 +225,17 @@ class TestGetAnyAuthOwner:
         with pytest.raises(UnauthorizedError):
             await get_any_auth_owner(credentials=None, db=mock_db)
 
-    async def test_jwt_dev_bypass_returns_token_as_owner(self, mock_db):
-        """
-        With SUPABASE_JWT_SECRET unset (dev bypass), any bearer string is
-        accepted as the owner — DB is never touched.
-        """
+    async def test_valid_jwt_returns_sub_as_owner(self, mock_db):
+        """Valid signed JWT with no owner claim → owner resolves to sub."""
         from app.auth.dependencies import get_any_auth_owner
+        from tests.conftest import make_jwt
+
+        token = make_jwt(sub="user-uuid-123")
         owner = await get_any_auth_owner(
-            credentials=_make_credentials("acme-corp"),
+            credentials=_make_credentials(token),
             db=mock_db,
         )
-        assert owner == "acme-corp"
+        assert owner == "user-uuid-123"
         mock_db.execute.assert_not_called()
 
     async def test_jwt_fails_falls_back_to_api_key_cache_hit(self, mock_db):

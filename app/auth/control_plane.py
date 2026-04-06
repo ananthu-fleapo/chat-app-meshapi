@@ -31,13 +31,6 @@ will have owner="acme-corp" — matching the owner field on their rsk_ key.
 If no custom claim is set (SUPABASE_OWNER_CLAIM=""), `sub` becomes the
 owner. In that case, rsk_ keys must be created with owner=<supabase-sub>.
 
-Dev bypass
-----------
-When SUPABASE_JWT_SECRET is empty:
-  - Signature verification is skipped.
-  - The raw bearer token string is used as the owner label.
-  - This lets local dev work without a Supabase project.
-  - Never active when SUPABASE_JWT_SECRET is set (env always wins in prod).
 """
 
 from __future__ import annotations
@@ -164,26 +157,6 @@ async def get_control_plane_user(
         )
 
     token = credentials.credentials
-
-    # ── Dev bypass ────────────────────────────────────────────────────────────
-    # When SUPABASE_JWT_SECRET is not set we are in local dev without a
-    # Supabase project.  Accept any token and use its value as the owner
-    # so developers can test with a simple: Authorization: Bearer acme-corp
-    if not settings.supabase_jwt_secret:
-        logger.debug(
-            "control_plane_auth_bypass",
-            hint="SUPABASE_JWT_SECRET not set — JWT verification skipped",
-        )
-        try:
-            claims = jwt.decode(token, options={"verify_signature": True})
-            sub = claims.get("sub", token)
-            owner = _resolve_owner(claims) if claims.get("sub") else token
-            email = claims.get("email")
-        except jwt.DecodeError:
-            sub = token
-            owner = token
-            email = None
-        return ControlPlaneIdentity(sub=sub, owner=owner, email=email)
 
     # ── Production: verify JWT ────────────────────────────────────────────────
     claims = _verify_jwt(token)

@@ -29,4 +29,4 @@ jobs:
           DATABASE_URL: ""
           REDIS_URL: redis://localhost:6379/0
           WEBHOOK_API_KEY: test-webhook-secret
-          SUPABASE_JWT_SECRET: ""
+          SUPABASE_JWT_SECRET: test-supabase-jwt-secret-for-testing-only

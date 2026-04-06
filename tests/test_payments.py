@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import make_execute_result
+from tests.conftest import make_execute_result, make_jwt
 
 
 # ── App + dependency overrides ────────────────────────────────────────────────
@@ -46,7 +46,7 @@ def client(mock_db_session):
 
 
 WEBHOOK_HEADERS = {"Authorization": "Bearer test-webhook-secret"}
-JWT_HEADERS = {"Authorization": "Bearer test-owner-id"}  # dev bypass: raw string = owner
+JWT_HEADERS = {"Authorization": f"Bearer {make_jwt()}"}
 
 
 # ── POST /v1/payments ─────────────────────────────────────────────────────────

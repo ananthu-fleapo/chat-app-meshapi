@@ -516,6 +516,43 @@ class PaymentEvent(Base):
         )
 
 
+class User(Base):
+    """
+    Profile record for a RouterV user, keyed by Supabase user ID.
+
+    Created on first login or payment. Acts as the anchor for user_balances,
+    discounts, and payment_events — all of which reference user_id at the
+    application layer (no DB-level FKs, consistent with the rest of the schema).
+
+    Columns
+    -------
+    id            Supabase user UUID (sub claim). Primary key — matches
+                  user_id used across user_balances, discounts, payment_events.
+    email         User's email address. Unique; sourced from Supabase JWT.
+    display_name  Optional human-readable name for dashboard display.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return f"<User id={self.id!r} email={self.email!r}>"
+
+
 class Discount(Base):
     """
     Per-user discount applied before balance deduction.

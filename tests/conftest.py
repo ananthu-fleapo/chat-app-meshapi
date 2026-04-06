@@ -6,6 +6,13 @@ reads them at class-definition time.
 """
 
 import os
+import time
+
+import jwt as _jwt
+
+# ── Test JWT secret ───────────────────────────────────────────────────────────
+# A fixed HS256 secret used to sign JWTs in tests. Must match SUPABASE_JWT_SECRET.
+TEST_JWT_SECRET = "test-supabase-jwt-secret-for-testing-only"
 
 # ── Required env vars — set before app imports ────────────────────────────────
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
@@ -13,13 +20,23 @@ os.environ.setdefault("ENV", "dev")
 os.environ.setdefault("DATABASE_URL", "")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("WEBHOOK_API_KEY", "test-webhook-secret")
-# Empty JWT secret → dev bypass (any token string is accepted as owner)
-os.environ.setdefault("SUPABASE_JWT_SECRET", "")
+os.environ.setdefault("SUPABASE_JWT_SECRET", TEST_JWT_SECRET)
+os.environ.setdefault("SUPABASE_URL", "")  # prevent .env from injecting issuer check
 
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+
+def make_jwt(sub: str = "00000000-0000-0000-0000-000000000001") -> str:
+    """Return a signed HS256 JWT valid for test requests."""
+    now = int(time.time())
+    return _jwt.encode(
+        {"sub": sub, "aud": "authenticated", "iat": now, "exp": now + 3600},
+        TEST_JWT_SECRET,
+        algorithm="HS256",
+    )
 
 
 @pytest.fixture

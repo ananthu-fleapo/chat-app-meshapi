@@ -44,7 +44,7 @@ from app.auth.control_plane import get_admin_user
 from app.cache.key_cache import invalidate_cached_key
 from app.cache.redis_client import get_redis
 from app.config import settings
-from app.db.models import ApiKey, Discount, Model, ModelPrice, ProviderKey, UsageEvent, UserBalance
+from app.db.models import ApiKey, Discount, Model, ModelPrice, ProviderKey, UsageEvent, User, UserBalance
 from app.db.session import get_db_session
 from app.exceptions import NotFoundError
 from app.providers.provisioner import (
@@ -413,6 +413,7 @@ async def get_key_usage(
 
 class UserSummary(BaseModel):
     user_id: str
+    email: str | None
     key_count: int
     active_key_count: int
     total_spent_usd: str
@@ -455,12 +456,17 @@ async def list_users(
     bal_q = await db.execute(select(UserBalance))
     bal_by_user = {str(b.user_id): b for b in bal_q.scalars().all()}
 
+    # Email per user_id from users table
+    email_q = await db.execute(select(User.id, User.email))
+    email_by_user = {row.id: row.email for row in email_q.all()}
+
     results = []
     for r in key_rows:
         spend_row = spend_by_owner.get(r.owner)
         bal = bal_by_user.get(r.owner)
         results.append(UserSummary(
             user_id=r.owner,
+            email=email_by_user.get(r.owner),
             key_count=r.key_count,
             active_key_count=r.active_key_count,
             total_spent_usd=str(Decimal(str(spend_row.total_spent))) if spend_row else "0",

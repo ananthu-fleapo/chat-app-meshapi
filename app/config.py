@@ -113,6 +113,9 @@ class Settings(BaseSettings):
     # Your Supabase project URL: https://<project-ref>.supabase.co
     # Used to validate the `iss` claim. Optional but recommended in prod.
     supabase_url: str = ""
+    # Supabase anon key — used by the backend to call Supabase Auth REST API
+    # (send OTP, verify OTP). Find it at Supabase → Settings → API → anon key.
+    supabase_anon_key: str = ""
     # Which JWT claim to use as the RouterV owner label.
     # Checked in order: user_metadata.<claim>, app_metadata.<claim>, <claim>.
     # Falls back to `sub` (Supabase user UUID) when unset or claim not found.

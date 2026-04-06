@@ -14,7 +14,7 @@ from app.providers.openrouter import OpenRouterAdapter
 from app.providers.registry import register_adapter
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from app.routers import balance, inference, keys, models, payments, usage, fx_rates
+from app.routers import auth, balance, inference, keys, models, payments, usage, fx_rates
 
 from fastapi.middleware.cors import CORSMiddleware 
 
@@ -180,6 +180,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
     # ── Routers ───────────────────────────────────────────────────────────────
+    app.include_router(auth.router)
     app.include_router(inference.router)
     app.include_router(keys.router)
     app.include_router(balance.router)
@@ -203,7 +204,7 @@ def create_app() -> FastAPI:
 
 
     # Admin router: JWT-gated. Caller must have app_metadata.permissions
-    # containing "mesh_api:admin". Dev bypass active when SUPABASE_JWT_SECRET unset.
+    # containing "mesh_api:admin".
     from app.routers import admin
     app.include_router(admin.router)
 
