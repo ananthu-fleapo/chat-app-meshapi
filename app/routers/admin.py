@@ -45,8 +45,8 @@ from app.auth.control_plane import get_admin_user
 from app.cache.key_cache import invalidate_cached_key
 from app.cache.redis_client import get_redis
 from app.config import settings
+from app.db.models import ApiKey, CurrencyConversionRate, Discount, Model, ModelPrice, PaymentEvent, ProviderKey, Template, UsageEvent, UserBalance
 from app.cache.analytics_cache import get_analytics_cached, set_analytics_cached
-from app.db.models import ApiKey, CurrencyConversionRate, Discount, Model, ModelPrice, PaymentEvent, ProviderKey, UsageEvent, UserBalance
 from app.routers.usage import UsageEventOut, UsageEventsPage, _parse_dt, _split_model, _tokens_per_second
 from app.db.session import get_db_session
 from app.exceptions import NotFoundError
@@ -1504,6 +1504,171 @@ async def get_balance(user_id: str, db: AsyncSession = Depends(get_db_session)):
     )
 
 
+# ── Global Templates ──────────────────────────────────────────────────────────
+#
+# Global templates have owner=NULL. They are seeded by admins and are readable
+# by all keys via the resolver's name-based fallback lookup.
+
+_SYSTEM_OWNER = None  # NULL owner = global template
+
+
+class GlobalTemplateRequest(BaseModel):
+    name: str
+    description: str | None = None
+    system: str | None = None
+    messages: list[dict] | None = None
+    model: str | None = None
+    params: dict | None = None
+    variables: list[str] | None = None
+
+
+class GlobalTemplateUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    system: str | None = None
+    messages: list[dict] | None = None
+    model: str | None = None
+    params: dict | None = None
+    variables: list[str] | None = None
+
+
+class GlobalTemplateSummary(BaseModel):
+    id: str
+    name: str
+    description: str | None
+    system: str | None
+    messages: list[dict] | None
+    model: str | None
+    params: dict | None
+    variables: list[str] | None
+    created_at: str
+    updated_at: str
+
+
+def _global_template_to_summary(t: Template) -> GlobalTemplateSummary:
+    return GlobalTemplateSummary(
+        id=str(t.id),
+        name=t.name,
+        description=t.description,
+        system=t.system,
+        messages=t.messages,
+        model=t.model,
+        params=t.params,
+        variables=t.variables,
+        created_at=t.created_at.isoformat(),
+        updated_at=t.updated_at.isoformat(),
+    )
+
+
+async def _get_global_or_404(db: AsyncSession, template_id: str) -> Template:
+    try:
+        uid = uuid.UUID(template_id)
+    except ValueError:
+        raise NotFoundError(f"Template '{template_id}' not found.")
+    result = await db.execute(
+        select(Template).where(Template.id == uid, Template.owner.is_(None))
+    )
+    t = result.scalar_one_or_none()
+    if t is None:
+        raise NotFoundError(f"Template '{template_id}' not found.")
+    return t
+
+
+@router.post("/templates", response_model=GlobalTemplateSummary, status_code=201)
+async def create_global_template(
+    body: GlobalTemplateRequest,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Create a global template (owner=NULL) usable by all API keys."""
+    from sqlalchemy.exc import IntegrityError
+
+    template = Template(
+        name=body.name,
+        owner=_SYSTEM_OWNER,
+        description=body.description,
+        system=body.system,
+        messages=body.messages,
+        model=body.model,
+        params=body.params,
+        variables=body.variables,
+    )
+    db.add(template)
+    try:
+        await db.flush()
+        await db.refresh(template)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"A global template named '{body.name}' already exists.",
+        )
+
+    logger.info("global_template_created", template_id=str(template.id), name=template.name)
+    return _global_template_to_summary(template)
+
+
+@router.get("/templates", response_model=list[GlobalTemplateSummary])
+async def list_global_templates(
+    db: AsyncSession = Depends(get_db_session),
+):
+    """List all global templates."""
+    result = await db.execute(
+        select(Template)
+        .where(Template.owner.is_(None))
+        .order_by(Template.created_at.desc())
+    )
+    return [_global_template_to_summary(t) for t in result.scalars().all()]
+
+
+@router.patch("/templates/{template_id}", response_model=GlobalTemplateSummary)
+async def update_global_template(
+    template_id: str,
+    body: GlobalTemplateUpdateRequest,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Update a global template."""
+    from sqlalchemy.exc import IntegrityError
+
+    template = await _get_global_or_404(db, template_id)
+
+    if body.name is not None:
+        template.name = body.name
+    if body.description is not None:
+        template.description = body.description
+    if body.system is not None:
+        template.system = body.system
+    if body.messages is not None:
+        template.messages = body.messages
+    if body.model is not None:
+        template.model = body.model
+    if body.params is not None:
+        template.params = body.params
+    if body.variables is not None:
+        template.variables = body.variables
+
+    try:
+        await db.flush()
+        await db.refresh(template)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"A global template named '{body.name}' already exists.",
+        )
+
+    logger.info("global_template_updated", template_id=str(template.id), name=template.name)
+    return _global_template_to_summary(template)
+
+
+@router.delete("/templates/{template_id}", status_code=204)
+async def delete_global_template(
+    template_id: str,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Hard delete a global template."""
+    template = await _get_global_or_404(db, template_id)
+    await db.delete(template)
+    logger.info("global_template_deleted", template_id=str(template.id), name=template.name)
 # ── Test & register models ─────────────────────────────────────────────────────
 
 class TestModelItem(BaseModel):

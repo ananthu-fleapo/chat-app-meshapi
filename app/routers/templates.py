@@ -20,7 +20,7 @@ import uuid
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,7 +59,8 @@ class UpdateTemplateRequest(BaseModel):
 class TemplateSummary(BaseModel):
     id: str
     name: str
-    owner: str
+    owner: str | None
+    is_global: bool
     description: str | None
     system: str | None
     messages: list[dict] | None
@@ -117,7 +118,7 @@ async def list_templates(
     """List all templates belonging to the authenticated user's owner."""
     result = await db.execute(
         select(Template)
-        .where(Template.owner == owner)
+        .where(or_(Template.owner == owner, Template.owner.is_(None)))
         .order_by(Template.created_at.desc())
     )
     return [_to_summary(t) for t in result.scalars().all()]
@@ -221,6 +222,7 @@ def _to_summary(t: Template) -> TemplateSummary:
         id=str(t.id),
         name=t.name,
         owner=t.owner,
+        is_global=t.owner is None,
         description=t.description,
         system=t.system,
         messages=t.messages,

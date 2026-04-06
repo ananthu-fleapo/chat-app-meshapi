@@ -73,12 +73,16 @@ async def resolve_template(
     )
     template = result.scalar_one_or_none()
 
-    # ── Phase B (future): system namespace fallback ───────────────────────────
-    # If template is None here, add a second query:
-    #   .where(Template.name == name_or_id, Template.owner == "system")
-    # "system" templates are seeded by RouterV admins and readable by all keys.
-    # Priority: own-namespace hit → system namespace → 404
-    # ─────────────────────────────────────────────────────────────────────────
+    if template is None:
+        # Global template fallback — owner=NULL templates are seeded by admins
+        # and readable by all keys. Priority: own-namespace → global → 404
+        result = await db.execute(
+            select(Template).where(
+                Template.name == name_or_id,
+                Template.owner.is_(None),
+            )
+        )
+        template = result.scalar_one_or_none()
 
     if template is None:
         raise NotFoundError(f"Template '{name_or_id}' not found.")

@@ -125,8 +125,9 @@ class Template(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    name: Mapped[str] = mapped_column(Text, nullable=False)  # covered by uq_templates_owner_name
-    owner: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL = global template (readable by all keys); non-null = owner-scoped.
+    owner: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Prompt content
