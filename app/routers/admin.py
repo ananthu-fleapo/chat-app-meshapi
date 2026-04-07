@@ -45,7 +45,7 @@ from app.auth.control_plane import get_admin_user
 from app.cache.key_cache import invalidate_cached_key
 from app.cache.redis_client import get_redis
 from app.config import settings
-from app.db.models import ApiKey, CurrencyConversionRate, Discount, Model, ModelPrice, PaymentEvent, ProviderKey, Template, UsageEvent, UserBalance
+from app.db.models import ApiKey, CurrencyConversionRate, Discount, Model, ModelPrice, PaymentEvent, ProviderKey, Template, UsageEvent, UserBalance, User
 from app.cache.analytics_cache import get_analytics_cached, set_analytics_cached
 from app.routers.usage import UsageEventOut, UsageEventsPage, _parse_dt, _split_model, _tokens_per_second
 from app.db.session import get_db_session
@@ -120,6 +120,7 @@ class CreateKeyResponse(BaseModel):
 class KeySummary(BaseModel):
     id: str
     owner: str
+    email: str | None
     status: str
     default_model: str | None
     default_params: dict | None
@@ -271,7 +272,13 @@ async def list_keys(
     db: AsyncSession = Depends(get_db_session),
 ):
     result = await db.execute(select(ApiKey).order_by(ApiKey.created_at.desc()))
-    return [_to_summary(k) for k in result.scalars().all()]
+    keys = result.scalars().all()
+    owner_ids = list({k.owner for k in keys})
+    email_by_owner: dict[str, str] = {}
+    if owner_ids:
+        email_q = await db.execute(select(User.id, User.email).where(User.id.in_(owner_ids)))
+        email_by_owner = {row.id: row.email for row in email_q.all()}
+    return [_to_summary(k, email=email_by_owner.get(k.owner)) for k in keys]
 
 
 @router.patch("/keys/{key_id}", response_model=KeySummary)
@@ -430,20 +437,29 @@ async def list_users(
     db: AsyncSession = Depends(get_db_session),
 ):
     """
-    List all users derived from api_keys.owner, enriched with balance and spend.
+    List all users from the users table, enriched with balance and spend.
     """
-    # Aggregate per-owner stats from api_keys
+    users_q = await db.execute(select(User))
+    all_users = users_q.scalars().all()
+
+    if not all_users:
+        return []
+
+    user_ids = [u.id for u in all_users]
+
+    # Aggregate key stats per user
     keys_q = await db.execute(
         select(
             ApiKey.owner.label("owner"),
             func.count(ApiKey.id).label("key_count"),
             func.count(ApiKey.id).filter(ApiKey.status == "active").label("active_key_count"),
-            func.min(ApiKey.created_at).label("created_at"),
-        ).group_by(ApiKey.owner)
+        )
+        .where(ApiKey.owner.in_(user_ids))
+        .group_by(ApiKey.owner)
     )
-    key_rows = keys_q.all()
+    keys_by_user = {r.owner: r for r in keys_q.all()}
 
-    # Spend per owner via api_keys join usage_events
+    # Spend per user via api_keys join usage_events
     spend_q = await db.execute(
         select(
             ApiKey.owner.label("owner"),
@@ -451,34 +467,33 @@ async def list_users(
             func.max(UsageEvent.created_at).label("last_activity"),
         )
         .outerjoin(UsageEvent, UsageEvent.key_id == ApiKey.id)
+        .where(ApiKey.owner.in_(user_ids))
         .group_by(ApiKey.owner)
     )
-    spend_by_owner = {r.owner: r for r in spend_q.all()}
+    spend_by_user = {r.owner: r for r in spend_q.all()}
 
-    # Balance per user_id (owner == user_id for Supabase users)
-    bal_q = await db.execute(select(UserBalance))
+    # Balance per user
+    bal_q = await db.execute(select(UserBalance).where(UserBalance.user_id.in_(user_ids)))
     bal_by_user = {str(b.user_id): b for b in bal_q.scalars().all()}
 
-    # Email lookup is skipped — users table not created in migrations
-
     results = []
-    for r in key_rows:
-        spend_row = spend_by_owner.get(r.owner)
-        bal = bal_by_user.get(r.owner)
+    for u in all_users:
+        keys_row = keys_by_user.get(u.id)
+        spend_row = spend_by_user.get(u.id)
+        bal = bal_by_user.get(u.id)
         results.append(UserSummary(
-            user_id=r.owner,
-            email=None,
-            key_count=r.key_count,
-            active_key_count=r.active_key_count,
+            user_id=u.id,
+            email=u.email,
+            key_count=keys_row.key_count if keys_row else 0,
+            active_key_count=keys_row.active_key_count if keys_row else 0,
             total_spent_usd=str(Decimal(str(spend_row.total_spent))) if spend_row else "0",
             balance_usd=str(bal.balance_usd) if bal else None,
             last_activity=spend_row.last_activity.isoformat() if spend_row and spend_row.last_activity else None,
-            created_at=r.created_at.isoformat(),
+            created_at=u.created_at.isoformat(),
         ))
 
     results.sort(key=lambda x: x.last_activity or "", reverse=True)
     return results
-
 
 # ── Usage breakdowns ──────────────────────────────────────────────────────────
 
@@ -492,6 +507,7 @@ class ModelUsageRow(BaseModel):
 
 class OwnerUsageRow(BaseModel):
     owner: str
+    email: str | None
     requests: int
     successful_requests: int
     total_tokens: int | None
@@ -541,15 +557,22 @@ async def get_usage_by_owner(
         .group_by(ApiKey.owner)
         .order_by(func.sum(UsageEvent.cost_usd).desc().nulls_last())
     )
+    usage_rows = rows.all()
+    owner_ids = list({r.owner for r in usage_rows})
+    email_by_owner: dict[str, str] = {}
+    if owner_ids:
+        email_q = await db.execute(select(User.id, User.email).where(User.id.in_(owner_ids)))
+        email_by_owner = {row.id: row.email for row in email_q.all()}
     return [
         OwnerUsageRow(
             owner=r.owner,
+            email=email_by_owner.get(r.owner),
             requests=r.requests,
             successful_requests=r.success,
             total_tokens=r.tokens if r.tokens else None,
             total_cost_usd=str(Decimal(str(r.cost))),
         )
-        for r in rows.all()
+        for r in usage_rows
     ]
 
 
@@ -594,10 +617,11 @@ async def _get_or_404(db: AsyncSession, key_id: str) -> ApiKey:
     return key
 
 
-def _to_summary(k: ApiKey) -> KeySummary:
+def _to_summary(k: ApiKey, *, email: str | None = None) -> KeySummary:
     return KeySummary(
         id=str(k.id),
         owner=k.owner,
+        email=email,
         status=k.status,
         default_model=k.default_model,
         default_params=k.default_params,
@@ -623,6 +647,7 @@ class AdminCreateProviderKeyRequest(BaseModel):
 class AdminProviderKeyOut(BaseModel):
     id: str
     owner: str
+    email: str | None = None
     provider: str
     secret_ref: str
     label: str | None
@@ -638,11 +663,12 @@ def _mask_secret_ref(ref: str) -> str:
 
 
 def _to_pk_out(
-    pk: ProviderKey, *, secret_reachable: bool | None = None
+    pk: ProviderKey, *, email: str | None = None, secret_reachable: bool | None = None
 ) -> AdminProviderKeyOut:
     return AdminProviderKeyOut(
         id=str(pk.id),
         owner=pk.owner,
+        email=email,
         provider=pk.provider,
         secret_ref=_mask_secret_ref(pk.secret_ref),
         label=pk.label,
@@ -682,7 +708,13 @@ async def admin_list_provider_keys(
     result = await db.execute(
         select(ProviderKey).order_by(ProviderKey.created_at.desc())
     )
-    return [_to_pk_out(pk) for pk in result.scalars().all()]
+    pks = result.scalars().all()
+    owner_ids = list({pk.owner for pk in pks})
+    email_by_owner: dict[str, str] = {}
+    if owner_ids:
+        email_q = await db.execute(select(User.id, User.email).where(User.id.in_(owner_ids)))
+        email_by_owner = {row.id: row.email for row in email_q.all()}
+    return [_to_pk_out(pk, email=email_by_owner.get(pk.owner)) for pk in pks]
 
 
 @router.get("/provider-keys/{pk_id}", response_model=AdminProviderKeyOut)
@@ -1279,6 +1311,7 @@ class DiscountUpdateIn(BaseModel):
 class DiscountOut(BaseModel):
     id: str
     user_id: str
+    email: str | None
     model_id: str | None
     discount_pct: str
     valid_from: str
@@ -1288,10 +1321,11 @@ class DiscountOut(BaseModel):
     created_at: str
 
 
-def _to_discount_out(d: Discount) -> DiscountOut:
+def _to_discount_out(d: Discount, *, email: str | None = None) -> DiscountOut:
     return DiscountOut(
         id=str(d.id),
         user_id=d.user_id,
+        email=email,
         model_id=d.model_id,
         discount_pct=str(d.discount_pct),
         valid_from=d.valid_from.isoformat(),
@@ -1345,7 +1379,13 @@ async def list_discounts(
     if model_id:
         q = q.where(Discount.model_id == model_id)
     result = await db.execute(q)
-    return [_to_discount_out(d) for d in result.scalars().all()]
+    discounts = result.scalars().all()
+    uid_set = list({d.user_id for d in discounts})
+    email_by_user: dict[str, str] = {}
+    if uid_set:
+        email_q = await db.execute(select(User.id, User.email).where(User.id.in_(uid_set)))
+        email_by_user = {row.id: row.email for row in email_q.all()}
+    return [_to_discount_out(d, email=email_by_user.get(d.user_id)) for d in discounts]
 
 
 @router.patch("/discounts/{discount_id}", response_model=DiscountOut)
@@ -1403,6 +1443,7 @@ async def delete_discount(
 
 class BalanceSummary(BaseModel):
     user_id: str
+    email: str | None
     balance_usd: str
     total_spent_usd: str
     last_activity: str | None
@@ -1428,20 +1469,23 @@ async def list_balances(db: AsyncSession = Depends(get_db_session)):
     rows = await db.execute(sa_text("""
         SELECT
             ub.user_id,
+            u.email,
             ub.balance_usd,
             ub.updated_at,
             COALESCE(SUM(ue.cost_usd), 0)  AS total_spent_usd,
             MAX(ue.created_at)              AS last_activity
         FROM user_balances ub
+        LEFT JOIN users u ON u.id = ub.user_id
         LEFT JOIN api_keys ak ON ak.owner = ub.user_id
         LEFT JOIN usage_events ue ON ue.key_id = ak.id AND ue.status = 'success'
-        GROUP BY ub.user_id, ub.balance_usd, ub.updated_at
+        GROUP BY ub.user_id, u.email, ub.balance_usd, ub.updated_at
         ORDER BY ub.balance_usd ASC
     """))
 
     return [
         BalanceSummary(
             user_id=r.user_id,
+            email=r.email,
             balance_usd=str(r.balance_usd),
             total_spent_usd=str(r.total_spent_usd),
             last_activity=r.last_activity.isoformat() if r.last_activity else None,
