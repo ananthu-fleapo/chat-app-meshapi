@@ -1,8 +1,94 @@
 import { useCallback } from "react";
-import { meshClient } from "@/lib/api";
 import { useChatStore } from "@/store/chatStore";
 import { useModels } from "@/hooks/useModels";
 import type { ChatMessage, ResponseUsage } from "@/lib/types";
+
+/**
+ * Reads an SSE stream from /api/chat and calls onChunk/onUsage as data arrives.
+ * The server proxies the upstream API, so no auth headers or upstream URL needed here.
+ */
+async function streamChat(
+  modelId: string,
+  messages: Array<{ role: "user" | "assistant"; content: string }>,
+  onChunk: (delta: string) => void,
+  onUsage: (usage: ResponseUsage) => void,
+): Promise<void> {
+  console.log("[streamChat] Sending to /api/chat:", { modelId, messageCount: messages.length });
+
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: modelId, messages }),
+  });
+
+  console.log("[streamChat] Response status:", res.status, res.statusText);
+
+  if (!res.ok) throw new Error(`Chat API error: ${res.status} ${res.statusText}`);
+  if (!res.body) throw new Error("No response body from /api/chat");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let totalChunks = 0;
+  let totalDeltas = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      console.log(`[streamChat] Reader done. chunks=${totalChunks} deltas=${totalDeltas}`);
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+
+    // SSE events are separated by double newlines
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() ?? ""; // keep any incomplete trailing event
+
+    for (const part of parts) {
+      for (const line of part.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+
+        const payload = line.slice(6).trim();
+        if (payload === "[DONE]") {
+          console.log(`[streamChat] [DONE] received. deltas=${totalDeltas}`);
+          return;
+        }
+
+        let chunk: Record<string, unknown>;
+        try {
+          chunk = JSON.parse(payload);
+        } catch {
+          console.warn("[streamChat] Failed to parse SSE line:", line);
+          continue;
+        }
+
+        totalChunks++;
+
+        // API-level error — propagate so the UI shows the message
+        if (chunk.error) throw new Error(chunk.error as string);
+
+        const delta = (chunk.choices as Array<{ delta?: { content?: string } }>)?.[0]?.delta?.content;
+        if (delta) {
+          totalDeltas++;
+          if (totalDeltas <= 3) console.log(`[streamChat] delta #${totalDeltas}:`, JSON.stringify(delta));
+          onChunk(delta);
+        }
+
+        if (chunk.usage) {
+          const u = chunk.usage as Record<string, unknown>;
+          console.log("[streamChat] usage:", u);
+          onUsage({
+            prompt_tokens: (u.prompt_tokens as number) ?? 0,
+            completion_tokens: (u.completion_tokens as number) ?? 0,
+            total_tokens: (u.total_tokens as number) ?? 0,
+            cost: u.cost as number | undefined,
+          });
+        }
+      }
+    }
+  }
+}
 
 export function useChatStream() {
   const store = useChatStore();
@@ -12,7 +98,7 @@ export function useChatStream() {
     async (content: string) => {
       if (store.isStreaming) return;
 
-      // Use selected models, or fall back to first available model
+      // Fall back to first available model if none are selected
       const effectiveModels =
         store.selectedModelIds.length > 0
           ? store.selectedModelIds
@@ -20,7 +106,6 @@ export function useChatStream() {
           ? [availableModels[0].id]
           : ["openai/gpt-4o-mini"];
 
-      // Ensure there's an active room
       let roomId = store.activeRoomId;
       if (!roomId) {
         roomId = store.createRoom();
@@ -29,7 +114,7 @@ export function useChatStream() {
       const messageId = store.addUserMessage(content);
       store.setStreaming(true);
 
-      // Build the messages array for the API (use current state snapshot)
+      // Snapshot history before the new message was added
       const snapshot = useChatStore.getState();
       const activeRoom = snapshot.rooms.find((r) => r.id === roomId);
       const history: ChatMessage[] = activeRoom
@@ -50,68 +135,35 @@ export function useChatStream() {
         { role: "user" as const, content },
       ];
 
-      // Initialize response slots for all effective models
+      // Initialise response slots
       for (const modelId of effectiveModels) {
         store.initModelResponse(messageId, modelId);
       }
 
       // Fire all model streams in parallel
       const streamPromises = effectiveModels.map(async (modelId) => {
+        let usage: ResponseUsage | undefined;
         try {
-          const stream = meshClient.chat.completions.stream({
-            model: modelId,
-            messages: apiMessages,
-            stream: true,
-          });
-
-          let usage: ResponseUsage | undefined;
-
-          for await (const chunk of stream) {
-            const delta = chunk.choices?.[0]?.delta?.content;
-            if (delta) {
-              // Plain store update — no flushSync (breaks React 19 concurrent renderer)
-              store.appendModelContent(messageId, modelId, delta);
-            }
-
-            // Capture usage whenever the API sends it (overwrite with latest)
-            if (chunk.usage) {
-              usage = {
-                prompt_tokens: chunk.usage.prompt_tokens ?? 0,
-                completion_tokens: chunk.usage.completion_tokens ?? 0,
-                total_tokens: chunk.usage.total_tokens ?? 0,
-                cost: (chunk.usage as unknown as Record<string, unknown>).cost as number | undefined,
-              };
-            }
-          }
-
-          // Also try the SDK's finalUsage helper as a fallback
-          if (!usage) {
-            try {
-              const finalMsg = await stream.finalMessage() as unknown as Record<string, unknown>;
-              const u = finalMsg.usage as Record<string, number> | undefined;
-              if (u) {
-                usage = {
-                  prompt_tokens: u.prompt_tokens ?? 0,
-                  completion_tokens: u.completion_tokens ?? 0,
-                  total_tokens: u.total_tokens ?? 0,
-                };
-              }
-            } catch {
-              // finalMessage may throw if stream already consumed — ignore
-            }
-          }
-
+          await streamChat(
+            modelId,
+            apiMessages,
+            (delta) => store.appendModelContent(messageId, modelId, delta),
+            (u) => { usage = u; },
+          );
           store.finalizeModelResponse(messageId, modelId, undefined, usage);
         } catch (err) {
-          const error = err instanceof Error ? err.message : "Unknown error";
-          store.finalizeModelResponse(messageId, modelId, error);
+          store.finalizeModelResponse(
+            messageId,
+            modelId,
+            err instanceof Error ? err.message : "Unknown error",
+          );
         }
       });
 
       await Promise.allSettled(streamPromises);
       store.setStreaming(false);
     },
-    [store, availableModels]
+    [store, availableModels],
   );
 
   return { sendMessage, isStreaming: store.isStreaming };

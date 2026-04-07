@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
 import { useChatStore } from "@/store/chatStore";
 import { ModelResponse } from "./ModelResponse";
@@ -9,15 +9,62 @@ export function MessageList() {
   const { activeRoom, selectedModelIds } = useChatStore();
   const room = activeRoom();
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const userScrolledUpRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
 
+  // Detect scroll direction — stop auto-scroll the instant user scrolls up
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+
+    const current = el.scrollTop;
+    const scrollingUp = current < lastScrollTopRef.current;
+    lastScrollTopRef.current = current;
+
+    const distanceFromBottom = el.scrollHeight - current - el.clientHeight;
+
+    if (scrollingUp && distanceFromBottom > 10) {
+      // User intentionally scrolled up — disable auto-scroll immediately
+      userScrolledUpRef.current = true;
+    } else if (distanceFromBottom <= 30) {
+      // User scrolled back to the bottom — re-enable
+      userScrolledUpRef.current = false;
+    }
+  }, []);
+
+  const scrollToBottom = useCallback((smooth = true) => {
+    if (userScrolledUpRef.current) return;
+    bottomRef.current?.scrollIntoView({ behavior: smooth ? "smooth" : "instant" });
+  }, []);
+
+  // Scroll when a new message is added
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [room?.messages]);
+    scrollToBottom();
+  }, [room?.messages, scrollToBottom]);
+
+  // During streaming: follow the bottom at ~30fps using rAF
+  useEffect(() => {
+    return useChatStore.subscribe((state) => {
+      if (state.isStreaming && !userScrolledUpRef.current) {
+        requestAnimationFrame(() => {
+          if (!userScrolledUpRef.current) {
+            const el = scrollContainerRef.current;
+            if (el) el.scrollTop = el.scrollHeight;
+          }
+        });
+      }
+    });
+  }, []);
 
   if (!room || room.messages.length === 0) return null;
 
   return (
-    <div className="flex-1 overflow-y-auto px-6 py-4">
+    <div
+      ref={scrollContainerRef}
+      onScroll={handleScroll}
+      className="flex-1 overflow-y-auto px-6 py-4"
+    >
       <div className="max-w-3xl mx-auto space-y-6">
         {room.messages.map((message) => (
           <div key={message.id}>
