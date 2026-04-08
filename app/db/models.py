@@ -332,6 +332,8 @@ class Model(Base):
     model_id        Exact model identifier, e.g. "openai/gpt-4o-mini".
                     Must match the model_id used in model_prices rows.
     name            Human-readable display name, e.g. "GPT-4o Mini".
+    brand           Provider slug extracted from model_id before the first '/'.
+                    e.g. "openai" for "openai/gpt-4o-mini". Set at insert time.
     context_length  Max context window in tokens. NULL if unknown.
     description     Optional marketing/capability description.
     is_enabled      False = hidden from the public listing (soft disable).
@@ -343,6 +345,7 @@ class Model(Base):
 
     model_id: Mapped[str] = mapped_column(Text, primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
     context_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(

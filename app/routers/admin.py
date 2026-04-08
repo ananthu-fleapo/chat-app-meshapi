@@ -887,16 +887,13 @@ async def _invalidate_models_cache() -> None:
             logger.warning("models_cache_invalidation_failed", error=str(exc))
 
 
-async def _clear_default(model_id: str, db: AsyncSession) -> None:
-    """Clear is_default on all rows for model_id (called before setting a new default)."""
-    result = await db.execute(
-        select(ModelPrice).where(
-            ModelPrice.model_id == model_id,
-            ModelPrice.is_default.is_(True),
-        )
+async def _clear_default( model_id: str, db: AsyncSession) -> None:
+    """Clear is_default on all provider rows for the given model_id."""
+    await db.execute(
+        update(ModelPrice)
+        .where(ModelPrice.model_id == model_id, ModelPrice.is_default.is_(True))
+        .values(is_default=False)
     )
-    for row in result.scalars().all():
-        row.is_default = False
 
 
 @router.post("/model-prices", response_model=ModelPriceOut, status_code=201)
@@ -971,7 +968,8 @@ async def list_model_prices(
     return [_to_price_out(p) for p in result.scalars().all()]
 
 
-@router.patch("/model-prices/{model_id}/{provider}", response_model=ModelPriceOut)
+
+@router.patch("/model-prices/{model_id:path}/{provider}", response_model=ModelPriceOut)
 async def update_model_price(
     model_id: str,
     provider: str,
@@ -1019,7 +1017,7 @@ async def update_model_price(
     return _to_price_out(price)
 
 
-@router.delete("/model-prices/{model_id}/{provider}", status_code=204)
+@router.delete("/model-prices/{model_id:path}/{provider}", status_code=204)
 async def delete_model_price(
     model_id: str,
     provider: str,
@@ -1164,6 +1162,7 @@ async def seed_model_prices(
 class ModelIn(BaseModel):
     model_id: str
     name: str
+    brand: str | None = None
     context_length: int | None = None
     description: str | None = None
     is_enabled: bool = True
@@ -1179,22 +1178,26 @@ class ModelUpdateIn(BaseModel):
 class ModelRegistryOut(BaseModel):
     model_id: str
     name: str
+    brand: str
     context_length: int | None
     description: str | None
     is_enabled: bool
     created_at: str
     updated_at: str
+    prices: list[ModelPriceOut] = []
 
 
-def _to_model_out(m: Model) -> ModelRegistryOut:
+def _to_model_out(m: Model, prices: list[ModelPrice] | None = None) -> ModelRegistryOut:
     return ModelRegistryOut(
         model_id=m.model_id,
         name=m.name,
+        brand=m.brand,
         context_length=m.context_length,
         description=m.description,
         is_enabled=m.is_enabled,
         created_at=m.created_at.isoformat(),
         updated_at=m.updated_at.isoformat(),
+        prices=[_to_price_out(p) for p in (prices or [])],
     )
 
 
@@ -1217,6 +1220,7 @@ async def create_model(
     model = Model(
         model_id=body.model_id,
         name=body.name,
+        brand=body.brand or body.model_id.split("/")[0],
         context_length=body.context_length,
         description=body.description,
         is_enabled=body.is_enabled,
@@ -1233,12 +1237,22 @@ async def create_model(
 async def list_models_admin(
     db: AsyncSession = Depends(get_db_session),
 ):
-    """List all models (including disabled). For the public listing use GET /v1/models."""
-    result = await db.execute(select(Model).order_by(Model.model_id))
-    return [_to_model_out(m) for m in result.scalars().all()]
+    """List all models (including disabled) with their pricing rows. For the public listing use GET /v1/models."""
+    result = await db.execute(
+        select(Model, ModelPrice)
+        .outerjoin(ModelPrice, ModelPrice.model_id == Model.model_id)
+        .order_by(Model.model_id, ModelPrice.provider)
+    )
+    models_map: dict[str, tuple[Model, list[ModelPrice]]] = {}
+    for m, mp in result.all():
+        if m.model_id not in models_map:
+            models_map[m.model_id] = (m, [])
+        if mp is not None:
+            models_map[m.model_id][1].append(mp)
+    return [_to_model_out(m, prices) for m, prices in models_map.values()]
 
 
-@router.patch("/models/{model_id}", response_model=ModelRegistryOut)
+@router.patch("/models/{model_id:path}", response_model=ModelRegistryOut)
 async def update_model(
     model_id: str,
     body: ModelUpdateIn,
@@ -1271,7 +1285,7 @@ async def update_model(
     return _to_model_out(model)
 
 
-@router.delete("/models/{model_id}", status_code=204)
+@router.delete("/models/{model_id:path}", status_code=204)
 async def delete_model(
     model_id: str,
     db: AsyncSession = Depends(get_db_session),

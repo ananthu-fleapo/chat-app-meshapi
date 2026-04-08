@@ -17,7 +17,7 @@ from app.providers.registry import register_adapter
 from prometheus_fastapi_instrumentator import Instrumentator
 import asyncio
 
-from app.routers import auth, balance, inference, keys, models, payments, usage, fx_rates, gstin
+from app.routers import auth, balance, inference, keys, models, payments, usage, fx_rates, gstin, admin, error_logs
 
 from fastapi.middleware.cors import CORSMiddleware 
 
@@ -242,8 +242,8 @@ def create_app() -> FastAPI:
 
     # Admin router: JWT-gated. Caller must have app_metadata.permissions
     # containing "mesh_api:admin".
-    from app.routers import admin
     app.include_router(admin.router)
+    app.include_router(error_logs.router)
 
     # ── Prometheus metrics ────────────────────────────────────────────────────
     # Instruments HTTP metrics. Endpoint is registered manually below so we
