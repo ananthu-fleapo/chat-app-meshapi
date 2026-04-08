@@ -43,6 +43,7 @@ services:
     profiles: ["monitoring"]
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
     ports:
       - "9090:9090"
     extra_hosts:
@@ -54,6 +55,8 @@ services:
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      PROMETHEUS_URL: ${PROMETHEUS_URL:-http://prometheus:9090}
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana_data:/var/lib/grafana
@@ -64,4 +67,5 @@ services:
 
 volumes:
   postgres_data:
+  prometheus_data:
   grafana_data:

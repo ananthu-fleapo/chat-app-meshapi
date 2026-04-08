@@ -1,18 +1,21 @@
+import os
 from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Header
 from fastapi.exceptions import RequestValidationError
 
-from app.cache.redis_client import close_redis, init_redis
+from app.cache.redis_client import close_redis, init_redis, get_redis
 from app.config import settings
-from app.db.engine import close_db, init_db
+from app.db.engine import close_db, init_db, get_engine
 from app.exceptions import RouterVError, routerv_exception_handler, validation_exception_handler
 from app.logging_config import configure_logging
 from app.middleware import CloudflareOriginGuard, RequestIdMiddleware
+from app.metrics import update_pool_metrics, update_redis_metrics, PROCESS_CPU_CORES, PROCESS_TOTAL_MEMORY_BYTES
 from app.providers.openrouter import OpenRouterAdapter
 from app.providers.registry import register_adapter
 from prometheus_fastapi_instrumentator import Instrumentator
+import asyncio
 
 from app.routers import auth, balance, inference, keys, models, payments, usage, fx_rates, gstin
 
@@ -26,6 +29,15 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("startup", env=settings.env, version="0.1.0")
+
+    # ── System resources ──────────────────────────────────────────────────────
+    PROCESS_CPU_CORES.set(os.cpu_count() or 1)
+    try:
+        import psutil
+        PROCESS_TOTAL_MEMORY_BYTES.set(psutil.virtual_memory().total)
+    except ImportError:
+        # psutil not available; use 512 MB fallback
+        PROCESS_TOTAL_MEMORY_BYTES.set(512 * 1024 * 1024)
 
     # ── OpenRouter adapter ────────────────────────────────────────────────────
     OpenRouterAdapter.init(
@@ -123,7 +135,30 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("redis_not_configured", hint="Set REDIS_URL in .env")
 
+    # ── Background metrics task ───────────────────────────────────────────────
+    # Update DB pool and Redis metrics every 10 seconds.
+    async def update_metrics_loop():
+        while True:
+            try:
+                engine = get_engine()
+                if engine:
+                    update_pool_metrics(engine)
+                redis = get_redis()
+                if redis:
+                    await update_redis_metrics(redis)
+            except Exception as e:
+                logger.warning("metrics_update_failed", error=str(e))
+            await asyncio.sleep(10)
+
+    metrics_task = asyncio.create_task(update_metrics_loop())
+
     yield
+
+    metrics_task.cancel()
+    try:
+        await metrics_task
+    except asyncio.CancelledError:
+        pass
 
     logger.info("shutdown")
     await OpenRouterAdapter.close()

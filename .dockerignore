@@ -37,8 +37,9 @@ Thumbs.db
 htmlcov/
 *.log
 
-# Grafana / Prometheus local data
-grafana/
+# Grafana / Prometheus local data — exclude runtime data but keep build assets
+grafana/*
+!grafana/provisioning/
 prometheus.yml
 
 # Documentation

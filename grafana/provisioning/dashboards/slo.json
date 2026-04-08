@@ -1,0 +1,317 @@
+{
+  "title": "RouterV — SLO / Reliability",
+  "uid": "routerv-slo",
+  "schemaVersion": 38,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 100,
+      "title": "— Resource Utilisation",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 1,
+      "title": "CPU — Current",
+      "type": "gauge",
+      "gridPos": { "x": 0, "y": 1, "w": 4, "h": 7 },
+      "targets": [
+        {
+          "expr": "rate(process_cpu_seconds_total{job=\"routersvc\"}[1m]) * 100",
+          "legendFormat": "CPU %",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 85 }
+            ]
+          }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false, "showThresholdMarkers": true }
+    },
+    {
+      "id": 2,
+      "title": "CPU Usage %",
+      "type": "timeseries",
+      "gridPos": { "x": 4, "y": 1, "w": 20, "h": 7 },
+      "targets": [
+        {
+          "expr": "rate(process_cpu_seconds_total{job=\"routersvc\"}[1m]) * 100",
+          "legendFormat": "CPU %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 85 }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": { "mode": "line" }
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "RAM — Current",
+      "type": "gauge",
+      "gridPos": { "x": 0, "y": 8, "w": 4, "h": 7 },
+      "targets": [
+        {
+          "expr": "process_resident_memory_bytes{job=\"routersvc\"} / 1024 / 1024",
+          "legendFormat": "RSS MB",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "displayName": "RSS (MB)",
+          "min": 0,
+          "max": 512,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 300 },
+              { "color": "red", "value": 410 }
+            ]
+          }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": true, "showThresholdMarkers": true }
+    },
+    {
+      "id": 4,
+      "title": "RAM Usage",
+      "type": "timeseries",
+      "gridPos": { "x": 4, "y": 8, "w": 20, "h": 7 },
+      "targets": [
+        {
+          "expr": "process_resident_memory_bytes{job=\"routersvc\"}",
+          "legendFormat": "RSS"
+        },
+        {
+          "expr": "process_virtual_memory_bytes{job=\"routersvc\"}",
+          "legendFormat": "Virtual"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 314572800 },
+              { "color": "red", "value": 429916160 }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": { "mode": "line+area" }
+          }
+        }
+      }
+    },
+
+    {
+      "id": 101,
+      "title": "— Error Rates",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 15, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 5,
+      "title": "5xx Server Error Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{job=\"routersvc\",status=~\"5..\"}[5m])) / sum(rate(http_requests_total{job=\"routersvc\"}[5m])) * 100",
+          "legendFormat": "5xx rate %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "color": { "fixedColor": "red", "mode": "fixed" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": { "mode": "line" }
+          }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "4xx Client Error Rate (excl. 401/403)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{job=\"routersvc\",status=~\"4..\",status!~\"401|403\"}[5m])) / sum(rate(http_requests_total{job=\"routersvc\"}[5m])) * 100",
+          "legendFormat": "4xx rate % (excl auth)"
+        },
+        {
+          "expr": "sum by (status) (rate(http_requests_total{job=\"routersvc\",status=~\"4..\",status!~\"401|403\"}[5m])) / sum(rate(http_requests_total{job=\"routersvc\"}[5m])) * 100",
+          "legendFormat": "{{status}} %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 2 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": { "mode": "line" }
+          }
+        }
+      }
+    },
+
+    {
+      "id": 102,
+      "title": "— Per-Endpoint Health",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 7,
+      "title": "Success Rate by Endpoint",
+      "description": "% of 2xx responses per handler. Excludes /healthz, /readyz, /metrics.",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 9 },
+      "targets": [
+        {
+          "expr": "sum by (handler) (rate(http_requests_total{job=\"routersvc\",status=~\"2..\",handler!~\"/healthz|/readyz|/metrics\"}[5m])) / sum by (handler) (rate(http_requests_total{job=\"routersvc\",handler!~\"/healthz|/readyz|/metrics\"}[5m])) * 100",
+          "legendFormat": "{{handler}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 90,
+          "max": 100,
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 99 },
+              { "color": "green", "value": 99.5 }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": { "mode": "line" }
+          }
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "Request Rate by Endpoint",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 33, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum by (handler) (rate(http_requests_total{job=\"routersvc\",handler!~\"/healthz|/readyz|/metrics\"}[5m]))",
+          "legendFormat": "{{handler}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "4xx Rate by Endpoint (excl. auth errors)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 41, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum by (handler) (rate(http_requests_total{job=\"routersvc\",status=~\"4..\",status!~\"401|403\",handler!~\"/healthz|/readyz|/metrics\"}[5m]))",
+          "legendFormat": "{{handler}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Control/Data Plane p99 Latency by Endpoint",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 49, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job=\"routersvc\",handler!=\"/v1/chat/completions\"}[5m])) by (le, handler)) * 1000",
+          "legendFormat": "{{handler}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 2000 },
+              { "color": "red", "value": 3000 }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": { "mode": "line" }
+          }
+        }
+      }
+    }
+  ]
+}

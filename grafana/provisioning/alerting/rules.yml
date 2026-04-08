@@ -1,0 +1,378 @@
+apiVersion: 1
+
+groups:
+  # ── App metrics (Prometheus / GMP datasource) ───────────────────────────────
+  - name: RouterV App
+    folder: RouterV Alerts
+    interval: 1m
+    rules:
+      - uid: routerv-5xx-rate-high
+        title: "RouterV — 5xx Error Rate > 1%"
+        condition: threshold
+        for: 5m
+        noDataState: OK
+        execErrState: Alerting
+        labels:
+          severity: critical
+        annotations:
+          summary: "5xx error rate is {{ $values.rateReduced.Value | printf \"%.2f\" }}%"
+          description: Check application ERROR logs for the root cause.
+          __dashboardUid__: routerv-slo
+          __panelId__: "5"
+        data:
+          - refId: total
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: sum(rate(http_requests_total{job="routersvc"}[5m]))
+              instant: false
+              range: true
+          - refId: errors5xx
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: sum(rate(http_requests_total{job="routersvc",status=~"5.."}[5m]))
+              instant: false
+              range: true
+          - refId: rate
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "$errors5xx / $total * 100"
+          - refId: rateReduced
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: rate
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: rateReduced
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [1]
+                  operator:
+                    type: and
+                  query:
+                    params: [rateReduced]
+                  reducer:
+                    type: last
+
+      - uid: routerv-p99-latency-high
+        title: "RouterV — Inference p99 Latency > 30s"
+        condition: threshold
+        for: 5m
+        noDataState: OK
+        execErrState: Alerting
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inference p99 latency is {{ $values.B.Value | printf \"%.0f\" }}ms"
+          description: Check application logs sorted by latency_ms for the root cause.
+          __dashboardUid__: routerv-main
+          __panelId__: "16"
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job="routersvc",handler="/v1/chat/completions"}[5m])) by (le)) * 1000
+              instant: false
+              range: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [30000]
+                  operator:
+                    type: and
+                  query:
+                    params: [B]
+                  reducer:
+                    type: last
+
+      - uid: routerv-p99-latency-control-plane-high
+        title: "RouterV — Control/Data Plane p99 Latency > 3s"
+        condition: threshold
+        for: 5m
+        noDataState: OK
+        execErrState: Alerting
+        labels:
+          severity: warning
+        annotations:
+          summary: "Non-inference p99 latency is {{ $values.B.Value | printf \"%.0f\" }}ms"
+          description: Check application logs sorted by latency_ms for slow control/data plane handlers.
+          __dashboardUid__: routerv-slo
+          __panelId__: "10"
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job="routersvc",handler!="/v1/chat/completions"}[5m])) by (le, handler)) * 1000
+              instant: false
+              range: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [3000]
+                  operator:
+                    type: and
+                  query:
+                    params: [B]
+                  reducer:
+                    type: last
+
+      - uid: routerv-4xx-rate-high
+        title: "RouterV — 4xx Client Error Rate > 2% (excl. 401/403)"
+        condition: threshold
+        for: 5m
+        noDataState: OK
+        execErrState: Alerting
+        labels:
+          severity: warning
+        annotations:
+          summary: "4xx client error rate is {{ $values.rateReduced.Value | printf \"%.2f\" }}%"
+          description: Check application logs for repeated client errors. May indicate broken clients, bad request formats, or missing resources.
+          __dashboardUid__: routerv-slo
+          __panelId__: "6"
+        data:
+          - refId: total
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: sum(rate(http_requests_total{job="routersvc"}[5m]))
+              instant: false
+              range: true
+          - refId: errors4xx
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: sum(rate(http_requests_total{job="routersvc",status=~"4..",status!~"401|403"}[5m]))
+              instant: false
+              range: true
+          - refId: rate
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "$errors4xx / $total * 100"
+          - refId: rateReduced
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: rate
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: rateReduced
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [2]
+                  operator:
+                    type: and
+                  query:
+                    params: [rateReduced]
+                  reducer:
+                    type: last
+
+      - uid: routerv-endpoint-success-rate-low
+        title: "RouterV — Endpoint Success Rate < 99.5%"
+        condition: threshold
+        for: 5m
+        noDataState: OK
+        execErrState: Alerting
+        labels:
+          severity: warning
+        annotations:
+          summary: "An endpoint success rate dropped below 99.5%: {{ $values.B.Value | printf \"%.2f\" }}%"
+          description: Check application logs filtered by the affected handler for 4xx/5xx errors.
+          __dashboardUid__: routerv-slo
+          __panelId__: "7"
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: sum by (handler) (rate(http_requests_total{job="routersvc",status=~"2..",handler!~"/healthz|/readyz|/metrics"}[5m])) / sum by (handler) (rate(http_requests_total{job="routersvc",handler!~"/healthz|/readyz|/metrics"}[5m])) * 100
+              instant: false
+              range: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [99.5]
+                  operator:
+                    type: and
+                  query:
+                    params: [B]
+                  reducer:
+                    type: last
+
+      - uid: routerv-ram-high
+        title: "RouterV — RAM Usage > 80% (total machine)"
+        condition: threshold
+        for: 5m
+        noDataState: OK
+        execErrState: Alerting
+        labels:
+          severity: warning
+        annotations:
+          summary: "RAM usage is {{ $values.B.Value | printf \"%.1f\" }}% ({{ $values.rss.Value | printf \"%.0f\" }} MB of {{ $values.total.Value | printf \"%.0f\" }} MB)"
+          description: Check application logs for memory usage patterns. Alert fires when RSS exceeds 80% of total system memory.
+          __dashboardUid__: routerv-slo
+          __panelId__: "4"
+        data:
+          - refId: rss
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: process_resident_memory_bytes{job="routersvc"} / 1024 / 1024
+              instant: false
+              range: true
+          - refId: total
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: process_total_memory_bytes{job="routersvc"} / 1024 / 1024
+              instant: false
+              range: true
+          - refId: usage
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "$rss / $total * 100"
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: usage
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [80]
+                  operator:
+                    type: and
+                  query:
+                    params: [B]
+                  reducer:
+                    type: last
+
+      - uid: routerv-cpu-high
+        title: "RouterV — CPU Usage > 80% (total machine)"
+        condition: threshold
+        for: 5m
+        noDataState: OK
+        execErrState: Alerting
+        labels:
+          severity: warning
+        annotations:
+          summary: "Total CPU usage is {{ $values.B.Value | printf \"%.1f\" }}% (normalized across {{ $values.cores.Value | printf \"%.0f\" }} cores)"
+          description: Check application logs for CPU usage patterns. Alert fires when machine CPU exceeds 80% of total capacity.
+          __dashboardUid__: routerv-slo
+          __panelId__: "2"
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: (rate(process_cpu_seconds_total{job="routersvc"}[5m]) * 100) / process_cpu_cores{job="routersvc"}
+              instant: false
+              range: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: threshold
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [80]
+                  operator:
+                    type: and
+                  query:
+                    params: [B]
+                  reducer:
+                    type: last

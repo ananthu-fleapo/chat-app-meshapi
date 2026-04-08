@@ -14,7 +14,7 @@ All metrics are registered on the default prometheus_client registry.
 Counters and histograms are module-level singletons — safe to import anywhere.
 """
 
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Histogram, Gauge
 
 # ── Upstream inference ────────────────────────────────────────────────────────
 
@@ -66,6 +66,63 @@ AUTH_FAILURES = Counter(
     ["reason"],   # reason: invalid_key | suspended
 )
 
+# ── Database ──────────────────────────────────────────────────────────────────
+
+SQLALCHEMY_POOL_SIZE = Gauge(
+    "sqlalchemy_pool_size",
+    "Total database connection pool size",
+)
+
+SQLALCHEMY_POOL_CHECKED_OUT = Gauge(
+    "sqlalchemy_pool_checked_out",
+    "Number of checked out database connections",
+)
+
+SQLALCHEMY_POOL_OVERFLOW = Gauge(
+    "sqlalchemy_pool_overflow",
+    "Number of overflow database connections",
+)
+
+SQLALCHEMY_QUERY_DURATION = Histogram(
+    "sqlalchemy_query_duration_seconds",
+    "Database query execution time in seconds",
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
+)
+
+# ── Process ───────────────────────────────────────────────────────────────────
+
+PROCESS_CPU_CORES = Gauge(
+    "process_cpu_cores",
+    "Number of CPU cores available to the process",
+)
+
+PROCESS_TOTAL_MEMORY_BYTES = Gauge(
+    "process_total_memory_bytes",
+    "Total system memory available in bytes",
+)
+
+# ── Redis ─────────────────────────────────────────────────────────────────────
+
+REDIS_CONNECTED_CLIENTS = Gauge(
+    "redis_connected_clients",
+    "Number of connected Redis clients",
+)
+
+REDIS_MEMORY_USED_BYTES = Gauge(
+    "redis_memory_used_bytes",
+    "Redis memory usage in bytes",
+)
+
+REDIS_MEMORY_MAX_BYTES = Gauge(
+    "redis_memory_max_bytes",
+    "Redis max memory limit in bytes",
+)
+
+REDIS_COMMANDS_PROCESSED_SNAPSHOT = Gauge(
+    "redis_total_commands_processed_snapshot",
+    "Raw snapshot of Redis total_commands_processed (monotonic, not a rate metric)",
+)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -88,3 +145,32 @@ def record_inference(
         TOKENS_TOTAL.labels(model=model, token_type="completion").inc(completion_tokens)
     if cost_usd and cost_usd > 0:
         COST_USD_TOTAL.labels(model=model).inc(cost_usd)
+
+
+def update_pool_metrics(engine) -> None:
+    """Update SQLAlchemy pool metrics from engine. Call periodically from a background task."""
+    if engine and hasattr(engine, 'pool'):
+        pool = engine.pool
+        try:
+            SQLALCHEMY_POOL_SIZE.set(pool.size())
+            SQLALCHEMY_POOL_CHECKED_OUT.set(pool.checkedout())
+            SQLALCHEMY_POOL_OVERFLOW.set(pool.overflow())
+        except Exception:
+            # Fail silently if pool metrics are unavailable
+            pass
+
+
+async def update_redis_metrics(redis) -> None:
+    """Update Redis metrics from redis client. Call periodically from a background task."""
+    if redis is None:
+        return
+
+    try:
+        info = await redis.info()
+        REDIS_CONNECTED_CLIENTS.set(info.get("connected_clients", 0))
+        REDIS_MEMORY_USED_BYTES.set(info.get("used_memory", 0))
+        REDIS_MEMORY_MAX_BYTES.set(info.get("maxmemory", 0))
+        REDIS_COMMANDS_PROCESSED_SNAPSHOT.set(info.get("total_commands_processed", 0))
+    except Exception:
+        # Fail silently if Redis metrics are unavailable (e.g., cloud Redis, network issues)
+        pass

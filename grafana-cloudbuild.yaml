@@ -1,0 +1,57 @@
+# Cloud Build pipeline — Prometheus + Grafana
+#
+# Triggered manually or on changes to grafana/** files.
+# Run with:
+#   gcloud builds submit . --config=grafana-cloudbuild.yaml --region=asia-southeast1 --project=fair-myth-471110-j2
+#
+# Steps
+# -----
+# 1. Build Prometheus and Grafana images in parallel
+# 2. Push both images to Artifact Registry
+# 3. Deploy both Cloud Run services
+
+substitutions:
+  _REGION: asia-southeast1
+  _REPO: routersvc
+
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    id: build-grafana
+    args:
+      - build
+      - --tag
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/grafana:latest"
+      - --cache-from
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/grafana:latest"
+      - -f
+      - grafana/Dockerfile
+      - .
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: push-grafana
+    args:
+      - push
+      - "--all-tags"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/grafana"
+    waitFor: [build-grafana]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    id: deploy-grafana
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        REGION=${_REGION}
+        [ -z "$$REGION" ] && REGION=asia-southeast1
+        gcloud run deploy grafana \
+          --image="$$REGION-docker.pkg.dev/${PROJECT_ID}/${_REPO}/grafana:latest" \
+          --region="$$REGION" \
+          --platform=managed
+    waitFor: [push-grafana]
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/grafana:latest"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_MEDIUM

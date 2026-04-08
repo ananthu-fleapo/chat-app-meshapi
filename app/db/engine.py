@@ -22,6 +22,8 @@ horizontally so keep pool_size small (2–5) to avoid exhausting the
 Cloud SQL connection limit across many instances.
 """
 
+import time
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -29,8 +31,11 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.metrics import SQLALCHEMY_QUERY_DURATION
+
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+_start_times: dict[int, float] = {}  # keyed by id(cursor) for query duration tracking
 
 
 def init_db(database_url: str, *, echo: bool = False) -> None:
@@ -57,6 +62,25 @@ def init_db(database_url: str, *, echo: bool = False) -> None:
         class_=AsyncSession,
         expire_on_commit=False,  # don't lazy-load after commit
     )
+
+    # ── Query duration instrumentation ────────────────────────────────────────
+    # Record metrics for all executed statements (success or error).
+    @event.listens_for(_engine.sync_engine, "before_cursor_execute")  # noqa: ARG001
+    def _record_start_time(conn, cursor, statement, parameters, context, executemany):  # noqa: ARG001
+        _start_times[id(cursor)] = time.perf_counter()
+
+    @event.listens_for(_engine.sync_engine, "after_cursor_execute")  # noqa: ARG001
+    def _record_elapsed(conn, cursor, statement, parameters, context, executemany):  # noqa: ARG001
+        start = _start_times.pop(id(cursor), None)
+        if start is not None:
+            SQLALCHEMY_QUERY_DURATION.observe(time.perf_counter() - start)
+
+    @event.listens_for(_engine.sync_engine, "handle_error")
+    def _record_elapsed_on_error(ctx):  # noqa: ARG001
+        cursor = ctx.cursor
+        start = _start_times.pop(id(cursor), None)
+        if start is not None:
+            SQLALCHEMY_QUERY_DURATION.observe(time.perf_counter() - start)
 
 
 def get_engine() -> AsyncEngine | None:

@@ -1,0 +1,20 @@
+apiVersion: 1
+
+contactPoints:
+  - name: Slack
+    receivers:
+      - uid: slack-routerv
+        type: slack
+        settings:
+          url: ${SLACK_WEBHOOK_URL}
+          title: |
+            [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }}
+          text: |
+            {{ range .Alerts }}
+            *Alert:* {{ .Annotations.summary }}
+            *Severity:* {{ .Labels.severity }}
+            {{ if .Annotations.description }}*Details:* {{ .Annotations.description }}{{ end }}
+            {{ if .PanelURL }}*Dashboard:* <{{ .PanelURL }}|View Panel>{{ end }}
+            {{ end }}
+          mentionChannel: here
+        disableResolveMessage: false

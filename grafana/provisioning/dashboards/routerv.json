@@ -20,10 +20,17 @@
   },
   "panels": [
     {
+      "id": 100,
+      "title": "— Inference Metrics",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
       "id": 1,
       "title": "Request Rate",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 7 },
+      "gridPos": { "x": 0, "y": 1, "w": 8, "h": 7 },
       "targets": [
         {
           "expr": "sum(rate(http_requests_total{handler=\"/v1/chat/completions\"}[1m]))",
@@ -36,10 +43,10 @@
       "id": 2,
       "title": "Error Rate",
       "type": "timeseries",
-      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 7 },
+      "gridPos": { "x": 8, "y": 1, "w": 8, "h": 7 },
       "targets": [
         {
-          "expr": "sum(rate(http_requests_total{status_code=~\"4..|5..\"}[1m])) / sum(rate(http_requests_total[1m]))",
+          "expr": "sum(rate(http_requests_total{handler=\"/v1/chat/completions\",status=~\"4..|5..\"}[1m])) / sum(rate(http_requests_total{handler=\"/v1/chat/completions\"}[1m]))",
           "legendFormat": "error %"
         }
       ],
@@ -49,7 +56,7 @@
       "id": 3,
       "title": "P95 Latency",
       "type": "timeseries",
-      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 7 },
+      "gridPos": { "x": 16, "y": 1, "w": 8, "h": 7 },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum by(le) (rate(http_request_duration_seconds_bucket{handler=\"/v1/chat/completions\"}[5m])))",
@@ -66,7 +73,7 @@
       "id": 4,
       "title": "Token Throughput",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 7, "w": 8, "h": 7 },
+      "gridPos": { "x": 0, "y": 8, "w": 8, "h": 7 },
       "targets": [
         {
           "expr": "sum(rate(routerv_tokens_total{token_type=\"prompt\", model=~\"$model\"}[1m]))",
@@ -83,7 +90,7 @@
       "id": 5,
       "title": "Cost / Hour (USD)",
       "type": "stat",
-      "gridPos": { "x": 8, "y": 7, "w": 8, "h": 7 },
+      "gridPos": { "x": 8, "y": 8, "w": 8, "h": 7 },
       "targets": [
         {
           "expr": "sum(rate(routerv_cost_usd_total{model=~\"$model\"}[1h])) * 3600",
@@ -96,7 +103,7 @@
       "id": 6,
       "title": "Upstream Latency by Model (p95)",
       "type": "timeseries",
-      "gridPos": { "x": 16, "y": 7, "w": 8, "h": 7 },
+      "gridPos": { "x": 16, "y": 8, "w": 8, "h": 7 },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum by(le, model) (rate(routerv_upstream_latency_seconds_bucket{model=~\"$model\"}[5m])))",
@@ -105,11 +112,19 @@
       ],
       "fieldConfig": { "defaults": { "unit": "s" } }
     },
+
+    {
+      "id": 101,
+      "title": "— Model Distribution",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 15, "w": 24, "h": 1 },
+      "collapsed": false
+    },
     {
       "id": 7,
       "title": "Requests by Model",
       "type": "piechart",
-      "gridPos": { "x": 0, "y": 14, "w": 8, "h": 7 },
+      "gridPos": { "x": 0, "y": 16, "w": 8, "h": 7 },
       "targets": [
         {
           "expr": "sum by(model) (increase(routerv_upstream_requests_total{model=~\"$model\"}[1h]))",
@@ -118,10 +133,44 @@
       ]
     },
     {
+      "id": 18,
+      "title": "Top Models by Token Volume",
+      "type": "barchart",
+      "gridPos": { "x": 8, "y": 16, "w": 16, "h": 7 },
+      "targets": [
+        {
+          "expr": "topk(10, sum by(model) (increase(routerv_tokens_total{model=~\"$model\"}[1h])))",
+          "legendFormat": "{{model}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } } }
+    },
+    {
+      "id": 17,
+      "title": "Token Ratio (Completion / Prompt)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 23, "w": 24, "h": 7 },
+      "targets": [
+        {
+          "expr": "sum(rate(routerv_tokens_total{token_type=\"completion\", model=~\"$model\"}[5m])) / sum(rate(routerv_tokens_total{token_type=\"prompt\", model=~\"$model\"}[5m]))",
+          "legendFormat": "completion/prompt ratio"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } } }
+    },
+
+    {
+      "id": 102,
+      "title": "— Guardrails & Security",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
       "id": 8,
       "title": "Guardrail Hits",
       "type": "timeseries",
-      "gridPos": { "x": 8, "y": 14, "w": 8, "h": 7 },
+      "gridPos": { "x": 0, "y": 31, "w": 12, "h": 7 },
       "targets": [
         {
           "expr": "sum(rate(routerv_rate_limit_hits_total[5m]))",
@@ -138,7 +187,7 @@
       "id": 9,
       "title": "Auth Failures",
       "type": "timeseries",
-      "gridPos": { "x": 16, "y": 14, "w": 8, "h": 7 },
+      "gridPos": { "x": 12, "y": 31, "w": 12, "h": 7 },
       "targets": [
         {
           "expr": "sum by(reason) (rate(routerv_auth_failures_total[5m]))",
@@ -146,6 +195,218 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+
+    {
+      "id": 103,
+      "title": "— Resource Utilization",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 38, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 10,
+      "title": "CPU Usage",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 39, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "rate(process_cpu_seconds_total[1m]) / process_cpu_cores * 100",
+          "legendFormat": "CPU %"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "palette-classic" }, "thresholds": { "steps": [{ "color": "green" }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 90 }] } } }
+    },
+    {
+      "id": 11,
+      "title": "RAM Usage",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 39, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "process_resident_memory_bytes",
+          "legendFormat": "RSS"
+        },
+        {
+          "expr": "process_virtual_memory_bytes",
+          "legendFormat": "Virtual"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "palette-classic" } } }
+    },
+    {
+      "id": 12,
+      "title": "Open File Descriptors",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 46, "w": 8, "h": 7 },
+      "targets": [
+        {
+          "expr": "process_open_fds",
+          "legendFormat": "open FDs"
+        },
+        {
+          "expr": "process_max_fds",
+          "legendFormat": "max FDs"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } } }
+    },
+    {
+      "id": 13,
+      "title": "Process Uptime",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 46, "w": 8, "h": 7 },
+      "targets": [
+        {
+          "expr": "time() - process_start_time_seconds",
+          "legendFormat": "uptime"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "red" }, { "color": "yellow", "value": 60 }, { "color": "green", "value": 300 }] } } }
+    },
+    {
+      "id": 14,
+      "title": "In-Flight Requests",
+      "type": "timeseries",
+      "gridPos": { "x": 16, "y": 46, "w": 8, "h": 7 },
+      "targets": [
+        {
+          "expr": "http_requests_in_progress",
+          "legendFormat": "in-flight"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } } }
+    },
+
+    {
+      "id": 104,
+      "title": "— Request Distribution",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 53, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 15,
+      "title": "Request Rate by Status Code",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 54, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "sum by(status) (rate(http_requests_total{handler=\"/v1/chat/completions\"}[1m]))",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "color": { "mode": "palette-classic" } } }
+    },
+    {
+      "id": 16,
+      "title": "P99 Latency",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 54, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by(le) (rate(http_request_duration_seconds_bucket{handler=\"/v1/chat/completions\"}[5m])))",
+          "legendFormat": "p99"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by(le) (rate(http_request_duration_seconds_bucket{handler=\"/v1/chat/completions\"}[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by(le) (rate(http_request_duration_seconds_bucket{handler=\"/v1/chat/completions\"}[5m])))",
+          "legendFormat": "p50"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "palette-classic" } } }
+    },
+
+    {
+      "id": 105,
+      "title": "— Data Store (Redis & Database)",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 61, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 19,
+      "title": "Redis Connected Clients",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 62, "w": 8, "h": 7 },
+      "targets": [
+        {
+          "expr": "redis_connected_clients",
+          "legendFormat": "clients"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "thresholds": { "steps": [{ "color": "green" }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 100 }] } } }
+    },
+    {
+      "id": 20,
+      "title": "Redis Memory Usage",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 62, "w": 8, "h": 7 },
+      "targets": [
+        {
+          "expr": "redis_memory_used_bytes",
+          "legendFormat": "used"
+        },
+        {
+          "expr": "redis_memory_max_bytes",
+          "legendFormat": "max"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "palette-classic" } } }
+    },
+    {
+      "id": 21,
+      "title": "Redis Ops / sec",
+      "type": "timeseries",
+      "gridPos": { "x": 16, "y": 62, "w": 8, "h": 7 },
+      "targets": [
+        {
+          "expr": "rate(redis_total_commands_processed_snapshot[1m])",
+          "legendFormat": "total commands"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } } }
+    },
+    {
+      "id": 22,
+      "title": "DB Connection Pool",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 69, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "sqlalchemy_pool_size",
+          "legendFormat": "pool size"
+        },
+        {
+          "expr": "sqlalchemy_pool_checked_out",
+          "legendFormat": "checked out"
+        },
+        {
+          "expr": "sqlalchemy_pool_overflow",
+          "legendFormat": "overflow"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "thresholds": { "steps": [{ "color": "green" }, { "color": "yellow", "value": 8 }, { "color": "red", "value": 10 }] } } }
+    },
+    {
+      "id": 23,
+      "title": "DB Query Latency (p95)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 69, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by(le) (rate(sqlalchemy_query_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by(le) (rate(sqlalchemy_query_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "palette-classic" } } }
     }
   ]
 }
