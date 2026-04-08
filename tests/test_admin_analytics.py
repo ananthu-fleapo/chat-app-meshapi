@@ -87,10 +87,13 @@ class TestUserSummary:
         keys_row = MagicMock(key_count=0, active_key_count=0, created_at=None)
         # key_ids query returns empty
         # balance query returns None
+        user_row = MagicMock(email="user@example.com", display_name="Test User")
         mock_db.execute.side_effect = [
             make_execute_result(rows=[keys_row]),   # keys aggregate
             make_execute_result(rows=[]),             # key_ids list
             make_execute_result(scalar=None),         # balance
+            make_execute_result(rows=[user_row]),     # user details
+            make_execute_result(scalar=0.0),          # total paid
         ]
 
         resp = client.get("/admin/users/unknown-user/summary", headers=ADMIN_HEADERS)
@@ -121,11 +124,14 @@ class TestUserSummary:
         key_id_row = MagicMock()
         key_id_row.__getitem__ = lambda self, i: key_id
 
+        user_row = MagicMock(email="user@example.com", display_name="Test User")
         mock_db.execute.side_effect = [
             make_execute_result(rows=[keys_row]),
             make_execute_result(rows=[(key_id,)]),
             make_execute_result(rows=[spend_row]),
             make_execute_result(scalar=Decimal("5.00")),
+            make_execute_result(rows=[user_row]),     # user details
+            make_execute_result(scalar=10.0),         # total paid
         ]
 
         resp = client.get("/admin/users/user-abc/summary", headers=ADMIN_HEADERS)
@@ -330,9 +336,10 @@ class TestPaymentSummary:
     def test_no_payments_returns_zeros(self, client, mock_db):
         # The mock returns the result of the SQL expression (already in USD).
         mock_db.execute.side_effect = [
-            make_execute_result(scalar=0.0),  # total
-            make_execute_result(scalar=0.0),  # today
-            make_execute_result(scalar=0.0),  # month
+            make_execute_result(scalar=0.0),  # total revenue
+            make_execute_result(scalar=0.0),  # today revenue
+            make_execute_result(scalar=0.0),  # month revenue
+            make_execute_result(scalar=0),    # total transactions count
         ]
         resp = client.get("/admin/payments/summary", headers=ADMIN_HEADERS)
         assert resp.status_code == 200
@@ -345,9 +352,10 @@ class TestPaymentSummary:
         # The SQL expression returns amounts already converted to USD.
         # A $10.00 payment → mock returns 10.0 (SQL already divided by 100 and rate).
         mock_db.execute.side_effect = [
-            make_execute_result(scalar=10.0),  # total = $10.00
-            make_execute_result(scalar=10.0),  # today = $10.00
-            make_execute_result(scalar=10.0),  # month = $10.00
+            make_execute_result(scalar=10.0),  # total revenue
+            make_execute_result(scalar=10.0),  # today revenue
+            make_execute_result(scalar=10.0),  # month revenue
+            make_execute_result(scalar=1),     # total transactions count
         ]
         resp = client.get("/admin/payments/summary", headers=ADMIN_HEADERS)
         assert resp.status_code == 200

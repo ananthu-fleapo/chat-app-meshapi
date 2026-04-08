@@ -56,7 +56,7 @@ from app.providers.provisioner import (
     delete_or_key,
     disable_or_key,
 )
-from app.providers.secret_manager import fetch_secret, invalidate_secret_cache, store_secret
+from app.providers.secret_manager import fetch_secret, invalidate_secret_cache, store_secret 
 
 logger = structlog.get_logger()
 
@@ -1909,10 +1909,13 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
 
 class UserDetailSummary(BaseModel):
     user_id: str
+    email: str | None
+    display_name: str | None
     key_count: int
     active_key_count: int
     api_calls: int
     total_spent_usd: str
+    total_paid_usd: str | None = None
     balance_usd: str | None
     last_activity: str | None
     created_at: str
@@ -1984,12 +1987,28 @@ async def get_user_summary(
     )
     bal = bal_result.scalar_one_or_none()
 
+    user_result = await db.execute(
+        select(User.email, User.display_name).where(User.id == user_id)
+    )
+    user_rec = user_result.one_or_none()
+
+    # Total paid by this user, using accurate per-payment USD conversion
+    paid_result = await db.execute(
+        select(func.coalesce(func.sum(_usd_amount_expr()), 0).label("total_paid"))
+        .where(PaymentEvent.user_id == user_id)
+    )
+    total_paid_raw = paid_result.scalar_one()
+    total_paid_usd = str(Decimal(str(total_paid_raw)).quantize(Decimal("0.0001")))
+
     result = UserDetailSummary(
         user_id=user_id,
+        email=user_rec.email if user_rec else None,
+        display_name=user_rec.display_name if user_rec else None,
         key_count=keys_row.key_count or 0,
         active_key_count=keys_row.active_key_count or 0,
         api_calls=api_calls,
         total_spent_usd=str(total_spent),
+        total_paid_usd=total_paid_usd,
         balance_usd=str(bal) if bal is not None else None,
         last_activity=last_activity,
         created_at=keys_row.created_at.isoformat() if keys_row.created_at else datetime.now(timezone.utc).isoformat(),
@@ -2236,10 +2255,60 @@ async def get_usage_timeseries(
 
 # ── Payment analytics ─────────────────────────────────────────────────────────
 
+def _usd_amount_expr():
+    """
+    Returns a SQLAlchemy expression for the USD value of a payment_events row.
+
+    Priority:
+      1. amount_usd column (pre-computed in cents at webhook ingestion time) — most
+         accurate because it captures the exact rate used at payment time.
+      2. Fallback for older rows where amount_usd IS NULL: divide the raw amount by
+         the FX rate that was in effect at or before the payment's created_at.
+         Uses a time-bounded correlated subquery with the composite index
+         ix_currency_conversion_rates_currency_created.
+    """
+    from sqlalchemy import case as sa_case
+
+    time_bounded_rate_sq = (
+        select(CurrencyConversionRate.total_rate)
+        .where(CurrencyConversionRate.currency == PaymentEvent.currency)
+        .where(CurrencyConversionRate.created_at <= PaymentEvent.created_at)
+        .order_by(CurrencyConversionRate.created_at.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    return sa_case(
+        (PaymentEvent.amount_usd.isnot(None), PaymentEvent.amount_usd / 100.0),
+        else_=func.coalesce(PaymentEvent.amount, 0) / 100.0 / func.coalesce(time_bounded_rate_sq, 1.0),
+    )
+
+
 class PaymentSummary(BaseModel):
     total_revenue: str
     today_revenue: str
     month_revenue: str
+    total_transactions: int = 0
+    avg_transaction_usd: str | None = None
+
+
+class PaymentTransactionOut(BaseModel):
+    id: str
+    user_id: str
+    payment_id: str
+    provider: str
+    order_id: str | None
+    currency: str | None
+    amount_raw: int | None
+    amount_display: str | None
+    amount_usd_display: str | None   # pre-computed USD at payment time; None for older records
+    created_at: str
+
+
+class PaymentTransactionsPage(BaseModel):
+    transactions: list[PaymentTransactionOut]
+    total: int
+    limit: int
+    offset: int
 
 
 class RevenueTimeSeries(BaseModel):
@@ -2271,17 +2340,7 @@ async def get_payment_summary(
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    # Scalar subquery: latest total_rate for this payment's currency.
-    # USD has no row in currency_conversion_rates, so COALESCE defaults to 1.0.
-    # Formula: amount (smallest unit) / 100.0 / total_rate = USD value.
-    latest_rate_sq = (
-        select(CurrencyConversionRate.total_rate)
-        .where(CurrencyConversionRate.currency == PaymentEvent.currency)
-        .order_by(CurrencyConversionRate.created_at.desc())
-        .limit(1)
-        .scalar_subquery()
-    )
-    usd_amount = PaymentEvent.amount / 100.0 / func.coalesce(latest_rate_sq, 1.0)
+    usd_amount = _usd_amount_expr()
 
     total_result = await db.execute(
         select(func.coalesce(func.sum(usd_amount), 0).label("total"))
@@ -2294,14 +2353,25 @@ async def get_payment_summary(
         select(func.coalesce(func.sum(usd_amount), 0).label("total"))
         .where(PaymentEvent.created_at >= month_start)
     )
+    count_result = await db.execute(
+        select(func.count(PaymentEvent.id).label("total"))
+    )
 
     def _to_usd_str(raw: Decimal | float) -> str:
         return str(Decimal(str(raw)).quantize(Decimal("0.0001")))
 
+    total_rev_raw = total_result.scalar_one()
+    total_transactions = count_result.scalar_one() or 0
+    avg_transaction_usd: str | None = None
+    if total_transactions > 0:
+        avg_transaction_usd = _to_usd_str(Decimal(str(total_rev_raw)) / total_transactions)
+
     summary = PaymentSummary(
-        total_revenue=_to_usd_str(total_result.scalar_one()),
+        total_revenue=_to_usd_str(total_rev_raw),
         today_revenue=_to_usd_str(today_result.scalar_one()),
         month_revenue=_to_usd_str(month_result.scalar_one()),
+        total_transactions=total_transactions,
+        avg_transaction_usd=avg_transaction_usd,
     )
 
     if redis is not None:
@@ -2332,16 +2402,7 @@ async def get_payment_revenue(
     else:
         since = now - timedelta(days=30)
 
-    # Convert each payment to USD using the latest rate for its currency.
-    # USD payments have no row in currency_conversion_rates → COALESCE defaults to 1.0.
-    latest_rate_sq = (
-        select(CurrencyConversionRate.total_rate)
-        .where(CurrencyConversionRate.currency == PaymentEvent.currency)
-        .order_by(CurrencyConversionRate.created_at.desc())
-        .limit(1)
-        .scalar_subquery()
-    )
-    usd_amount = PaymentEvent.amount / 100.0 / func.coalesce(latest_rate_sq, 1.0)
+    usd_amount = _usd_amount_expr()
 
     day_unit = text("'day'")
     rows = await db.execute(
@@ -2374,12 +2435,9 @@ async def get_payment_countries(
     db: AsyncSession = Depends(get_db_session),
 ):
     """
-    Revenue grouped by country extracted from payment_metadata->>'country'.
+    Revenue grouped by the country column on payment_events.
     Rows without a country are bucketed as 'Unknown'. Cached for 5 minutes.
     """
-    from sqlalchemy import cast, String
-    from sqlalchemy.dialects.postgresql import JSONB
-
     redis = get_redis()
     cache_key = "routerv:analytics:payment_countries"
 
@@ -2388,19 +2446,8 @@ async def get_payment_countries(
         if cached is not None:
             return [CountryBreakdown(**r) for r in json.loads(cached)]
 
-    country_expr = func.coalesce(
-        cast(PaymentEvent.payment_metadata["country"].astext, String),
-        "Unknown",
-    )
-
-    latest_rate_sq = (
-        select(CurrencyConversionRate.total_rate)
-        .where(CurrencyConversionRate.currency == PaymentEvent.currency)
-        .order_by(CurrencyConversionRate.created_at.desc())
-        .limit(1)
-        .scalar_subquery()
-    )
-    usd_amount = PaymentEvent.amount / 100.0 / func.coalesce(latest_rate_sq, 1.0)
+    country_expr = func.coalesce(PaymentEvent.country, "Unknown")
+    usd_amount = _usd_amount_expr()
 
     rows = await db.execute(
         select(
@@ -2441,14 +2488,7 @@ async def get_payment_top_users(
         if cached is not None:
             return [OwnerUsageRow(**r) for r in json.loads(cached)]
 
-    latest_rate_sq = (
-        select(CurrencyConversionRate.total_rate)
-        .where(CurrencyConversionRate.currency == PaymentEvent.currency)
-        .order_by(CurrencyConversionRate.created_at.desc())
-        .limit(1)
-        .scalar_subquery()
-    )
-    usd_amount = PaymentEvent.amount / 100.0 / func.coalesce(latest_rate_sq, 1.0)
+    usd_amount = _usd_amount_expr()
 
     rows = await db.execute(
         select(
@@ -2477,6 +2517,170 @@ async def get_payment_top_users(
         await set_analytics_cached(redis, cache_key, json.dumps([r.model_dump() for r in result]))
 
     return result
+
+
+class ProviderBreakdown(BaseModel):
+    provider: str
+    transaction_count: int
+    total_amount_usd: str
+
+
+class CurrencyBreakdown(BaseModel):
+    currency: str
+    transaction_count: int
+    total_amount_usd: str
+
+
+@router.get("/payments/by-provider", response_model=list[ProviderBreakdown])
+async def get_payment_by_provider(
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Revenue grouped by payment provider/gateway. Cached for 5 minutes."""
+    redis = get_redis()
+    cache_key = "routerv:analytics:payment_by_provider"
+
+    if redis is not None:
+        cached = await get_analytics_cached(redis, cache_key)
+        if cached is not None:
+            return [ProviderBreakdown(**r) for r in json.loads(cached)]
+
+    usd_amount = _usd_amount_expr()
+    rows = await db.execute(
+        select(
+            PaymentEvent.provider.label("provider"),
+            func.count(PaymentEvent.id).label("count"),
+            func.coalesce(func.sum(usd_amount), 0).label("total"),
+        )
+        .group_by(PaymentEvent.provider)
+        .order_by(func.sum(usd_amount).desc().nulls_last())
+    )
+
+    def _to_usd_str(raw) -> str:
+        return str(Decimal(str(raw)).quantize(Decimal("0.0001")))
+
+    result = [
+        ProviderBreakdown(
+            provider=r.provider,
+            transaction_count=r.count,
+            total_amount_usd=_to_usd_str(r.total),
+        )
+        for r in rows.all()
+    ]
+
+    if redis is not None:
+        await set_analytics_cached(redis, cache_key, json.dumps([r.model_dump() for r in result]))
+
+    return result
+
+
+@router.get("/payments/by-currency", response_model=list[CurrencyBreakdown])
+async def get_payment_by_currency(
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Transaction count and USD total grouped by original currency. Cached for 5 minutes."""
+    redis = get_redis()
+    cache_key = "routerv:analytics:payment_by_currency"
+
+    if redis is not None:
+        cached = await get_analytics_cached(redis, cache_key)
+        if cached is not None:
+            return [CurrencyBreakdown(**r) for r in json.loads(cached)]
+
+    usd_amount = _usd_amount_expr()
+    currency_expr = func.coalesce(PaymentEvent.currency, "Unknown")
+    rows = await db.execute(
+        select(
+            currency_expr.label("currency"),
+            func.count(PaymentEvent.id).label("count"),
+            func.coalesce(func.sum(usd_amount), 0).label("total"),
+        )
+        .group_by(currency_expr)
+        .order_by(func.sum(usd_amount).desc().nulls_last())
+    )
+
+    def _to_usd_str(raw) -> str:
+        return str(Decimal(str(raw)).quantize(Decimal("0.0001")))
+
+    result = [
+        CurrencyBreakdown(
+            currency=r.currency,
+            transaction_count=r.count,
+            total_amount_usd=_to_usd_str(r.total),
+        )
+        for r in rows.all()
+    ]
+
+    if redis is not None:
+        await set_analytics_cached(redis, cache_key, json.dumps([r.model_dump() for r in result]))
+
+    return result
+
+
+def _payment_to_out(e: PaymentEvent) -> PaymentTransactionOut:
+    return PaymentTransactionOut(
+        id=str(e.id),
+        user_id=e.user_id,
+        payment_id=e.payment_id,
+        provider=e.provider,
+        order_id=e.order_id,
+        currency=e.currency,
+        amount_raw=e.amount,
+        amount_display=f"{e.amount / 100:.2f}" if e.amount is not None else None,
+        amount_usd_display=f"{e.amount_usd / 100:.2f}" if e.amount_usd is not None else None,
+        created_at=e.created_at.isoformat(),
+    )
+
+
+@router.get("/users/{user_id}/payments", response_model=PaymentTransactionsPage)
+async def get_user_payments(
+    user_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Paginated payment transactions for a single user, newest first."""
+    total_result = await db.execute(
+        select(func.count(PaymentEvent.id)).where(PaymentEvent.user_id == user_id)
+    )
+    total = total_result.scalar_one() or 0
+
+    rows = await db.execute(
+        select(PaymentEvent)
+        .where(PaymentEvent.user_id == user_id)
+        .order_by(PaymentEvent.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    return PaymentTransactionsPage(
+        transactions=[_payment_to_out(e) for e in rows.scalars().all()],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/payments/transactions", response_model=PaymentTransactionsPage)
+async def get_payment_transactions(
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Paginated list of all payment transactions across all users, newest first."""
+    total_result = await db.execute(select(func.count(PaymentEvent.id)))
+    total = total_result.scalar_one() or 0
+
+    rows = await db.execute(
+        select(PaymentEvent)
+        .order_by(PaymentEvent.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    return PaymentTransactionsPage(
+        transactions=[_payment_to_out(e) for e in rows.scalars().all()],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post("/test-models", summary="Test models against a provider and register results")
