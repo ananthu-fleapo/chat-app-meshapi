@@ -23,7 +23,7 @@ from typing import Any
 
 import structlog
 
-_HEALTH_PATHS = ("/healthz", "/readyz", "/favicon.ico")
+_HEALTH_PATHS = ("/healthz", "/readyz", "/favicon.ico", "/metrics")
 
 
 class _HealthCheckFilter(logging.Filter):
