@@ -2,6 +2,7 @@ name: Tests
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
@@ -30,3 +31,27 @@ jobs:
           REDIS_URL: redis://localhost:6379/0
           WEBHOOK_API_KEY: test-webhook-secret
           SUPABASE_JWT_SECRET: test-supabase-jwt-secret-for-testing-only
+
+      - name: Notify Slack
+        if: failure()
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": ":x: *${{ github.workflow }}* failed on `${{ github.ref_name }}`",
+              "attachments": [
+                {
+                  "color": "danger",
+                  "fields": [
+                    { "title": "Repository", "value": "${{ github.repository }}", "short": true },
+                    { "title": "Triggered by", "value": "${{ github.actor }}", "short": true },
+                    { "title": "Event", "value": "${{ github.event_name }}", "short": true },
+                    { "title": "PR", "value": "${{ github.event.pull_request.html_url || 'N/A' }}", "short": true },
+                    { "title": "Commit", "value": "<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>", "short": true },
+                    { "title": "Run", "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View logs>", "short": true }
+                  ]
+                }
+              ]
+            }

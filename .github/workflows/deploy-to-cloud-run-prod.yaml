@@ -1,0 +1,111 @@
+name: deploy-to-cloud-run-prod
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+env:
+  REGION: asia-southeast1
+  REPO: routersvc
+  SERVICE: routersvc
+  DB_CONNECTION: fair-myth-471110-j2:asia-south1:api-prod-pg
+  SERVICE_ACCOUNT: api-routersvc-sa@fair-myth-471110-j2.iam.gserviceaccount.com
+  PROJECT_ID: fair-myth-471110-j2
+  SHORT_SHA: ${{ github.sha }}
+
+jobs:
+  deploy:
+    name: Build, migrate, deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build image
+        run: |
+          IMAGE_BASE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO }}/${{ env.SERVICE }}"
+          docker build \
+            --tag "${IMAGE_BASE}:${{ env.SHORT_SHA }}" \
+            --tag "${IMAGE_BASE}:latest" \
+            --cache-from "${IMAGE_BASE}:latest" \
+            .
+
+      - name: Push image
+        run: |
+          IMAGE_BASE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO }}/${{ env.SERVICE }}"
+          docker push --all-tags "${IMAGE_BASE}"
+
+      - name: Check migration heads
+        run: |
+          python3 - <<'EOF'
+          import glob, sys, re
+          files = [f for f in glob.glob("alembic/versions/*.py") if "__pycache__" not in f]
+          revs = []
+          for f in files:
+              m = re.search(r'^revision\s*[=:][^"]*"([^"]+)"', open(f).read(), re.MULTILINE)
+              if m:
+                  revs.append((m.group(1), f))
+          ids = [r for r, _ in revs]
+          dupes = sorted({r for r in ids if ids.count(r) > 1})
+          if dupes:
+              print("ERROR: Duplicate migration revision IDs detected.")
+              print("The developer who merged second must renumber their migration.")
+              print()
+              for rev, fname in sorted(revs):
+                  if rev in dupes:
+                      print(f"  revision={rev}  {fname}")
+              sys.exit(1)
+          print(f"OK: {len(revs)} migrations, no duplicate revision IDs.")
+          EOF
+
+      - name: Run migrations
+        run: |
+          gcloud run jobs execute ${{ env.SERVICE }}-migrate \
+            --region=${{ env.REGION }} --wait
+
+      - name: Deploy new revision
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO }}/${{ env.SERVICE }}:${{ env.SHORT_SHA }}"
+          gcloud run deploy ${{ env.SERVICE }} \
+            --image="${IMAGE}" \
+            --region=${{ env.REGION }} \
+            --platform=managed \
+            --no-traffic
+
+      - name: Shift traffic to latest
+        run: |
+          gcloud run services update-traffic ${{ env.SERVICE }} \
+            --region=${{ env.REGION }} \
+            --to-latest
+
+      - name: Notify Slack
+        if: always()
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "${{ job.status == 'success' && ':white_check_mark:' || ':x:' }} *${{ github.workflow }}* ${{ job.status == 'success' && 'deployed' || 'failed on' }} `${{ github.ref_name }}`${{ job.status == 'success' && ' successfully' || '' }}",
+              "attachments": [
+                {
+                  "color": "${{ job.status == 'success' && 'good' || 'danger' }}",
+                  "fields": [
+                    { "title": "Repository", "value": "${{ github.repository }}", "short": true },
+                    { "title": "Triggered by", "value": "${{ github.actor }}", "short": true },
+                    { "title": "Run", "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View logs>", "short": false }
+                  ]
+                }
+              ]
+            }
