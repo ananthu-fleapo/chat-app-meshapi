@@ -1727,9 +1727,13 @@ class TestModelItem(BaseModel):
     If omitted, the adapter falls back to its internal _MODEL_MAP translation.
     Stored in model_prices.provider_model_id on success.
     """
+    input_token_cost_per_1k: float | None = None
+    output_token_cost_per_1k: float | None = None
 
 
 class TestModelsRequest(BaseModel):
+    is_dry_run: bool = True
+
     provider: str
     """
     Provider slug to test against: openrouter | vertex | bedrock | openai | qwen.
@@ -1774,11 +1778,13 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
     passed = failed = 0
 
     for item in body.models:
-        model_id          = item.model_id
-        provider_model_id = item.provider_model_id
-        t0                = time.monotonic()
-        status            = "fail"
-        error: str | None = None
+        model_id              = item.model_id
+        provider_model_id     = item.provider_model_id
+        prompt_usd_per_1k     = item.input_token_cost_per_1k
+        completion_usd_per_1k = item.output_token_cost_per_1k
+        t0                    = time.monotonic()
+        status                = "fail"
+        error: str | None     = None
 
         # ── Test the model ─────────────────────────────────────────────────
         req = ChatCompletionRequest(
@@ -1795,13 +1801,12 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                 ),
                 timeout=body.timeout,
             )
-            # Verify there is actual content in the response
-            text = (
-                (resp.get("choices") or [{}])[0]
-                .get("message", {})
-                .get("content") or ""
-            ).strip()
-            if text:
+            # Verify the model responded — check content OR finish_reason
+            # (reasoning models like gpt-5 may return null content)
+            choice = (resp.get("choices") or [{}])[0]
+            text = (choice.get("message", {}).get("content") or "").strip()
+            finish_reason = choice.get("finish_reason") or ""
+            if text or finish_reason:
                 status = "pass"
             else:
                 status = "fail"
@@ -1822,7 +1827,10 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
         else:
             failed += 1
 
-        # ── DB writes ──────────────────────────────────────────────────────
+        # ── DB writes (only on pass) ────────────────────────────────────────
+        if not test_passed or body.is_dry_run:
+            continue
+
         name = _derive_model_name(model_id)
         try:
             async with session_factory() as db:
@@ -1844,8 +1852,8 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                         provider=body.provider,
                         provider_model_id=provider_model_id,
                         is_default=False,
-                        prompt_usd_per_1k=Decimal("0"),
-                        completion_usd_per_1k=Decimal("0"),
+                        prompt_usd_per_1k=prompt_usd_per_1k,
+                        completion_usd_per_1k=completion_usd_per_1k,
                         is_free=False,
                     ).on_conflict_do_nothing(index_elements=["model_id", "provider"])
                 )
@@ -1903,7 +1911,7 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
         pass
 
     # Final summary event
-    yield f"data: {json.dumps({'type': 'summary', 'total': len(body.models), 'passed': passed, 'failed': failed})}\n\n".encode()
+    yield f"data: {json.dumps({'type': 'summary', 'total': len(body.models), 'passed': passed, 'failed': failed, 'is_dry_run': body.is_dry_run})}\n\n".encode()
     yield b"data: [DONE]\n\n"
 
 

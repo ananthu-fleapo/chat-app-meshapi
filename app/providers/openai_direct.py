@@ -93,6 +93,8 @@ class OpenAIDirectAdapter(ProviderAdapter):
     ) -> dict:
         payload = _build_payload(request, stream=False, owner=owner)
         payload["model"] = provider_model_id or _openai_model_id(payload["model"])
+        if "max_tokens" in payload:
+            payload["max_completion_tokens"] = payload.pop("max_tokens")
         log = logger.bind(model=request.model, openai_model=payload["model"])
 
         try:
@@ -123,6 +125,8 @@ class OpenAIDirectAdapter(ProviderAdapter):
     ) -> AsyncGenerator[bytes, None]:
         payload = _build_payload(request, stream=True, owner=owner)
         payload["model"] = provider_model_id or _openai_model_id(payload["model"])
+        if "max_tokens" in payload:
+            payload["max_completion_tokens"] = payload.pop("max_tokens")
         log = logger.bind(model=request.model, openai_model=payload["model"])
 
         try:
