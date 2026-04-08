@@ -20,7 +20,7 @@ COPY app/__init__.py app/__init__.py
 # We install the package itself in editable mode so app/ is importable.
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip \
-    && /opt/venv/bin/pip install -e ".[gcp]" --no-cache-dir
+    && /opt/venv/bin/pip install -e ".[gcp,providers]" --no-cache-dir
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime

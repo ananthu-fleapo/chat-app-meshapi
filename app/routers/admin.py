@@ -1869,14 +1869,7 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                         prompt_usd_per_1k=prompt_usd_per_1k,
                         completion_usd_per_1k=completion_usd_per_1k,
                         is_free=False,
-                    ).on_conflict_do_update(
-                        index_elements=["model_id", "provider"],
-                        set_=dict(
-                            provider_model_id=provider_model_id,
-                            prompt_usd_per_1k=prompt_usd_per_1k,
-                            completion_usd_per_1k=completion_usd_per_1k,
-                        ),
-                    )
+                    ).on_conflict_do_nothing(index_elements=["model_id", "provider"])
                 )
 
                 if test_passed:
@@ -1899,7 +1892,11 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                             ModelPrice.model_id == model_id,
                             ModelPrice.provider == body.provider,
                         )
-                        .values(is_default=True)
+                        .values(
+                            is_default=True,
+                            prompt_usd_per_1k=prompt_usd_per_1k,
+                            completion_usd_per_1k=completion_usd_per_1k,
+                        )
                     )
                     is_default = True
 
