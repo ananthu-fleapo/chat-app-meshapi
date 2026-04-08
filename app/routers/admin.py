@@ -1880,23 +1880,21 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                         .values(is_enabled=True)
                     )
 
-                    # 4. Make this the default provider if no default exists yet
-                    existing_default = await db.scalar(
-                        select(func.count()).where(
-                            ModelPrice.model_id == model_id,
-                            ModelPrice.is_default.is_(True),
-                        )
+                    # 4. Clear any existing default, then set this provider as default
+                    await db.execute(
+                        update(ModelPrice)
+                        .where(ModelPrice.model_id == model_id)
+                        .values(is_default=False)
                     )
-                    if not existing_default:
-                        await db.execute(
-                            update(ModelPrice)
-                            .where(
-                                ModelPrice.model_id == model_id,
-                                ModelPrice.provider == body.provider,
-                            )
-                            .values(is_default=True)
+                    await db.execute(
+                        update(ModelPrice)
+                        .where(
+                            ModelPrice.model_id == model_id,
+                            ModelPrice.provider == body.provider,
                         )
-                        is_default = True
+                        .values(is_default=True)
+                    )
+                    is_default = True
 
                 await db.commit()
         except Exception as db_exc:  # noqa: BLE001
