@@ -423,12 +423,13 @@ async def get_key_usage(
 
 class UserSummary(BaseModel):
     user_id: str
-    email: str | None
+    email: str | None = None
+    display_name: str | None = None
     key_count: int
     active_key_count: int
     total_spent_usd: str
-    balance_usd: str | None
-    last_activity: str | None
+    balance_usd: str | None = None
+    last_activity: str | None = None
     created_at: str
 
 
@@ -484,6 +485,7 @@ async def list_users(
         results.append(UserSummary(
             user_id=u.id,
             email=u.email,
+            display_name=u.display_name,
             key_count=keys_row.key_count if keys_row else 0,
             active_key_count=keys_row.active_key_count if keys_row else 0,
             total_spent_usd=str(Decimal(str(spend_row.total_spent))) if spend_row else "0",
@@ -507,7 +509,7 @@ class ModelUsageRow(BaseModel):
 
 class OwnerUsageRow(BaseModel):
     owner: str
-    email: str | None
+    email: str | None = None
     requests: int
     successful_requests: int
     total_tokens: int | None

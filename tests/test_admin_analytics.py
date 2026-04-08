@@ -424,6 +424,28 @@ class TestPaymentCountries:
         assert resp.json() == []
 
 
+# ── /admin/payments/top-users ────────────────────────────────────────────────
+
+class TestPaymentTopUsers:
+
+    def test_returns_rows_without_email(self, client, mock_db):
+        row = MagicMock(owner="user-123", requests=10, success=10, cost=Decimal("100.00"))
+        mock_db.execute.return_value = make_execute_result(rows=[row])
+
+        resp = client.get("/admin/payments/top-users?limit=10", headers=ADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert resp.json() == [
+            {
+                "owner": "user-123",
+                "email": None,
+                "requests": 10,
+                "successful_requests": 10,
+                "total_tokens": None,
+                "total_cost_usd": "100.0000",
+            }
+        ]
+
+
 # ── Analytics cache ───────────────────────────────────────────────────────────
 
 class TestAnalyticsCache:
