@@ -1998,7 +1998,7 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
             failed += 1
 
         # ── DB writes (only on pass) ────────────────────────────────────────
-        if not test_passed or body.is_dry_run:
+        if test_passed and not body.is_dry_run:
             name = _derive_model_name(model_id)
             try:
                 async with session_factory() as db:
