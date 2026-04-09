@@ -110,6 +110,9 @@ class QwenAdapter(ProviderAdapter):
     ) -> dict:
         payload = _build_payload(request, stream=False, owner=owner)
         payload["model"] = provider_model_id or _qwen_model_id(payload["model"])
+        # Qwen3/QwQ models have thinking enabled by default; DashScope rejects
+        # non-streaming requests unless enable_thinking is explicitly false.
+        payload["enable_thinking"] = False
         log = logger.bind(model=request.model, qwen_model=payload["model"])
 
         try:
