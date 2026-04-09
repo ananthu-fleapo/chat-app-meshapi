@@ -1999,6 +1999,7 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                         model_id=model_id,
                         name=name,
                         context_length=None,
+                        brand=model_id.split("/")[0],
                         description=None,
                         is_enabled=False,
                     ).on_conflict_do_nothing(index_elements=["model_id"])
@@ -2047,7 +2048,7 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
 
                 await db.commit()
         except Exception as db_exc:  # noqa: BLE001
-            logger.error(
+            logger.exception(
                 "test_models_db_error",
                 model_id=model_id,
                 provider=body.provider,

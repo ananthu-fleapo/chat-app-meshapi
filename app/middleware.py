@@ -48,7 +48,7 @@ _CF_EXEMPT_PATHS = {"/healthz", "/readyz"}
 
 # Paths excluded from access logging — high-frequency probes would drown
 # out real traffic in Cloud Logging and inflate log ingestion costs.
-_ACCESS_LOG_SKIP = {"/healthz", "/readyz"}
+_ACCESS_LOG_SKIP = {"/healthz", "/readyz", "/metrics"}
 
 # Paths excluded from MongoDB request logging
 _REQUEST_LOG_SKIP = {"/healthz", "/readyz", "/metrics"}
