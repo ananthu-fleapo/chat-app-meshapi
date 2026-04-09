@@ -263,6 +263,10 @@ def create_app() -> FastAPI:
     # FX rate refresh: internal scheduler endpoint, guarded by WEBHOOK_API_KEY.
     app.include_router(fx_rates.router)
 
+    # Model health check: Cloud Scheduler endpoint, guarded by WEBHOOK_API_KEY.
+    from app.routers import model_health
+    app.include_router(model_health.router)
+
     # GSTIN verification: user-authenticated, results cached 6 months in Redis.
     app.include_router(gstin.router)
 

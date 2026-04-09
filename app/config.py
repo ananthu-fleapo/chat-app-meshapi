@@ -171,5 +171,11 @@ class Settings(BaseSettings):
     # Leave empty in dev to allow unauthenticated scraping.
     metrics_token: str = ""
 
+    # ── Slack notifications ───────────────────────────────────────────────────
+    # Incoming Webhook URL for model health check alerts.
+    # Get from: Slack App → Incoming Webhooks → Add New Webhook to Workspace
+    # Leave empty to disable Slack alerts.
+    slack_webhook_url: str = ""
+
 
 settings = Settings()
