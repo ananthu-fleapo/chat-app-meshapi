@@ -95,7 +95,11 @@ async def _test_model(model_id: str) -> ModelHealthResult:
         return ModelHealthResult(model_id=model_id, status="timeout", latency_ms=latency_ms)
     except Exception as exc:
         latency_ms = int((time.monotonic() - start) * 1000)
-        logger.warning("model_health_fail", model_id=model_id, latency_ms=latency_ms, error=str(exc))
+        logger.exception(
+        "model_health_fail",
+        model_id=model_id,
+        latency_ms=latency_ms
+       )
         return ModelHealthResult(model_id=model_id, status="fail", latency_ms=latency_ms, error=str(exc))
 
 
