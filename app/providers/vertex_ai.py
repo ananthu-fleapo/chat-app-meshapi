@@ -41,27 +41,58 @@ from app.schemas.chat import ChatCompletionRequest
 
 logger = structlog.get_logger()
 
-# Canonical model name → Vertex AI model ID
+# Canonical model name → Vertex AI model ID.
+#
+# Vertex AI's OpenAI-compatible endpoint (/endpoints/openapi/chat/completions)
+# requires the model in "<publisher>/<model>" format for ALL models:
+#   - Google models:    google/gemini-2.0-flash-001
+#   - Anthropic models: anthropic/claude-3-5-sonnet@20241022
+#
+# The fallback in _vertex_model_id() prepends "google/" when no mapping exists
+# and the canonical name doesn't already contain a slash, covering new Gemini
+# previews that haven't been explicitly mapped yet.
 _MODEL_MAP: dict[str, str] = {
-    "anthropic/claude-3-5-sonnet":          "claude-3-5-sonnet@20241022",
-    "anthropic/claude-3-5-sonnet-20241022": "claude-3-5-sonnet@20241022",
-    "anthropic/claude-3-5-haiku":           "claude-3-5-haiku@20241022",
-    "anthropic/claude-3-5-haiku-20241022":  "claude-3-5-haiku@20241022",
-    "anthropic/claude-3-opus":              "claude-3-opus@20240229",
-    "anthropic/claude-3-opus-20240229":     "claude-3-opus@20240229",
-    "anthropic/claude-3-sonnet":            "claude-3-sonnet@20240229",
-    "anthropic/claude-3-haiku":             "claude-3-haiku@20240307",
-    "google/gemini-pro-1.5":               "gemini-1.5-pro-002",
-    "google/gemini-flash-1.5":             "gemini-1.5-flash-002",
-    "google/gemini-2.0-flash":             "gemini-2.0-flash-001",
-    "google/gemini-2.0-flash-exp":         "gemini-2.0-flash-exp",
-    "google/gemini-2.5-pro":               "gemini-2.5-pro-preview-03-25",
+    # ── Anthropic Claude on Vertex ────────────────────────────────────────────
+    "anthropic/claude-3-5-sonnet":          "anthropic/claude-3-5-sonnet@20241022",
+    "anthropic/claude-3-5-sonnet-20241022": "anthropic/claude-3-5-sonnet@20241022",
+    "anthropic/claude-3-5-haiku":           "anthropic/claude-3-5-haiku@20241022",
+    "anthropic/claude-3-5-haiku-20241022":  "anthropic/claude-3-5-haiku@20241022",
+    "anthropic/claude-3-opus":              "anthropic/claude-3-opus@20240229",
+    "anthropic/claude-3-opus-20240229":     "anthropic/claude-3-opus@20240229",
+    "anthropic/claude-3-sonnet":            "anthropic/claude-3-sonnet@20240229",
+    "anthropic/claude-3-haiku":             "anthropic/claude-3-haiku@20240307",
+    # ── Google Gemini 1.5 ─────────────────────────────────────────────────────
+    "google/gemini-pro-1.5":                "google/gemini-1.5-pro-002",
+    "google/gemini-flash-1.5":              "google/gemini-1.5-flash-002",
+    # ── Google Gemini 2.0 ─────────────────────────────────────────────────────
+    "google/gemini-2.0-flash":              "google/gemini-2.0-flash-001",
+    "google/gemini-2.0-flash-exp":          "google/gemini-2.0-flash-exp",
+    "google/gemini-2.0-flash-lite":         "google/gemini-2.0-flash-lite-001",
+    # ── Google Gemini 2.5 ─────────────────────────────────────────────────────
+    "google/gemini-2.5-pro":                "google/gemini-2.5-pro-preview-05-06",
+    "google/gemini-2.5-flash":              "google/gemini-2.5-flash-preview-04-17",
+    # ── Google Gemini 3 ───────────────────────────────────────────────────────
+    "google/gemini-3-flash-preview":        "google/gemini-3-flash-preview",
+    "gemini-3-flash-preview":               "google/gemini-3-flash-preview",
 }
 
 
 def _vertex_model_id(canonical: str) -> str:
-    """Translate a canonical RouterV model name to a Vertex AI model ID."""
-    return _MODEL_MAP.get(canonical, canonical)
+    """
+    Translate a canonical RouterV model name to a Vertex AI model ID.
+
+    Vertex's OpenAI-compatible endpoint requires '<publisher>/<model>' format.
+    If the canonical name isn't in _MODEL_MAP and doesn't contain a '/', assume
+    it's a Google model and prepend 'google/' so new previews work without
+    explicit mapping.
+    """
+    if canonical in _MODEL_MAP:
+        return _MODEL_MAP[canonical]
+    # Already in publisher/model format (e.g. "google/gemini-2.5-pro-exp-03-25")
+    if "/" in canonical:
+        return canonical
+    # Bare name — assume Google model
+    return f"google/{canonical}"
 
 
 def _refresh_token_sync(service_account_json: str) -> tuple[str, float]:
