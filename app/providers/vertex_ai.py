@@ -74,6 +74,8 @@ _MODEL_MAP: dict[str, str] = {
     # ── Google Gemini 3 ───────────────────────────────────────────────────────
     "google/gemini-3-flash-preview":        "google/gemini-3-flash-preview",
     "gemini-3-flash-preview":               "google/gemini-3-flash-preview",
+    "google/gemini-3.1-pro-preview":        "google/gemini-3.1-pro-preview",
+    "gemini-3.1-pro-preview":               "google/gemini-3.1-pro-preview",
 }
 
 
@@ -202,7 +204,7 @@ class VertexAIAdapter(ProviderAdapter):
         provider_model_id: str | None = None,
     ) -> dict:
         payload = _build_payload(request, stream=False, owner=owner)
-        payload["model"] = provider_model_id or _vertex_model_id(payload["model"])
+        payload["model"] = _vertex_model_id(provider_model_id or payload["model"])
         log = logger.bind(model=request.model, vertex_model=payload["model"])
 
         try:
@@ -233,7 +235,7 @@ class VertexAIAdapter(ProviderAdapter):
         provider_model_id: str | None = None,
     ) -> AsyncGenerator[bytes, None]:
         payload = _build_payload(request, stream=True, owner=owner)
-        payload["model"] = provider_model_id or _vertex_model_id(payload["model"])
+        payload["model"] = _vertex_model_id(provider_model_id or payload["model"])
         log = logger.bind(model=request.model, vertex_model=payload["model"])
 
         try:
