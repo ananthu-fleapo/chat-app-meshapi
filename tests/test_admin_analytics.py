@@ -92,6 +92,7 @@ class TestUserSummary:
             make_execute_result(rows=[keys_row]),   # keys aggregate
             make_execute_result(rows=[]),             # key_ids list
             make_execute_result(scalar=None),         # balance
+            make_execute_result(scalar=0),            # total recharged (payment_events sum)
             make_execute_result(rows=[user_row]),     # user details
             make_execute_result(scalar=0.0),          # total paid
         ]
@@ -130,6 +131,7 @@ class TestUserSummary:
             make_execute_result(rows=[(key_id,)]),
             make_execute_result(rows=[spend_row]),
             make_execute_result(scalar=Decimal("5.00")),
+            make_execute_result(scalar=1500),         # total recharged (payment_events sum in cents)
             make_execute_result(rows=[user_row]),     # user details
             make_execute_result(scalar=10.0),         # total paid
         ]
@@ -141,6 +143,8 @@ class TestUserSummary:
         assert data["active_key_count"] == 1
         assert data["api_calls"] == 42
         assert data["balance_usd"] == "5.00"
+        # total_recharged = Decimal(1500) / 100 = 15.00; balance = 5.00; total_spent = 15.00 - 5.00
+        assert data["total_spent_usd"] == "10.00"
 
 
 # ── /admin/users/{user_id}/usage ─────────────────────────────────────────────

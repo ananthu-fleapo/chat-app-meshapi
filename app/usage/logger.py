@@ -325,6 +325,8 @@ async def log_usage_event(
             provider=provider,
             status=status,
         )
+    else:
+        logger.debug("balance_deduction_skipped", status=status, cost=cost)
 
 
 def fire_usage_log(*, owner: str, provider: str = "openrouter", **kwargs) -> None:

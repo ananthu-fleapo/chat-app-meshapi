@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
 
     # ── Database ──────────────────────────────────────────────────────────────
     if settings.database_url:
-        init_db(settings.database_url, echo=(settings.env == "dev"))
+        init_db(settings.database_url, echo=False)
         logger.info("db_ready")
     else:
         logger.warning("db_not_configured", hint="Set DATABASE_URL in .env")

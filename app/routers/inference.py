@@ -229,7 +229,7 @@ async def chat_completions(
             owner=key.owner,
             key_id=str(key.id),
             request_id=request_id,
-            model=(response_body or {}).get("model", body.model),
+            model=body.model,
             provider=provider,
             template_id=template_id,
             stream=False,

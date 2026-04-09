@@ -460,18 +460,28 @@ async def list_users(
     )
     keys_by_user = {r.owner: r for r in keys_q.all()}
 
-    # Spend per user via api_keys join usage_events
-    spend_q = await db.execute(
+    # Total recharged per user via payment_events (amount_usd is in cents, always set)
+    recharge_q = await db.execute(
+        select(
+            PaymentEvent.user_id.label("owner"),
+            func.sum(PaymentEvent.amount_usd).label("total_recharged_cents"),
+        )
+        .where(PaymentEvent.user_id.in_(user_ids))
+        .group_by(PaymentEvent.user_id)
+    )
+    recharge_by_user = {r.owner: r.total_recharged_cents for r in recharge_q.all()}
+
+    # Last activity per user via usage_events
+    activity_q = await db.execute(
         select(
             ApiKey.owner.label("owner"),
-            func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("total_spent"),
             func.max(UsageEvent.created_at).label("last_activity"),
         )
         .outerjoin(UsageEvent, UsageEvent.key_id == ApiKey.id)
         .where(ApiKey.owner.in_(user_ids))
         .group_by(ApiKey.owner)
     )
-    spend_by_user = {r.owner: r for r in spend_q.all()}
+    activity_by_user = {r.owner: r.last_activity for r in activity_q.all()}
 
     # Balance per user
     bal_q = await db.execute(select(UserBalance).where(UserBalance.user_id.in_(user_ids)))
@@ -480,17 +490,20 @@ async def list_users(
     results = []
     for u in all_users:
         keys_row = keys_by_user.get(u.id)
-        spend_row = spend_by_user.get(u.id)
         bal = bal_by_user.get(u.id)
+        total_recharged = Decimal(recharge_by_user.get(u.id) or 0) / 100
+        balance = Decimal(str(bal.balance_usd)) if bal else Decimal(0)
+        total_spent = max(total_recharged - balance, Decimal(0))
+        last_activity = activity_by_user.get(u.id)
         results.append(UserSummary(
             user_id=u.id,
             email=u.email,
             display_name=u.display_name,
             key_count=keys_row.key_count if keys_row else 0,
             active_key_count=keys_row.active_key_count if keys_row else 0,
-            total_spent_usd=str(Decimal(str(spend_row.total_spent))) if spend_row else "0",
+            total_spent_usd=str(total_spent),
             balance_usd=str(bal.balance_usd) if bal else None,
-            last_activity=spend_row.last_activity.isoformat() if spend_row and spend_row.last_activity else None,
+            last_activity=last_activity.isoformat() if last_activity else None,
             created_at=u.created_at.isoformat(),
         ))
 
@@ -1633,12 +1646,10 @@ async def list_balances(db: AsyncSession = Depends(get_db_session)):
             u.email,
             ub.balance_usd,
             ub.updated_at,
-            COALESCE(SUM(ue.cost_usd), 0)  AS total_spent_usd,
-            MAX(ue.created_at)              AS last_activity
+            GREATEST((COALESCE(SUM(pe.amount_usd), 0) / 100.0) - ub.balance_usd, 0) AS total_spent_usd
         FROM user_balances ub
         LEFT JOIN users u ON u.id = ub.user_id
-        LEFT JOIN api_keys ak ON ak.owner = ub.user_id
-        LEFT JOIN usage_events ue ON ue.key_id = ak.id AND ue.status = 'success'
+        LEFT JOIN payment_events pe ON pe.user_id = ub.user_id
         GROUP BY ub.user_id, u.email, ub.balance_usd, ub.updated_at
         ORDER BY ub.balance_usd ASC
     """))
@@ -1649,7 +1660,7 @@ async def list_balances(db: AsyncSession = Depends(get_db_session)):
             email=r.email,
             balance_usd=str(r.balance_usd),
             total_spent_usd=str(r.total_spent_usd),
-            last_activity=r.last_activity.isoformat() if r.last_activity else None,
+            last_activity=None,
             updated_at=r.updated_at.isoformat(),
         )
         for r in rows
@@ -2138,26 +2149,31 @@ async def get_user_summary(
     key_ids = [r[0] for r in key_ids_result.all()]
 
     if key_ids:
-        spend_result = await db.execute(
+        activity_result = await db.execute(
             select(
                 func.count(UsageEvent.id).label("api_calls"),
-                func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("total_spent"),
                 func.max(UsageEvent.created_at).label("last_activity"),
             ).where(UsageEvent.key_id.in_(key_ids))
         )
-        spend_row = spend_result.one()
-        api_calls = spend_row.api_calls or 0
-        total_spent = Decimal(str(spend_row.total_spent))
-        last_activity = spend_row.last_activity.isoformat() if spend_row.last_activity else None
+        activity_row = activity_result.one()
+        api_calls = activity_row.api_calls or 0
+        last_activity = activity_row.last_activity.isoformat() if activity_row.last_activity else None
     else:
         api_calls = 0
-        total_spent = Decimal("0")
         last_activity = None
 
     bal_result = await db.execute(
         select(UserBalance.balance_usd).where(UserBalance.user_id == user_id)
     )
     bal = bal_result.scalar_one_or_none()
+
+    recharge_result = await db.execute(
+        select(func.coalesce(func.sum(PaymentEvent.amount_usd), 0))
+        .where(PaymentEvent.user_id == user_id)
+    )
+    total_recharged = Decimal(recharge_result.scalar_one() or 0) / 100
+    balance = bal if bal is not None else Decimal(0)
+    total_spent = max(total_recharged - balance, Decimal(0))
 
     user_result = await db.execute(
         select(User.email, User.display_name).where(User.id == user_id)
