@@ -1999,72 +1999,70 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
 
         # ── DB writes (only on pass) ────────────────────────────────────────
         if not test_passed or body.is_dry_run:
-            continue
-
-        name = _derive_model_name(model_id)
-        try:
-            async with session_factory() as db:
-                # 1. Insert model row if it doesn't exist (disabled by default)
-                await db.execute(
-                    pg_insert(Model).values(
-                        model_id=model_id,
-                        name=name,
-                        context_length=None,
-                        brand=model_id.split("/")[0],
-                        description=None,
-                        is_enabled=False,
-                    ).on_conflict_do_nothing(index_elements=["model_id"])
-                )
-
-                # 2. Insert model_prices row if (model_id, provider) not present
-                await db.execute(
-                    pg_insert(ModelPrice).values(
-                        model_id=model_id,
-                        provider=body.provider,
-                        provider_model_id=provider_model_id,
-                        is_default=False,
-                        prompt_usd_per_1k=prompt_usd_per_1k,
-                        completion_usd_per_1k=completion_usd_per_1k,
-                        is_free=False,
-                    ).on_conflict_do_nothing(index_elements=["model_id", "provider"])
-                )
-
-                if test_passed:
-                    # 3. Enable the model
+            name = _derive_model_name(model_id)
+            try:
+                async with session_factory() as db:
+                    # 1. Insert model row if it doesn't exist (disabled by default)
                     await db.execute(
-                        update(Model)
-                        .where(Model.model_id == model_id)
-                        .values(is_enabled=True)
+                        pg_insert(Model).values(
+                            model_id=model_id,
+                            name=name,
+                            context_length=None,
+                            brand=model_id.split("/")[0],
+                            description=None,
+                            is_enabled=False,
+                        ).on_conflict_do_nothing(index_elements=["model_id"])
                     )
 
-                    # 4. Clear any existing default, then set this provider as default
+                    # 2. Insert model_prices row if (model_id, provider) not present
                     await db.execute(
-                        update(ModelPrice)
-                        .where(ModelPrice.model_id == model_id)
-                        .values(is_default=False)
-                    )
-                    await db.execute(
-                        update(ModelPrice)
-                        .where(
-                            ModelPrice.model_id == model_id,
-                            ModelPrice.provider == body.provider,
-                        )
-                        .values(
-                            is_default=True,
+                        pg_insert(ModelPrice).values(
+                            model_id=model_id,
+                            provider=body.provider,
+                            provider_model_id=provider_model_id,
+                            is_default=False,
                             prompt_usd_per_1k=prompt_usd_per_1k,
                             completion_usd_per_1k=completion_usd_per_1k,
-                        )
+                            is_free=False,
+                        ).on_conflict_do_nothing(index_elements=["model_id", "provider"])
                     )
-                    is_default = True
 
-                await db.commit()
-        except Exception as db_exc:  # noqa: BLE001
-            logger.exception(
-                "test_models_db_error",
-                model_id=model_id,
-                provider=body.provider,
-                error=str(db_exc),
-            )
+                    if test_passed:
+                        # 3. Enable the model
+                        await db.execute(
+                            update(Model)
+                            .where(Model.model_id == model_id)
+                            .values(is_enabled=True)
+                        )
+
+                        # 4. Clear any existing default, then set this provider as default
+                        await db.execute(
+                            update(ModelPrice)
+                            .where(ModelPrice.model_id == model_id)
+                            .values(is_default=False)
+                        )
+                        await db.execute(
+                            update(ModelPrice)
+                            .where(
+                                ModelPrice.model_id == model_id,
+                                ModelPrice.provider == body.provider,
+                            )
+                            .values(
+                                is_default=True,
+                                prompt_usd_per_1k=prompt_usd_per_1k,
+                                completion_usd_per_1k=completion_usd_per_1k,
+                            )
+                        )
+                        is_default = True
+
+                    await db.commit()
+            except Exception as db_exc:  # noqa: BLE001
+                logger.exception(
+                    "test_models_db_error",
+                    model_id=model_id,
+                    provider=body.provider,
+                    error=str(db_exc),
+                )
 
         # ── Yield SSE event ────────────────────────────────────────────────
         event = {
