@@ -70,6 +70,10 @@ jobs:
 
       - name: Run migrations
         run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO }}/${{ env.SERVICE }}:${{ env.SHORT_SHA }}"
+          gcloud run jobs update ${{ env.SERVICE }}-migrate \
+            --image="${IMAGE}" \
+            --region=${{ env.REGION }}
           gcloud run jobs execute ${{ env.SERVICE }}-migrate \
             --region=${{ env.REGION }} --wait
 
