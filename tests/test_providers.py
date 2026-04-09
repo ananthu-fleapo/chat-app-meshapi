@@ -465,22 +465,22 @@ class TestBedrockModelTranslation:
     def test_known_claude_sonnet_translated(self):
         from app.providers.bedrock import _bedrock_model_id
         assert (
-            _bedrock_model_id("anthropic/claude-3-5-sonnet")
-            == "anthropic.claude-3-5-sonnet-20241022-v2:0"
+            _bedrock_model_id("anthropic/claude-sonnet-4-5")
+            == "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
         )
 
     def test_known_claude_haiku_translated(self):
         from app.providers.bedrock import _bedrock_model_id
         assert (
-            _bedrock_model_id("anthropic/claude-3-5-haiku")
-            == "anthropic.claude-3-5-haiku-20241022-v1:0"
+            _bedrock_model_id("anthropic/claude-3-haiku")
+            == "us.anthropic.claude-3-haiku-20240307-v1:0"
         )
 
-    def test_known_llama_translated(self):
+    def test_known_nova_translated(self):
         from app.providers.bedrock import _bedrock_model_id
         assert (
-            _bedrock_model_id("meta-llama/llama-3.1-70b-instruct")
-            == "meta.llama3-1-70b-instruct-v1:0"
+            _bedrock_model_id("amazon/nova-pro-v1")
+            == "us.amazon.nova-pro-v1:0"
         )
 
     def test_unknown_model_passthrough(self):
@@ -747,10 +747,10 @@ class TestBedrockAdapter:
         cm.__aexit__ = AsyncMock(return_value=False)
         adapter._make_sigv4_session = MagicMock(return_value=cm)
 
-        await adapter.chat_completion(_make_chat_request("anthropic/claude-3-5-haiku"))
+        await adapter.chat_completion(_make_chat_request("anthropic/claude-3-haiku"))
 
         call_kwargs = mock_client.converse.call_args[1]
-        assert call_kwargs["modelId"] == "anthropic.claude-3-5-haiku-20241022-v1:0"
+        assert call_kwargs["modelId"] == "us.anthropic.claude-3-haiku-20240307-v1:0"
 
     async def test_chat_completion_upstream_exception_raises_upstream_error(self):
         from app.providers.bedrock import BedrockAdapter

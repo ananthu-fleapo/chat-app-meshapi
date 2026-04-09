@@ -156,6 +156,15 @@ class Settings(BaseSettings):
     # Leave empty in dev — the check is skipped when unset.
     cf_secret: str = ""
 
+    # ── MongoDB (usage events + request logs) ─────────────────────────────────
+    # Atlas connection string: mongodb+srv://user:pass@cluster.mongodb.net/?retryWrites=true
+    # Leave empty to disable MongoDB logging (Postgres-only mode).
+    mongodb_url: str = ""
+    mongodb_database: str = "routersvc"
+    # When true, full request/response bodies are stored in request_logs.
+    # Disable to reduce storage costs or when messages contain sensitive data.
+    log_request_bodies: bool = True
+
     # ── Metrics scrape auth ───────────────────────────────────────────────────
     # Bearer token required to scrape GET /metrics.
     # Set in Grafana Cloud scrape job as: Authorization: Bearer <token>

@@ -55,24 +55,23 @@ from app.schemas.chat import ChatCompletionRequest
 
 logger = structlog.get_logger()
 
-# Canonical model name → AWS Bedrock model ID
+# Canonical model name → AWS Bedrock cross-region inference profile ID.
+# Fallback used when provider_model_id is not set in the DB.
+# All active models use the us. geo cross-region prefix (routes across us-east-1/us-west-2).
+# Confirmed live as of 2026-04 via test_bedrock_models.py.
 _MODEL_MAP: dict[str, str] = {
-    "anthropic/claude-3-5-sonnet":                   "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "anthropic/claude-3-5-sonnet-20241022":          "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "anthropic/claude-3-5-haiku":                    "anthropic.claude-3-5-haiku-20241022-v1:0",
-    "anthropic/claude-3-5-haiku-20241022":           "anthropic.claude-3-5-haiku-20241022-v1:0",
-    "anthropic/claude-3-opus":                       "anthropic.claude-3-opus-20240229-v1:0",
-    "anthropic/claude-3-opus-20240229":              "anthropic.claude-3-opus-20240229-v1:0",
-    "anthropic/claude-3-sonnet":                     "anthropic.claude-3-sonnet-20240229-v1:0",
-    "anthropic/claude-3-haiku":                      "anthropic.claude-3-haiku-20240307-v1:0",
-    "meta-llama/llama-3.1-70b-instruct":             "meta.llama3-1-70b-instruct-v1:0",
-    "meta-llama/llama-3.1-8b-instruct":              "meta.llama3-1-8b-instruct-v1:0",
-    "meta-llama/llama-3.1-405b-instruct":            "meta.llama3-1-405b-instruct-v1:0",
-    "meta-llama/llama-3.2-1b-instruct":              "meta.llama3-2-1b-instruct-v1:0",
-    "meta-llama/llama-3.2-3b-instruct":              "meta.llama3-2-3b-instruct-v1:0",
-    "amazon/nova-lite-v1":                           "amazon.nova-lite-v1:0",
-    "amazon/nova-micro-v1":                          "amazon.nova-micro-v1:0",
-    "amazon/nova-pro-v1":                            "amazon.nova-pro-v1:0",
+    # ── Claude 4.x ────────────────────────────────────────────────────────────
+    "anthropic/claude-sonnet-4-5":        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "anthropic/claude-opus-4-5":          "us.anthropic.claude-opus-4-5-20251101-v1:0",
+    "anthropic/claude-sonnet-4":          "us.anthropic.claude-sonnet-4-20250514-v1:0",
+    "anthropic/claude-opus-4-1":          "us.anthropic.claude-opus-4-1-20250805-v1:0",
+    "anthropic/claude-haiku-4-5":         "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    # ── Claude 3.x (only haiku still active; 3-5 sonnet/haiku and 3-7 are legacy) ──
+    "anthropic/claude-3-haiku":           "us.anthropic.claude-3-haiku-20240307-v1:0",
+    # ── Amazon Nova ───────────────────────────────────────────────────────────
+    "amazon/nova-lite-v1":                "us.amazon.nova-lite-v1:0",
+    "amazon/nova-micro-v1":               "us.amazon.nova-micro-v1:0",
+    "amazon/nova-pro-v1":                 "us.amazon.nova-pro-v1:0",
 }
 
 

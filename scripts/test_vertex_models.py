@@ -2,14 +2,27 @@
 """
 Test Vertex AI models directly using the OpenAI-compatible endpoint.
 
-Usage
------
-  python scripts/test_vertex_models.py \\
-      --project-id  my-gcp-project \\
-      --sa-json     /path/to/service_account.json \\
-      [--location   us-central1] \\
-      [--timeout    60] \\
-      [--prompt     "Reply with just the word OK"]
+Auth options (choose one)
+--------------------------
+  A) API key  — create one in GCP Console → Vertex AI → API Keys
+     python scripts/test_vertex_models.py \\
+         --project-id  my-gcp-project \\
+         --api-key     AIza...
+
+  B) Service account JSON  — full OAuth2 Bearer flow
+     python scripts/test_vertex_models.py \\
+         --project-id  my-gcp-project \\
+         --sa-json     /path/to/service_account.json
+
+Note: API key auth works for Gemini models. Claude/Anthropic models on Vertex
+require a service account with the Vertex AI User IAM role.
+
+Optional flags
+--------------
+  --location    us-central1   (default)
+  --timeout     60            seconds per model
+  --concurrency 3             parallel requests
+  --prompt      "Reply with just the word OK and nothing else."
 
 Output files (timestamped, never overwritten)
 ----------------------------------------------
@@ -38,24 +51,51 @@ _OUTPUTS_DIR = Path(__file__).parent / "outputs"
 _OUTPUTS_DIR.mkdir(exist_ok=True)
 
 # ── Model registry (canonical → vertex model ID, context length) ─────────────
+#
+# API key auth supports Gemini models only.
+# Claude/Anthropic models require service account (--sa-json) with Vertex AI User role
+# and the model enabled in Model Garden (GCP Console → Vertex AI → Model Garden).
+#
+# Gemini model IDs accepted by the OpenAI-compatible endpoint are the bare names
+# without a @version suffix (Vertex resolves to latest stable automatically).
 
 MODELS: dict[str, tuple[str, int]] = {
-    "anthropic/claude-opus-4-6":    ("claude-opus-4-6",              200_000),
-    "anthropic/claude-sonnet-4-6":  ("claude-sonnet-4-6",            200_000),
-    "anthropic/claude-haiku-4-5":   ("claude-haiku-4-5@20251001",    200_000),
-    "anthropic/claude-sonnet-4-5":  ("claude-sonnet-4-5@20250929",   200_000),
-    "anthropic/claude-opus-4-5":    ("claude-opus-4-5@20251101",     200_000),
-    "anthropic/claude-opus-4-1":    ("claude-opus-4-1@20250805",     200_000),
-    "anthropic/claude-sonnet-4":    ("claude-sonnet-4@20250514",     200_000),
-    "anthropic/claude-opus-4":      ("claude-opus-4@20250514",       200_000),
-    "anthropic/claude-3-haiku":     ("claude-3-haiku@20240307",      200_000),
-    "google/gemini-3-1-pro":        ("gemini-3-1-pro",             1_000_000),
-    "google/gemini-3-flash":        ("gemini-3-flash",             1_000_000),
-    "google/gemini-3-1-flash-lite": ("gemini-3-1-flash-lite",      1_000_000),
-    "google/gemini-2-5-pro":        ("gemini-2-5-pro",             1_000_000),
-    "google/gemini-2-5-flash":      ("gemini-2-5-flash",           1_000_000),
-    "google/gemini-2-5-flash-lite": ("gemini-2-5-flash-lite",      1_000_000),
-    "google/gemini-2-0-flash":      ("gemini-2-0-flash",           1_000_000),
+    # ── Gemini 2.5 ────────────────────────────────────────────────────────────
+    # Use bare names (no @version suffix) — Vertex resolves to latest stable.
+    # gemini-2.5-pro is a THINKING model: needs higher max_tokens than other models
+    # (reasoning tokens count against the limit before any content is generated).
+    "google/gemini-2.5-pro":              ("google/gemini-2.5-pro",                  1_000_000),
+    "google/gemini-2.5-flash":            ("google/gemini-2.5-flash",                1_000_000),
+    "google/gemini-2.5-flash-lite":       ("google/gemini-2.5-flash-lite",           1_000_000),
+    # ── Gemini 2.0 ────────────────────────────────────────────────────────────
+    # Do NOT add -001 suffix — bare name works; versioned alias not in all regions.
+    "google/gemini-2.0-flash":            ("google/gemini-2.0-flash",                1_000_000),
+    "google/gemini-2.0-flash-lite":       ("google/gemini-2.0-flash-lite",           1_000_000),
+    # ── Gemini 1.5 ────────────────────────────────────────────────────────────
+    "google/gemini-1.5-pro":              ("google/gemini-1.5-pro",                  2_000_000),
+    "google/gemini-1.5-flash":            ("google/gemini-1.5-flash",                1_000_000),
+    "google/gemini-1.5-flash-8b":         ("google/gemini-1.5-flash-8b",             1_000_000),
+    # ── Gemma 3 (requires Model Garden terms accepted) ────────────────────────
+    "google/gemma-3-27b-it":              ("google/gemma-3-27b-it",                     8_192),
+    "google/gemma-3-12b-it":              ("google/gemma-3-12b-it",                     8_192),
+    "google/gemma-3-4b-it":               ("google/gemma-3-4b-it",                      8_192),
+    "google/gemma-3-1b-it":               ("google/gemma-3-1b-it",                      8_192),
+    # ── Gemma 2 (requires Model Garden terms accepted) ────────────────────────
+    "google/gemma-2-27b-it":              ("google/gemma-2-27b-it",                     8_192),
+    "google/gemma-2-9b-it":               ("google/gemma-2-9b-it",                      8_192),
+    "google/gemma-2-2b-it":               ("google/gemma-2-2b-it",                      8_192),
+    # ── Claude on Vertex (requires Model Garden enablement per model) ─────────
+    "anthropic/claude-3-5-sonnet":        ("anthropic/claude-3-5-sonnet@20241022",    200_000),
+    "anthropic/claude-3-5-haiku":         ("anthropic/claude-3-5-haiku@20241022",     200_000),
+    "anthropic/claude-3-opus":            ("anthropic/claude-3-opus@20240229",        200_000),
+    "anthropic/claude-3-haiku":           ("anthropic/claude-3-haiku@20240307",       200_000),
+    # ── Gemini 3 / 3.1 — NOT YET AVAILABLE via publisher endpoint ────────────
+    # These are visible in Model Garden UI but not accessible via /endpoints/openapi.
+    # Remove the comments below and re-run when Google makes them generally available.
+    # "google/gemini-3-pro":              ("google/gemini-3-pro",                    1_000_000),
+    # "google/gemini-3-flash":            ("google/gemini-3-flash",                  1_000_000),
+    # "google/gemini-3.1-pro":            ("google/gemini-3.1-pro",                  1_000_000),
+    # "google/gemini-3.1-flash-lite":     ("google/gemini-3.1-flash-lite",           1_000_000),
 }
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
@@ -95,10 +135,9 @@ class ModelResult:
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
-def _get_bearer_token(sa_json_path: str) -> str:
+def _get_bearer_token_from_sa(sa_json_path: str) -> str:
     """Obtain a short-lived Google OAuth2 Bearer token from a service account JSON file."""
     try:
-        from google.auth.transport.requests import Request as GoogleRequest  # type: ignore[import]
         from google.oauth2 import service_account  # type: ignore[import]
     except ImportError:
         print(red("google-auth is required: pip install google-auth"))
@@ -111,7 +150,20 @@ def _get_bearer_token(sa_json_path: str) -> str:
         sa_info,
         scopes=["https://www.googleapis.com/auth/cloud-platform"],
     )
-    creds.refresh(GoogleRequest())
+
+    # Prefer urllib3 transport (no `requests` dependency); fall back to requests.
+    try:
+        from google.auth.transport.urllib3 import Request as Urllib3Request  # type: ignore[import]
+        import urllib3  # type: ignore[import]
+        creds.refresh(Urllib3Request(urllib3.PoolManager()))
+    except ImportError:
+        try:
+            from google.auth.transport.requests import Request as GoogleRequest  # type: ignore[import]
+            creds.refresh(GoogleRequest())
+        except ImportError:
+            print(red("Token refresh failed. Run:  pip install urllib3  (or pip install requests)"))
+            sys.exit(1)
+
     return creds.token  # type: ignore[return-value]
 
 
@@ -139,7 +191,7 @@ async def _test_model(
                 json={
                     "model":    vertex_model_id,
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 32,
+                    "max_tokens": 200,  # thinking models (e.g. gemini-2.5-pro) use tokens internally before responding
                 },
                 timeout=httpx.Timeout(timeout),
             )
@@ -340,8 +392,13 @@ def _parse_args() -> argparse.Namespace:
         help="GCP project ID (or $VERTEX_PROJECT_ID).")
     p.add_argument("--location", default=os.environ.get("VERTEX_LOCATION", "us-central1"),
         help="Vertex AI region (default: us-central1).")
-    p.add_argument("--sa-json", default=os.environ.get("VERTEX_SA_JSON"),
-        help="Path to service account JSON file (or $VERTEX_SA_JSON).")
+
+    auth = p.add_mutually_exclusive_group()
+    auth.add_argument("--api-key", default=os.environ.get("VERTEX_API_KEY"),
+        help="GCP API key (or $VERTEX_API_KEY). Simpler than SA JSON; Gemini models only.")
+    auth.add_argument("--sa-json", default=os.environ.get("VERTEX_SA_JSON"),
+        help="Path to service account JSON file (or $VERTEX_SA_JSON). Required for Claude models.")
+
     p.add_argument("--timeout", type=float, default=60.0,
         help="Per-model timeout in seconds (default: 60).")
     p.add_argument("--concurrency", type=int, default=3,
@@ -357,8 +414,8 @@ async def _main(args: argparse.Namespace) -> int:
     if not args.project_id:
         print(red("Error: --project-id is required (or set $VERTEX_PROJECT_ID)"))
         return 1
-    if not args.sa_json:
-        print(red("Error: --sa-json is required (or set $VERTEX_SA_JSON)"))
+    if not args.api_key and not args.sa_json:
+        print(red("Error: provide either --api-key or --sa-json (see --help)"))
         return 1
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -371,14 +428,23 @@ async def _main(args: argparse.Namespace) -> int:
     print(f"  Models:       {len(MODELS)}")
     print()
 
-    # Auth
-    print("Obtaining Google OAuth2 Bearer token... ", end="", flush=True)
-    try:
-        bearer_token = _get_bearer_token(args.sa_json)
-        print(green("OK"))
-    except Exception as exc:
-        print(red(f"FAILED: {exc}"))
-        return 1
+    # ── Auth ──────────────────────────────────────────────────────────────────
+    if args.api_key:
+        # API key — used directly as the Bearer token value
+        bearer_token = args.api_key
+        auth_label   = "API key"
+    else:
+        # Service account JSON → short-lived OAuth2 Bearer token
+        print("Obtaining Google OAuth2 Bearer token... ", end="", flush=True)
+        try:
+            bearer_token = _get_bearer_token_from_sa(args.sa_json)
+            print(green("OK"))
+        except Exception as exc:
+            print(red(f"FAILED: {exc}"))
+            return 1
+        auth_label = "service account"
+
+    print(f"  Auth:         {auth_label}")
 
     endpoint_url = (
         f"https://{args.location}-aiplatform.googleapis.com/v1beta1"

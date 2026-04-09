@@ -49,29 +49,30 @@ _OUTPUTS_DIR.mkdir(exist_ok=True)
 # Run with --region us-east-1 (default) for US geo cross-region profiles.
 
 MODELS: dict[str, tuple[str, int]] = {
-    # ── Latest Claude models (geo cross-region inference profiles) ────────────
-    "anthropic/claude-sonnet-4-6":        ("us.anthropic.claude-sonnet-4-6-20260101-v1:0",   200_000),
-    "anthropic/claude-opus-4-6":          ("us.anthropic.claude-opus-4-6-20260101-v1:0",     200_000),
+    # ── Claude 4.x (geo cross-region inference profiles) ─────────────────────
     "anthropic/claude-sonnet-4-5":        ("us.anthropic.claude-sonnet-4-5-20250929-v1:0",   200_000),
     "anthropic/claude-opus-4-5":          ("us.anthropic.claude-opus-4-5-20251101-v1:0",     200_000),
     "anthropic/claude-sonnet-4":          ("us.anthropic.claude-sonnet-4-20250514-v1:0",     200_000),
-    "anthropic/claude-opus-4":            ("us.anthropic.claude-opus-4-20250514-v1:0",       200_000),
     "anthropic/claude-opus-4-1":          ("us.anthropic.claude-opus-4-1-20250805-v1:0",     200_000),
     "anthropic/claude-haiku-4-5":         ("us.anthropic.claude-haiku-4-5-20251001-v1:0",    200_000),
-    # ── Claude 3.x (geo cross-region inference profiles) ─────────────────────
-    "anthropic/claude-3-7-sonnet":        ("us.anthropic.claude-3-7-sonnet-20250219-v1:0",   200_000),
-    "anthropic/claude-3-5-sonnet-v2":     ("us.anthropic.claude-3-5-sonnet-20241022-v2:0",   200_000),
-    "anthropic/claude-3-5-sonnet":        ("us.anthropic.claude-3-5-sonnet-20240620-v1:0",   200_000),
-    "anthropic/claude-3-5-haiku":         ("us.anthropic.claude-3-5-haiku-20241022-v1:0",    200_000),
-    "anthropic/claude-3-sonnet":          ("us.anthropic.claude-3-sonnet-20240229-v1:0",     200_000),
+    # ── Claude 3.x ────────────────────────────────────────────────────────────
     "anthropic/claude-3-haiku":           ("us.anthropic.claude-3-haiku-20240307-v1:0",      200_000),
-    # ── On-demand only (no cross-region prefix) ───────────────────────────────
-    "anthropic/claude-instant":           ("anthropic.claude-instant-v1",                    100_000),
-    "anthropic/claude-v2":                ("anthropic.claude-v2:1",                          200_000),
     # ── Amazon Nova (cross-region) ────────────────────────────────────────────
     "amazon/nova-lite-v1":                ("us.amazon.nova-lite-v1:0",                       300_000),
     "amazon/nova-micro-v1":               ("us.amazon.nova-micro-v1:0",                      128_000),
     "amazon/nova-pro-v1":                 ("us.amazon.nova-pro-v1:0",                        300_000),
+    # ── Removed — confirmed dead as of 2026-04 ────────────────────────────────
+    # "anthropic/claude-opus-4":          EOL  — "marked by provider as Legacy"
+    # "anthropic/claude-3-7-sonnet":      EOL  — "marked by provider as Legacy"
+    # "anthropic/claude-3-5-haiku":       EOL  — "marked by provider as Legacy"
+    # "anthropic/claude-3-5-sonnet":      EOL  — ValidationException: invalid model identifier
+    # "anthropic/claude-3-5-sonnet-v2":   EOL  — ValidationException: invalid model identifier
+    # "anthropic/claude-3-sonnet":        EOL  — "marked by provider as Legacy"
+    # "anthropic/claude-instant":         EOL  — "end of its life"
+    # "anthropic/claude-v2":              EOL  — "end of its life"
+    # ── Not yet on Bedrock ────────────────────────────────────────────────────
+    # "anthropic/claude-sonnet-4-6":      ValidationException (20260101 date not live yet)
+    # "anthropic/claude-opus-4-6":        ValidationException (20260101 date not live yet)
 }
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────

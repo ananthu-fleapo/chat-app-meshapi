@@ -65,7 +65,13 @@
       "Bash(python3 -c \"from app.routers.admin import router; print\\(''OK''\\)\")",
       "Bash(alembic upgrade:*)",
       "Bash(pytest tests/ -v --tb=no -q)",
-      "Bash(pytest tests/test_providers.py::TestRegistry -v)"
+      "Bash(pytest tests/test_providers.py::TestRegistry -v)",
+      "Bash(grep -n \"motor\\\\|pymongo\" /Users/aifiesta/Downloads/code/routersvc/requirements*.txt)",
+      "Bash(python -c \":*)",
+      "Bash(pytest tests/test_per_1m_pricing.py -v)",
+      "Bash(pytest --tb=short -q)",
+      "Bash(pytest tests/test_auth_dependencies.py -v --tb=short)",
+      "Bash(pytest tests/test_providers.py::TestBedrockModelTranslation -v --tb=short)"
     ]
   }
 }

@@ -16,14 +16,28 @@ RequestIdMiddleware
         { "message": "http_request", "method": ..., "path": ...,
           "status": ..., "latency_ms": ..., "client_ip": ... }
       Health-check paths (/healthz, /readyz) are excluded to avoid noise.
+
+RequestLoggingMiddleware
+    Raw ASGI middleware that persists every HTTP request + response to MongoDB.
+    - Uses raw ASGI (not BaseHTTPMiddleware) so SSE streaming is not buffered.
+    - Wraps receive() to capture the request body without blocking downstream.
+    - Wraps send() to accumulate response chunks; fires the MongoDB write after
+      the final chunk (more_body=False) as an asyncio background task.
+    - Strips Authorization, X-Origin-Secret, and Cookie headers before storage.
+    - Skips /healthz, /readyz, /metrics — high-frequency probes add noise.
+    - Gracefully no-ops when MongoDB is not configured (mongodb_url = "").
 """
 
+import asyncio
+import json
 import time
+from datetime import UTC, datetime
 
 import structlog
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from ulid import ULID
 
 logger = structlog.get_logger()
@@ -35,6 +49,12 @@ _CF_EXEMPT_PATHS = {"/healthz", "/readyz"}
 # Paths excluded from access logging — high-frequency probes would drown
 # out real traffic in Cloud Logging and inflate log ingestion costs.
 _ACCESS_LOG_SKIP = {"/healthz", "/readyz"}
+
+# Paths excluded from MongoDB request logging
+_REQUEST_LOG_SKIP = {"/healthz", "/readyz", "/metrics"}
+
+# Headers stripped before persisting to MongoDB — never store credentials
+_SENSITIVE_HEADERS = {"authorization", "x-origin-secret", "cookie", "x-api-key"}
 
 
 def _parse_trace_header(header: str) -> tuple[str | None, str | None, bool]:
@@ -86,6 +106,18 @@ def _real_client_ip(request: Request) -> str:
         return xff.split(",")[0].strip()
 
     return request.client.host if request.client else "unknown"
+
+
+def _client_ip_from_scope(scope: Scope, headers: dict[str, str]) -> str:
+    """Resolve real client IP from raw ASGI scope (no Request object)."""
+    cf_ip = headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip.strip()
+    xff = headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    client = scope.get("client")
+    return client[0] if client else "unknown"
 
 
 class CloudflareOriginGuard(BaseHTTPMiddleware):
@@ -201,3 +233,196 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         # ── Response header ───────────────────────────────────────────────────
         response.headers["X-Request-Id"] = request_id
         return response
+
+
+class RequestLoggingMiddleware:
+    """
+    Raw ASGI middleware — persists every request + response to MongoDB.
+
+    Why raw ASGI instead of BaseHTTPMiddleware:
+    BaseHTTPMiddleware buffers the entire streaming response before returning it,
+    which breaks SSE (the client never receives chunks until the stream ends).
+    Raw ASGI lets us wrap send() to tap each chunk as it flows through without
+    delaying delivery.
+
+    Flow:
+      receive_wrapper  — accumulates request body chunks as they arrive
+      send_wrapper     — forwards each response chunk immediately to the client
+                         AND appends it to a local buffer; when more_body=False
+                         the full request+response is written to MongoDB async
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Only instrument HTTP; pass websocket/lifespan through untouched
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        from app.config import settings
+        from app.db.mongo import is_mongo_available
+
+        path = scope.get("path", "")
+
+        # Skip noisy health/metrics endpoints
+        if path in _REQUEST_LOG_SKIP or not is_mongo_available():
+            await self.app(scope, receive, send)
+            return
+
+        # ── Decode request headers once ───────────────────────────────────────
+        raw_headers: dict[str, str] = {
+            k.decode("latin-1"): v.decode("latin-1")
+            for k, v in scope.get("headers", [])
+        }
+        safe_headers: dict[str, str] = {
+            k: v for k, v in raw_headers.items()
+            if k.lower() not in _SENSITIVE_HEADERS
+        }
+
+        # ── Wrap receive to capture request body ──────────────────────────────
+        body_chunks: list[bytes] = []
+
+        async def receive_wrapper() -> Message:
+            message = await receive()
+            if message["type"] == "http.request":
+                chunk = message.get("body", b"")
+                if chunk:
+                    body_chunks.append(chunk)
+            return message
+
+        # ── Wrap send to capture response ─────────────────────────────────────
+        response_chunks: list[bytes] = []
+        status_code: int = 0
+        response_headers: dict[str, str] = {}
+        start_time = time.monotonic()
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal status_code, response_headers
+
+            if message["type"] == "http.response.start":
+                status_code = message.get("status", 0)
+                response_headers = {
+                    k.decode("latin-1"): v.decode("latin-1")
+                    for k, v in message.get("headers", [])
+                }
+
+            elif message["type"] == "http.response.body":
+                chunk = message.get("body", b"")
+                if chunk:
+                    response_chunks.append(chunk)
+
+                if not message.get("more_body", False):
+                    # Last byte sent — schedule MongoDB write in background
+                    latency_ms = int((time.monotonic() - start_time) * 1000)
+                    state = scope.get("state")
+                    request_id = getattr(state, "request_id", None) or f"req_{ULID()}"
+                    owner = getattr(state, "owner", None)
+
+                    asyncio.create_task(
+                        _write_request_log(
+                            request_id=request_id,
+                            owner=owner,
+                            method=scope.get("method", ""),
+                            path=path,
+                            query=scope.get("query_string", b"").decode("latin-1") or None,
+                            client_ip=_client_ip_from_scope(scope, raw_headers),
+                            user_agent=raw_headers.get("user-agent"),
+                            request_headers=safe_headers,
+                            request_body=b"".join(body_chunks),
+                            status_code=status_code,
+                            response_headers=response_headers,
+                            response_body=b"".join(response_chunks),
+                            latency_ms=latency_ms,
+                            log_bodies=settings.log_request_bodies,
+                        )
+                    )
+
+            # Always forward the message to the actual client
+            await send(message)
+
+        await self.app(scope, receive_wrapper, send_wrapper)
+
+
+async def _write_request_log(
+    *,
+    request_id: str,
+    owner: str | None,
+    method: str,
+    path: str,
+    query: str | None,
+    client_ip: str,
+    user_agent: str | None,
+    request_headers: dict[str, str],
+    request_body: bytes,
+    status_code: int,
+    response_headers: dict[str, str],
+    response_body: bytes,
+    latency_ms: int,
+    log_bodies: bool,
+) -> None:
+    """
+    Persist one request/response document to MongoDB request_logs collection.
+    All errors are caught and logged — must never affect the request path.
+    """
+    try:
+        from app.db.mongo import get_mongo_db
+
+        # ── Parse request body ────────────────────────────────────────────────
+        request_body_doc = None
+        if log_bodies and request_body:
+            content_type = request_headers.get("content-type", "")
+            if "application/json" in content_type:
+                try:
+                    request_body_doc = json.loads(request_body)
+                    # Never store API keys that may appear in body
+                    if isinstance(request_body_doc, dict):
+                        request_body_doc.pop("api_key", None)
+                except (json.JSONDecodeError, ValueError):
+                    request_body_doc = request_body.decode("utf-8", errors="replace")
+            else:
+                request_body_doc = request_body.decode("utf-8", errors="replace")[:10_000]
+
+        # ── Parse response body ───────────────────────────────────────────────
+        response_body_doc = None
+        if log_bodies and response_body:
+            resp_content_type = response_headers.get("content-type", "")
+            if "application/json" in resp_content_type:
+                try:
+                    response_body_doc = json.loads(response_body)
+                except (json.JSONDecodeError, ValueError):
+                    response_body_doc = response_body.decode("utf-8", errors="replace")
+            elif "text/event-stream" in resp_content_type:
+                # SSE stream: store as text, cap at 100 KB to avoid huge docs
+                decoded = response_body.decode("utf-8", errors="replace")
+                response_body_doc = decoded[:100_000] if len(decoded) > 100_000 else decoded
+            else:
+                response_body_doc = response_body.decode("utf-8", errors="replace")[:10_000]
+
+        doc = {
+            "_id": request_id,
+            "ts": datetime.now(UTC),
+            "method": method,
+            "path": path,
+            "query": query,
+            "client_ip": client_ip,
+            "user_agent": user_agent,
+            "owner": owner,
+            "status_code": status_code,
+            "latency_ms": latency_ms,
+            "request": {
+                "headers": request_headers,
+                "body": request_body_doc,
+            },
+            "response": {
+                "headers": response_headers,
+                "body": response_body_doc,
+            },
+        }
+
+        db = get_mongo_db()
+        await db.request_logs.insert_one(doc)
+
+    except Exception as exc:  # noqa: BLE001
+        logger.error("request_log_mongo_failed", request_id=request_id, error=str(exc))

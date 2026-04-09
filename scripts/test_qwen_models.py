@@ -41,18 +41,8 @@ _OUTPUTS_DIR.mkdir(exist_ok=True)
 # ── Model registry (canonical → dashscope model ID, context length) ───────────
 
 MODELS: dict[str, tuple[str, int]] = {
-    "qwen/qwen3-max":        ("qwen3-max",        262_144),
-    "qwen/qwen3.5-plus":     ("qwen3.5-plus",    1_000_000),
-    "qwen/qwen3.5-flash":    ("qwen3.5-flash",   1_000_000),
-    "qwen/qwen-max":         ("qwen-max",          131_072),
-    "qwen/qwen-plus":        ("qwen-plus",        1_000_000),
-    "qwen/qwen-flash":       ("qwen-flash",       1_000_000),
-    "qwen/qwen-turbo":       ("qwen-turbo",       1_000_000),
-    "qwen/qwq-plus":         ("qwq-plus",          131_072),
-    "qwen/qwen-long":        ("qwen-long",       10_000_000),
-    "qwen/qwen3-coder-plus": ("qwen3-coder-plus", 1_000_000),
-    "qwen/qwen-vl-max":      ("qwen-vl-max",       131_072),
-    "qwen/qwen-vl-plus":     ("qwen-vl-plus",      131_072),
+    "qwen/qwen3-coder-plus":     ("qwen/qwen3-coder-plus",    1_000_000),
+    "qwen/qwen-plus-2025-09-11":    ("qwen/qwen-plus-2025-09-11",   1_000_000),
 }
 
 DEFAULT_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"

@@ -8,9 +8,10 @@ from fastapi.exceptions import RequestValidationError
 from app.cache.redis_client import close_redis, init_redis, get_redis
 from app.config import settings
 from app.db.engine import close_db, init_db, get_engine
+from app.db.mongo import close_mongo, init_mongo
 from app.exceptions import RouterVError, routerv_exception_handler, validation_exception_handler
 from app.logging_config import configure_logging
-from app.middleware import CloudflareOriginGuard, RequestIdMiddleware
+from app.middleware import CloudflareOriginGuard, RequestIdMiddleware, RequestLoggingMiddleware
 from app.metrics import update_pool_metrics, update_redis_metrics, PROCESS_CPU_CORES, PROCESS_TOTAL_MEMORY_BYTES
 from app.providers.openrouter import OpenRouterAdapter
 from app.providers.registry import register_adapter
@@ -135,6 +136,25 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("redis_not_configured", hint="Set REDIS_URL in .env")
 
+    # ── MongoDB ───────────────────────────────────────────────────────────────
+    # Stores request_logs (all HTTP traffic) and usage_events (dual-write with
+    # Postgres). Optional — app runs fine without it, logging falls back to
+    # Postgres-only + structured logs.
+    if settings.mongodb_url:
+        try:
+            await init_mongo(settings.mongodb_url, settings.mongodb_database)
+        except Exception as exc:  # noqa: BLE001
+            # MONGODB_URL is explicitly configured — fail fast rather than starting
+            # silently broken. Operators must fix connectivity before serving traffic.
+            logger.error(
+                "mongo_connect_failed",
+                error=str(exc),
+                mongodb_url=settings.mongodb_url,
+            )
+            raise
+    else:
+        logger.warning("mongo_not_configured", hint="Set MONGODB_URL in .env to enable MongoDB logging")
+
     # ── Background metrics task ───────────────────────────────────────────────
     # Update DB pool and Redis metrics every 10 seconds.
     async def update_metrics_loop():
@@ -180,6 +200,7 @@ async def lifespan(app: FastAPI):
 
     await close_db()
     await close_redis()
+    await close_mongo()
 
 
 def create_app() -> FastAPI:
@@ -195,9 +216,14 @@ def create_app() -> FastAPI:
     )
 
     # ── Middleware ────────────────────────────────────────────────────────────
-    # Order matters: middleware is applied last-registered-first (LIFO).
-    # CloudflareOriginGuard must run BEFORE RequestIdMiddleware so blocked
-    # requests never allocate a request ID or touch any handler logic.
+    # Execution order for incoming requests (LIFO — last added runs outermost):
+    #   CORSMiddleware → CloudflareOriginGuard → RequestIdMiddleware
+    #     → RequestLoggingMiddleware → route handler
+    #
+    # RequestLoggingMiddleware is innermost so it sees the request_id and owner
+    # already set in scope["state"] by RequestIdMiddleware and the auth dep.
+    # It is a raw ASGI class (not BaseHTTPMiddleware) so streaming is unaffected.
+    app.add_middleware(RequestLoggingMiddleware)  # innermost — added first
     app.add_middleware(RequestIdMiddleware)
     app.add_middleware(CloudflareOriginGuard)
     app.add_middleware(

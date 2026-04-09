@@ -35,7 +35,7 @@ from decimal import Decimal
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -819,12 +819,37 @@ async def admin_rotate_provider_key(
 
 # ── Admin: model pricing ──────────────────────────────────────────────────────
 
+def _per_1m(per_1k: Decimal | None) -> str | None:
+    """Convert a stored per-1K price to per-1M for API responses. Exact Decimal arithmetic."""
+    if per_1k is None:
+        return None
+    return str((per_1k * 1000).quantize(Decimal("0.00000001")))
+
+
+def _resolve_per_1k(per_1k: float | None, per_1m: float | None, field: str) -> Decimal | None:
+    """
+    Resolve the effective per-1K Decimal from either input unit.
+    Converts via str() to avoid binary float imprecision.
+    Raises ValueError if both units are supplied for the same field.
+    """
+    if per_1k is not None and per_1m is not None:
+        raise ValueError(f"Provide {field} in either per-1K or per-1M, not both")
+    if per_1k is not None:
+        return Decimal(str(per_1k))
+    if per_1m is not None:
+        return (Decimal(str(per_1m)) / 1000).quantize(Decimal("0.00000001"))
+    return None
+
+
 class ModelPriceIn(BaseModel):
     model_id: str
     provider: str = "openrouter"
     is_default: bool = False
-    prompt_usd_per_1k: float
-    completion_usd_per_1k: float
+    # Supply price in either per-1K or per-1M — not both for the same field.
+    prompt_usd_per_1k: float | None = None
+    completion_usd_per_1k: float | None = None
+    prompt_usd_per_1m: float | None = None
+    completion_usd_per_1m: float | None = None
     is_free: bool = False
     # What the upstream provider charges us — used to calculate upstream_cost_usd
     # in usage_events for providers that don't report cost in their API response
@@ -832,15 +857,104 @@ class ModelPriceIn(BaseModel):
     # (it reports upstream cost directly in the response).
     upstream_prompt_usd_per_1k: float | None = None
     upstream_completion_usd_per_1k: float | None = None
+    upstream_prompt_usd_per_1m: float | None = None
+    upstream_completion_usd_per_1m: float | None = None
+
+    @model_validator(mode="after")
+    def _validate_pricing_consistency(self) -> "ModelPriceIn":
+        # Reject supplying the same price field in both per-1K and per-1M units.
+        for field, per_1k, per_1m in [
+            ("prompt", self.prompt_usd_per_1k, self.prompt_usd_per_1m),
+            ("completion", self.completion_usd_per_1k, self.completion_usd_per_1m),
+            ("upstream_prompt", self.upstream_prompt_usd_per_1k, self.upstream_prompt_usd_per_1m),
+            ("upstream_completion", self.upstream_completion_usd_per_1k, self.upstream_completion_usd_per_1m),
+        ]:
+            if per_1k is not None and per_1m is not None:
+                raise ValueError(
+                    f"Provide '{field}' price in either per-1K or per-1M, not both"
+                )
+        # Enforce is_free invariant: non-zero explicit prices are forbidden on a free model.
+        if self.is_free:
+            for field, per_1k, per_1m in [
+                ("prompt", self.prompt_usd_per_1k, self.prompt_usd_per_1m),
+                ("completion", self.completion_usd_per_1k, self.completion_usd_per_1m),
+            ]:
+                val = per_1k if per_1k is not None else per_1m
+                if val is not None and val != 0:
+                    raise ValueError(
+                        f"Cannot set non-zero '{field}' price when is_free=True"
+                    )
+        return self
+
+    def resolved_prompt(self) -> Decimal:
+        v = _resolve_per_1k(self.prompt_usd_per_1k, self.prompt_usd_per_1m, "prompt")
+        if v is None:
+            raise ValueError("prompt price is required (provide prompt_usd_per_1k or prompt_usd_per_1m)")
+        return v
+
+    def resolved_completion(self) -> Decimal:
+        v = _resolve_per_1k(self.completion_usd_per_1k, self.completion_usd_per_1m, "completion")
+        if v is None:
+            raise ValueError("completion price is required (provide completion_usd_per_1k or completion_usd_per_1m)")
+        return v
+
+    def resolved_upstream_prompt(self) -> Decimal | None:
+        return _resolve_per_1k(self.upstream_prompt_usd_per_1k, self.upstream_prompt_usd_per_1m, "upstream_prompt")
+
+    def resolved_upstream_completion(self) -> Decimal | None:
+        return _resolve_per_1k(self.upstream_completion_usd_per_1k, self.upstream_completion_usd_per_1m, "upstream_completion")
 
 
 class ModelPriceUpdateIn(BaseModel):
+    # Supply price in either per-1K or per-1M — not both for the same field.
     prompt_usd_per_1k: float | None = None
     completion_usd_per_1k: float | None = None
+    prompt_usd_per_1m: float | None = None
+    completion_usd_per_1m: float | None = None
     is_free: bool | None = None
     is_default: bool | None = None
     upstream_prompt_usd_per_1k: float | None = None
     upstream_completion_usd_per_1k: float | None = None
+    upstream_prompt_usd_per_1m: float | None = None
+    upstream_completion_usd_per_1m: float | None = None
+
+    @model_validator(mode="after")
+    def _validate_dual_units(self) -> "ModelPriceUpdateIn":
+        # Reject supplying the same price field in both per-1K and per-1M units.
+        for field, per_1k, per_1m in [
+            ("prompt", self.prompt_usd_per_1k, self.prompt_usd_per_1m),
+            ("completion", self.completion_usd_per_1k, self.completion_usd_per_1m),
+            ("upstream_prompt", self.upstream_prompt_usd_per_1k, self.upstream_prompt_usd_per_1m),
+            ("upstream_completion", self.upstream_completion_usd_per_1k, self.upstream_completion_usd_per_1m),
+        ]:
+            if per_1k is not None and per_1m is not None:
+                raise ValueError(
+                    f"Provide '{field}' price in either per-1K or per-1M, not both"
+                )
+        # Body-level is_free guard (full enforcement against existing DB row happens in handler).
+        if self.is_free is True:
+            for field, per_1k, per_1m in [
+                ("prompt", self.prompt_usd_per_1k, self.prompt_usd_per_1m),
+                ("completion", self.completion_usd_per_1k, self.completion_usd_per_1m),
+            ]:
+                val = per_1k if per_1k is not None else per_1m
+                if val is not None and val != 0:
+                    raise ValueError(
+                        f"Cannot set non-zero '{field}' price when is_free=True"
+                    )
+        return self
+
+    def resolved_prompt(self) -> Decimal | None:
+        return _resolve_per_1k(self.prompt_usd_per_1k, self.prompt_usd_per_1m, "prompt")
+
+    def resolved_completion(self) -> Decimal | None:
+        return _resolve_per_1k(self.completion_usd_per_1k, self.completion_usd_per_1m, "completion")
+
+    def resolved_upstream_prompt(self) -> Decimal | None:
+        return _resolve_per_1k(self.upstream_prompt_usd_per_1k, self.upstream_prompt_usd_per_1m, "upstream_prompt")
+
+    def resolved_upstream_completion(self) -> Decimal | None:
+        return _resolve_per_1k(self.upstream_completion_usd_per_1k, self.upstream_completion_usd_per_1m, "upstream_completion")
 
 
 class ModelPriceOut(BaseModel):
@@ -849,9 +963,13 @@ class ModelPriceOut(BaseModel):
     is_default: bool
     prompt_usd_per_1k: str
     completion_usd_per_1k: str
+    prompt_usd_per_1m: str
+    completion_usd_per_1m: str
     is_free: bool
     upstream_prompt_usd_per_1k: str | None
     upstream_completion_usd_per_1k: str | None
+    upstream_prompt_usd_per_1m: str | None
+    upstream_completion_usd_per_1m: str | None
     updated_at: str
 
 
@@ -862,9 +980,13 @@ def _to_price_out(p: ModelPrice) -> ModelPriceOut:
         is_default=p.is_default,
         prompt_usd_per_1k=str(p.prompt_usd_per_1k),
         completion_usd_per_1k=str(p.completion_usd_per_1k),
+        prompt_usd_per_1m=_per_1m(p.prompt_usd_per_1k),
+        completion_usd_per_1m=_per_1m(p.completion_usd_per_1k),
         is_free=p.is_free,
         upstream_prompt_usd_per_1k=str(p.upstream_prompt_usd_per_1k) if p.upstream_prompt_usd_per_1k is not None else None,
         upstream_completion_usd_per_1k=str(p.upstream_completion_usd_per_1k) if p.upstream_completion_usd_per_1k is not None else None,
+        upstream_prompt_usd_per_1m=_per_1m(p.upstream_prompt_usd_per_1k),
+        upstream_completion_usd_per_1m=_per_1m(p.upstream_completion_usd_per_1k),
         updated_at=p.updated_at.isoformat(),
     )
 
@@ -907,8 +1029,6 @@ async def create_model_price(
     Setting is_default=true atomically clears the flag on any other provider
     row for this model_id so exactly one default exists per model.
     """
-    from decimal import Decimal
-
     existing = await db.execute(
         select(ModelPrice).where(
             ModelPrice.model_id == body.model_id,
@@ -921,16 +1041,25 @@ async def create_model_price(
     if body.is_default:
         await _clear_default(body.model_id, db)
 
-    up_prompt = Decimal(str(body.upstream_prompt_usd_per_1k)) if body.upstream_prompt_usd_per_1k is not None else None
-    up_completion = Decimal(str(body.upstream_completion_usd_per_1k)) if body.upstream_completion_usd_per_1k is not None else None
+    if body.is_free:
+        # is_free rows must always store zero prices — never retain billable values.
+        effective_prompt = Decimal("0")
+        effective_completion = Decimal("0")
+        up_prompt: Decimal | None = None
+        up_completion: Decimal | None = None
+    else:
+        effective_prompt = body.resolved_prompt()
+        effective_completion = body.resolved_completion()
+        up_prompt = body.resolved_upstream_prompt()
+        up_completion = body.resolved_upstream_completion()
 
     if price is None:
         price = ModelPrice(
             model_id=body.model_id,
             provider=body.provider,
             is_default=body.is_default,
-            prompt_usd_per_1k=Decimal(str(body.prompt_usd_per_1k)),
-            completion_usd_per_1k=Decimal(str(body.completion_usd_per_1k)),
+            prompt_usd_per_1k=effective_prompt,
+            completion_usd_per_1k=effective_completion,
             is_free=body.is_free,
             upstream_prompt_usd_per_1k=up_prompt,
             upstream_completion_usd_per_1k=up_completion,
@@ -938,8 +1067,8 @@ async def create_model_price(
         db.add(price)
     else:
         price.is_default = body.is_default
-        price.prompt_usd_per_1k = Decimal(str(body.prompt_usd_per_1k))
-        price.completion_usd_per_1k = Decimal(str(body.completion_usd_per_1k))
+        price.prompt_usd_per_1k = effective_prompt
+        price.completion_usd_per_1k = effective_completion
         price.is_free = body.is_free
         price.upstream_prompt_usd_per_1k = up_prompt
         price.upstream_completion_usd_per_1k = up_completion
@@ -982,8 +1111,6 @@ async def update_model_price(
     Setting is_default=true atomically clears the flag on any other provider
     row for this model_id.
     """
-    from decimal import Decimal
-
     result = await db.execute(
         select(ModelPrice).where(
             ModelPrice.model_id == model_id,
@@ -997,18 +1124,36 @@ async def update_model_price(
     if body.is_default is not None and body.is_default:
         await _clear_default(model_id, db)
 
-    if body.prompt_usd_per_1k is not None:
-        price.prompt_usd_per_1k = Decimal(str(body.prompt_usd_per_1k))
-    if body.completion_usd_per_1k is not None:
-        price.completion_usd_per_1k = Decimal(str(body.completion_usd_per_1k))
-    if body.is_free is not None:
-        price.is_free = body.is_free
+    resolved_prompt = body.resolved_prompt()
+    resolved_completion = body.resolved_completion()
+    resolved_up_prompt = body.resolved_upstream_prompt()
+    resolved_up_completion = body.resolved_upstream_completion()
+
+    # Determine the effective is_free after applying the patch body.
+    final_is_free = body.is_free if body.is_free is not None else price.is_free
+
+    if final_is_free:
+        # Free rows must never carry billable prices — clear regardless of input.
+        price.prompt_usd_per_1k = Decimal("0")
+        price.completion_usd_per_1k = Decimal("0")
+        price.upstream_prompt_usd_per_1k = None
+        price.upstream_completion_usd_per_1k = None
+    else:
+        if resolved_prompt is not None:
+            price.prompt_usd_per_1k = resolved_prompt
+        if resolved_completion is not None:
+            price.completion_usd_per_1k = resolved_completion
+        if resolved_up_prompt is not None:
+            price.upstream_prompt_usd_per_1k = resolved_up_prompt
+        if resolved_up_completion is not None:
+            price.upstream_completion_usd_per_1k = resolved_up_completion
+        # If any stored price is non-zero ensure is_free stays False.
+        if price.prompt_usd_per_1k > 0 or price.completion_usd_per_1k > 0:
+            final_is_free = False
+
+    price.is_free = final_is_free
     if body.is_default is not None:
         price.is_default = body.is_default
-    if body.upstream_prompt_usd_per_1k is not None:
-        price.upstream_prompt_usd_per_1k = Decimal(str(body.upstream_prompt_usd_per_1k))
-    if body.upstream_completion_usd_per_1k is not None:
-        price.upstream_completion_usd_per_1k = Decimal(str(body.upstream_completion_usd_per_1k))
 
     await db.flush()
     await db.refresh(price)
@@ -1092,9 +1237,9 @@ async def seed_model_prices(
             skipped += 1
             continue
 
-        # Convert per-token → per 1k tokens
-        prompt_per_1k = Decimal(str(round(prompt_per_token * 1000, 8)))
-        completion_per_1k = Decimal(str(round(completion_per_token * 1000, 8)))
+        # Convert per-token → per 1k tokens (Decimal-safe: avoid float * 1000 imprecision)
+        prompt_per_1k = (Decimal(str(prompt_per_token)) * 1000).quantize(Decimal("0.00000001"))
+        completion_per_1k = (Decimal(str(completion_per_token)) * 1000).quantize(Decimal("0.00000001"))
         is_free = prompt_per_token == 0 and completion_per_token == 0
 
         # ── Seed model_prices ──────────────────────────────────────────────

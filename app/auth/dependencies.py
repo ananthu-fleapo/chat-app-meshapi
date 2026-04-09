@@ -25,7 +25,7 @@ import hashlib
 import hmac
 
 import structlog
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,6 +64,7 @@ def _check_active(key: ApiKey, raw_key: str) -> None:
 
 
 async def get_authenticated_key(
+    request: Request,
     authorization: str = Header(..., alias="Authorization"),
     db: AsyncSession = Depends(get_db_session),
 ) -> ApiKey:
@@ -79,6 +80,7 @@ async def get_authenticated_key(
     if cached is not None:
         logger.debug("auth_cache_hit", key_id=str(cached.id), owner=cached.owner)
         _check_active(cached, raw_key)
+        request.state.owner = cached.owner
         return cached
 
     # ── 2. Cache miss → Postgres ──────────────────────────────────────────────
@@ -98,6 +100,11 @@ async def get_authenticated_key(
     # ── 3. Populate cache for next request ────────────────────────────────────
     await set_cached_key(key)
     logger.debug("auth_cache_miss_populated", key_id=str(key.id), owner=key.owner)
+
+    # ── 4. Expose owner to RequestLoggingMiddleware ───────────────────────────
+    # Stored on request.state so the ASGI middleware can include it in the
+    # MongoDB request_log document without re-parsing the auth header.
+    request.state.owner = key.owner
 
     return key
 

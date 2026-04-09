@@ -46,14 +46,25 @@ _MODELS_CACHE_TTL = 300  # 5 minutes
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
 
+def _per_1m(per_1k: Decimal | None) -> str | None:
+    """Convert a per-1K price to per-1M. Pure Decimal arithmetic — no precision loss."""
+    if per_1k is None:
+        return None
+    return str((per_1k * 1000).quantize(Decimal("0.00000001")))
+
+
 class ModelPricing(BaseModel):
     prompt_usd_per_1k: str | None
     completion_usd_per_1k: str | None
+    prompt_usd_per_1m: str | None = None
+    completion_usd_per_1m: str | None = None
     image_usd_per_image: str | None = None
     # Set when caller has an active discount for this model
     discount_pct: str | None = None
     prompt_usd_per_1k_discounted: str | None = None
     completion_usd_per_1k_discounted: str | None = None
+    prompt_usd_per_1m_discounted: str | None = None
+    completion_usd_per_1m_discounted: str | None = None
 
 
 class ModelOut(BaseModel):
@@ -70,11 +81,18 @@ class ModelOut(BaseModel):
 def _row_to_model_out(m: Model, mp: ModelPrice) -> ModelOut:
     """Map a (Model, ModelPrice) ORM pair to the public ModelOut schema."""
     if mp.is_free:
-        pricing = ModelPricing(prompt_usd_per_1k="0", completion_usd_per_1k="0")
+        pricing = ModelPricing(
+            prompt_usd_per_1k="0",
+            completion_usd_per_1k="0",
+            prompt_usd_per_1m="0",
+            completion_usd_per_1m="0",
+        )
     else:
         pricing = ModelPricing(
             prompt_usd_per_1k=str(mp.prompt_usd_per_1k),
             completion_usd_per_1k=str(mp.completion_usd_per_1k),
+            prompt_usd_per_1m=_per_1m(mp.prompt_usd_per_1k),
+            completion_usd_per_1m=_per_1m(mp.completion_usd_per_1k),
         )
 
     return ModelOut(
@@ -202,6 +220,8 @@ async def _apply_discounts(
         m.pricing.discount_pct = str(pct)
         m.pricing.prompt_usd_per_1k_discounted = _discounted(m.pricing.prompt_usd_per_1k)
         m.pricing.completion_usd_per_1k_discounted = _discounted(m.pricing.completion_usd_per_1k)
+        m.pricing.prompt_usd_per_1m_discounted = _discounted(m.pricing.prompt_usd_per_1m)
+        m.pricing.completion_usd_per_1m_discounted = _discounted(m.pricing.completion_usd_per_1m)
         result.append(m)
 
     return result

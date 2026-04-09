@@ -6,30 +6,35 @@ Design principles
 1. Never blocks the request path — always called via asyncio.create_task().
 2. Opens its own DB session — the request session is already closed by the
    time the background task runs (especially for streaming responses).
-3. Silently swallows all errors — usage logging must never take the API down.
-   Failed events are logged at ERROR level for manual recovery if needed.
+3. Postgres write is best-effort — failure is caught, logged, and does NOT
+   block MongoDB write or balance deduction.
+4. MongoDB is always written — immune to schema migrations. Provides a
+   durable fallback when Postgres is unavailable or schema is behind.
+5. Balance deduction is always attempted — NOT gated on Postgres success.
+   Failures are logged to MongoDB balance_failures for manual recovery.
 
-Cost resolution (Phase 6 update)
----------------------------------
-The primary cost source is now ``upstream_cost`` — the ``usage.cost`` field
-returned directly by OpenRouter in every response.  This is the actual USD
-amount charged, including any cache discounts or surcharges applied by the
-upstream provider.
-
-The static pricing table (``app/usage/pricing.py``) is kept as a fallback
-for cases where the upstream omits the cost field (older model versions or
-non-OpenRouter adapters).
+Cost resolution
+---------------
+Primary:  upstream_cost from the provider's response (OpenRouter reports cost directly).
+Fallback: our model_prices table (upstream_*_usd_per_1k) for providers that don't
+          report cost (Vertex AI, Bedrock, OpenAI Direct, Qwen).
+Last:     static pricing table in app/usage/pricing.py.
 
 fire_usage_log(**kwargs)
     The only call-site function. Schedules log_usage_event() as a background
     task in the running event loop.
 
 log_usage_event(**kwargs)
-    Async coroutine: resolves cost, writes one UsageEvent row, commits.
+    Async coroutine:
+      1. Resolves cost (our price to user).
+      2. Writes to Postgres usage_events (best-effort).
+      3. Always writes to MongoDB usage_events.
+      4. Always attempts balance deduction; logs failures to MongoDB.
 """
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
 import structlog
@@ -108,6 +113,63 @@ async def _our_cost(
     return calculate_cost(model, prompt_tokens, completion_tokens)
 
 
+async def _deduct_with_fallback(
+    *,
+    owner: str,
+    model: str,
+    cost: Decimal,
+    request_id: str,
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+    provider: str,
+    status: str,
+) -> None:
+    """
+    Attempt balance deduction. On failure, persist to MongoDB balance_failures
+    so the unbilled amount can be identified and replayed manually.
+
+    Never raises — deduction failure must not affect the response or caller.
+    """
+    from app.usage.balance import deduct_balance
+    try:
+        await deduct_balance(owner, cost)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "balance_deduction_failed",
+            owner=owner,
+            model=model,
+            cost_usd=str(cost),
+            request_id=request_id,
+            error=str(exc),
+        )
+        # Persist to MongoDB so ops can replay the deduction
+        try:
+            from app.db.mongo import get_mongo_db, is_mongo_available
+            if is_mongo_available():
+                await get_mongo_db().balance_failures.insert_one({
+                    "ts": datetime.now(UTC),
+                    "owner": owner,
+                    "model": model,
+                    "provider": provider,
+                    "cost_usd": float(cost),
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "request_id": request_id,
+                    "status": status,
+                    "error": str(exc),
+                    "replayed": False,
+                })
+        except Exception as mongo_exc:  # noqa: BLE001
+            # Both Postgres and Mongo failed — structured log is the last resort
+            logger.error(
+                "balance_failure_log_mongo_failed",
+                owner=owner,
+                cost_usd=str(cost),
+                request_id=request_id,
+                error=str(mongo_exc),
+            )
+
+
 async def log_usage_event(
     *,
     key_id: str,
@@ -120,7 +182,7 @@ async def log_usage_event(
     prompt_tokens: int | None,
     completion_tokens: int | None,
     cached_tokens: int | None = None,
-    upstream_cost: float | None = None,   # usage.cost from OpenRouter — stored for reconciliation, not used for billing
+    upstream_cost: float | None = None,   # usage.cost from OpenRouter — reconciliation only
     latency_ms: int,
     status: str,                           # "success" | "error"
     error_code: str | None = None,
@@ -132,7 +194,6 @@ async def log_usage_event(
         total_tokens = prompt_tokens + completion_tokens
 
     # ── Cost resolution — use our model_prices (what we charge the user) ──────
-    # Falls back to static table, then None.
     if prompt_tokens is not None and completion_tokens is not None:
         cost = await _our_cost(model, prompt_tokens, completion_tokens)
 
@@ -147,8 +208,7 @@ async def log_usage_event(
         except Exception as exc:  # noqa: BLE001
             logger.warning("discount_lookup_failed", owner=owner, model=model, error=str(exc))
 
-    # Resolve upstream cost: use what the provider reported (OpenRouter), or
-    # calculate from our manually configured upstream rates (all other providers).
+    # ── Upstream cost (for reconciliation, not billing) ───────────────────────
     upstream_cost_decimal: Decimal | None
     if upstream_cost is not None:
         upstream_cost_decimal = Decimal(str(upstream_cost)).quantize(Decimal("0.00000001"))
@@ -157,8 +217,9 @@ async def log_usage_event(
     else:
         upstream_cost_decimal = None
 
+    # ── 1. Postgres write (best-effort) ───────────────────────────────────────
+    postgres_ok = False
     try:
-
         async with get_session_factory()() as session:
             event = UsageEvent(
                 key_id=uuid.UUID(key_id),
@@ -179,32 +240,64 @@ async def log_usage_event(
             )
             session.add(event)
             await session.commit()
-
-        logger.debug(
-            "usage_logged",
-            key_id=key_id,
-            model=model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            cached_tokens=cached_tokens,
-            cost_usd=str(cost) if cost is not None else None,
-            upstream_cost_usd=str(upstream_cost_decimal) if upstream_cost_decimal is not None else None,
-            latency_ms=latency_ms,
-            status=status,
-        )
-
-    except Exception as exc:
-        # Must never propagate — a DB blip should not affect response delivery.
+        postgres_ok = True
+    except Exception as exc:  # noqa: BLE001
         logger.error(
-            "usage_log_failed",
+            "usage_log_postgres_failed",
             error=str(exc),
             key_id=key_id,
             request_id=request_id,
             model=model,
+            cost_usd=str(cost) if cost is not None else None,
         )
-        return
 
-    # ── Prometheus metrics ────────────────────────────────────────────────────
+    # ── 2. MongoDB write (always, regardless of Postgres result) ──────────────
+    try:
+        from app.db.mongo import get_mongo_db, is_mongo_available
+        if is_mongo_available():
+            await get_mongo_db().usage_events.insert_one({
+                "_id": request_id,
+                "ts": datetime.now(UTC),
+                "key_id": key_id,
+                "owner": owner,
+                "model": model,
+                "provider": provider,
+                "template_id": template_id,
+                "stream": stream,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "cached_tokens": cached_tokens,
+                "cost_usd": float(cost) if cost is not None else None,
+                "upstream_cost_usd": float(upstream_cost_decimal) if upstream_cost_decimal is not None else None,
+                "latency_ms": latency_ms,
+                "status": status,
+                "error_code": error_code,
+                "postgres_written": postgres_ok,
+            })
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "usage_log_mongo_failed",
+            error=str(exc),
+            request_id=request_id,
+            model=model,
+        )
+
+    logger.debug(
+        "usage_logged",
+        key_id=key_id,
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cached_tokens=cached_tokens,
+        cost_usd=str(cost) if cost is not None else None,
+        upstream_cost_usd=str(upstream_cost_decimal) if upstream_cost_decimal is not None else None,
+        latency_ms=latency_ms,
+        status=status,
+        postgres_ok=postgres_ok,
+    )
+
+    # ── 3. Prometheus metrics ─────────────────────────────────────────────────
     try:
         from app.metrics import record_inference
         record_inference(
@@ -218,11 +311,20 @@ async def log_usage_event(
     except Exception:  # noqa: BLE001
         pass  # metrics must never affect the response path
 
-    # ── Deduct from user balance (post-deduction model) ───────────────────────
-    # Only deduct on success with a known cost. Errors are not billed.
+    # ── 4. Balance deduction (always attempted, independent of Postgres) ──────
+    # Deduction is skipped for: errors, zero-cost, free models (cost == 0).
+    # On failure: logged to MongoDB balance_failures for manual recovery.
     if status == "success" and cost is not None and cost > 0:
-        from app.usage.balance import deduct_balance
-        await deduct_balance(owner, cost)
+        await _deduct_with_fallback(
+            owner=owner,
+            model=model,
+            cost=cost,
+            request_id=request_id,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            provider=provider,
+            status=status,
+        )
 
 
 def fire_usage_log(*, owner: str, provider: str = "openrouter", **kwargs) -> None:

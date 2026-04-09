@@ -102,8 +102,12 @@ class TestGetAuthenticatedKey:
         cached_key.id = uuid.uuid4()
         cached_key.owner = "acme"
 
+        mock_request = MagicMock()
+        mock_request.state = MagicMock()
+
         with patch("app.auth.dependencies.get_cached_key", AsyncMock(return_value=cached_key)):
             result = await get_authenticated_key(
+                request=mock_request,
                 authorization="Bearer validtoken",
                 db=mock_db,
             )
@@ -122,9 +126,13 @@ class TestGetAuthenticatedKey:
         db_key.key_hash = "somehash"
         mock_db.execute.return_value = make_execute_result(scalar=db_key)
 
+        mock_request = MagicMock()
+        mock_request.state = MagicMock()
+
         with patch("app.auth.dependencies.get_cached_key", AsyncMock(return_value=None)), \
              patch("app.auth.dependencies.set_cached_key", AsyncMock()) as mock_set:
             result = await get_authenticated_key(
+                request=mock_request,
                 authorization="Bearer validtoken",
                 db=mock_db,
             )
@@ -138,10 +146,14 @@ class TestGetAuthenticatedKey:
 
         mock_db.execute.return_value = make_execute_result(scalar=None)
 
+        mock_request = MagicMock()
+        mock_request.state = MagicMock()
+
         with patch("app.auth.dependencies.get_cached_key", AsyncMock(return_value=None)), \
              patch("app.metrics.AUTH_FAILURES", MagicMock()):
             with pytest.raises(UnauthorizedError):
                 await get_authenticated_key(
+                    request=mock_request,
                     authorization="Bearer unknowntoken",
                     db=mock_db,
                 )
@@ -156,11 +168,15 @@ class TestGetAuthenticatedKey:
         db_key.owner = "acme"
         mock_db.execute.return_value = make_execute_result(scalar=db_key)
 
+        mock_request = MagicMock()
+        mock_request.state = MagicMock()
+
         with patch("app.auth.dependencies.get_cached_key", AsyncMock(return_value=None)), \
              patch("app.auth.dependencies.set_cached_key", AsyncMock()), \
              patch("app.metrics.AUTH_FAILURES", MagicMock()):
             with pytest.raises(ForbiddenError):
                 await get_authenticated_key(
+                    request=mock_request,
                     authorization="Bearer validtoken",
                     db=mock_db,
                 )
@@ -174,10 +190,14 @@ class TestGetAuthenticatedKey:
         cached_key.id = uuid.uuid4()
         cached_key.owner = "acme"
 
+        mock_request = MagicMock()
+        mock_request.state = MagicMock()
+
         with patch("app.auth.dependencies.get_cached_key", AsyncMock(return_value=cached_key)), \
              patch("app.metrics.AUTH_FAILURES", MagicMock()):
             with pytest.raises(ForbiddenError):
                 await get_authenticated_key(
+                    request=mock_request,
                     authorization="Bearer validtoken",
                     db=mock_db,
                 )
