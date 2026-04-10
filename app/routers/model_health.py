@@ -15,10 +15,12 @@ Cloud Scheduler config:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import time
 from datetime import UTC, datetime
 
 import structlog
+import structlog.contextvars
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
@@ -48,6 +50,8 @@ class ModelHealthResult(BaseModel):
     status: str          # "pass" | "fail" | "timeout"
     latency_ms: int
     error: str | None = None
+    provider: str | None = None
+    upstream_status: int | None = None
 
 
 class ModelHealthResponse(BaseModel):
@@ -66,13 +70,25 @@ async def _test_model(model_id: str) -> ModelHealthResult:
 
     Opens its own DB session for provider routing so it is safe to run
     concurrently with other _test_model calls via asyncio.gather.
+
+    Binds per-model structlog context vars (model_id, provider,
+    provider_model_id) so every log line carries them automatically.
+    The caller schedules this via asyncio.create_task(context=...) so
+    each task gets an isolated copy of the context, preventing cross-task
+    bleed when running concurrently.
     """
+    structlog.contextvars.bind_contextvars(model_id=model_id)
+
     start = time.monotonic()
+    provider: str | None = None
+    provider_model_id: str | None = None
+    request: ChatCompletionRequest | None = None
     try:
         async with get_session_factory()() as session:
             provider, provider_model_id = await resolve_routing(model_id, session)
             # Resolve the system-default upstream key (db=None skips per-owner lookup)
             api_key = await resolve_upstream_key(owner="health-check", provider=provider, db=None)
+        structlog.contextvars.bind_contextvars(provider=provider, provider_model_id=provider_model_id)
         adapter = get_adapter(provider)
         request = ChatCompletionRequest(
             model=model_id,
@@ -88,19 +104,46 @@ async def _test_model(model_id: str) -> ModelHealthResult:
             model_id=model_id,
             status="pass",
             latency_ms=int((time.monotonic() - start) * 1000),
+            provider=provider,
         )
     except asyncio.TimeoutError:
         latency_ms = int((time.monotonic() - start) * 1000)
-        logger.warning("model_health_timeout", model_id=model_id, latency_ms=latency_ms)
-        return ModelHealthResult(model_id=model_id, status="timeout", latency_ms=latency_ms)
+        logger.warning(
+            "model_health_timeout",
+            timeout_s=_TIMEOUT_S,
+            latency_ms=latency_ms,
+            request_messages=[m.model_dump() for m in _TEST_MESSAGES],
+            request_max_tokens=_MAX_TOKENS,
+            request_stream=False,
+        )
+        return ModelHealthResult(model_id=model_id, status="timeout", latency_ms=latency_ms, provider=provider)
     except Exception as exc:
         latency_ms = int((time.monotonic() - start) * 1000)
+        cause = getattr(exc, "__cause__", None)
+        upstream_status = getattr(getattr(cause, "response", None), "status_code", None)
+        upstream_body = getattr(getattr(cause, "response", None), "text", None)
+        if upstream_body:
+            upstream_body = upstream_body[:300]
         logger.exception(
-        "model_health_fail",
-        model_id=model_id,
-        latency_ms=latency_ms
-       )
-        return ModelHealthResult(model_id=model_id, status="fail", latency_ms=latency_ms, error=str(exc))
+            "model_health_fail",
+            latency_ms=latency_ms,
+            exc_type=type(exc).__name__,
+            error=str(exc),
+            upstream_status=upstream_status,
+            upstream_body=upstream_body,
+            request_messages=[m.model_dump() for m in _TEST_MESSAGES],
+            request_max_tokens=_MAX_TOKENS,
+            request_stream=False,
+            request_schema=request.model_dump() if request else None,
+        )
+        return ModelHealthResult(
+            model_id=model_id,
+            status="fail",
+            latency_ms=latency_ms,
+            error=str(exc),
+            provider=provider,
+            upstream_status=upstream_status,
+        )
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -129,11 +172,16 @@ async def run_model_health(
     while queue:
         batch = queue[:_CONCURRENCY]
         queue = queue[_CONCURRENCY:]
-        batch_results = await asyncio.gather(*[_test_model(mid) for mid in batch])
+        batch_results = await asyncio.gather(*[
+            asyncio.create_task(_test_model(mid), context=contextvars.copy_context())
+            for mid in batch
+        ])
         results.extend(batch_results)
 
     passed = [r for r in results if r.status == "pass"]
     failed = [r for r in results if r.status != "pass"]
+    timeouts = [r for r in results if r.status == "timeout"]
+    pure_fails = [r for r in results if r.status == "fail"]
     total = len(results)
     pass_rate = f"{(len(passed) / total * 100):.1f}%" if total else "0.0%"
     avg_latency = (
@@ -144,16 +192,24 @@ async def run_model_health(
         "model_health_check_completed",
         total=total,
         passed=len(passed),
-        failed=len(failed),
+        failed=len(pure_fails),
+        timeouts=len(timeouts),
         avg_latency_ms=avg_latency,
     )
 
     failed_message: str | None = None
     if failed:
-        lines = [
-            f"• `{r.model_id}` [{r.status}]: {r.error or 'no response'}"
-            for r in failed
-        ]
+        lines = []
+        for r in failed:
+            detail = ""
+            if r.provider:
+                detail = f" {r.provider}"
+                if r.upstream_status:
+                    detail += f" → HTTP {r.upstream_status}"
+            if r.status == "timeout":
+                detail += f" ({_TIMEOUT_S}s timeout)"
+            err_str = f": {r.error}" if r.error and r.status != "timeout" else ""
+            lines.append(f"• `{r.model_id}` [{r.status}]{detail}{err_str}")
         failed_message = "\n".join(lines)
 
     await send_slack_alert(
@@ -162,6 +218,8 @@ async def run_model_health(
             {"label": "Timestamp", "value": datetime.now(UTC).isoformat()},
             {"label": "Pass Rate", "value": pass_rate},
             {"label": "Avg Latency (passing)", "value": f"{avg_latency}ms"},
+            {"label": "Failures", "value": str(len(pure_fails))},
+            {"label": "Timeouts", "value": str(len(timeouts))},
         ],
         message=failed_message,
         notify_here=bool(failed),
