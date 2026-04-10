@@ -178,6 +178,10 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         # ── Request ID ────────────────────────────────────────────────────────
         request_id = request.headers.get("X-Request-Id") or f"req_{ULID()}"
         request.state.request_id = request_id
+        # Also store directly on the scope dict so raw ASGI middleware
+        # (RequestLoggingMiddleware) can read it without going through
+        # scope["state"], which BaseHTTPMiddleware may not propagate reliably.
+        request.scope["_request_id"] = request_id
 
         # ── Cloud Trace context ───────────────────────────────────────────────
         # Cloud Run automatically injects X-Cloud-Trace-Context on every
@@ -267,9 +271,19 @@ class RequestLoggingMiddleware:
         path = scope.get("path", "")
 
         # Skip noisy health/metrics endpoints
-        if path in _REQUEST_LOG_SKIP or not is_mongo_available():
+        if path in _REQUEST_LOG_SKIP:
             await self.app(scope, receive, send)
             return
+        if not is_mongo_available():
+            logger.warning("request_log_skipped_no_mongo", path=path)
+            await self.app(scope, receive, send)
+            return
+
+        # ── Capture request_id early ──────────────────────────────────────────
+        # Read from scope["_request_id"] set directly by RequestIdMiddleware,
+        # NOT from scope["state"] which BaseHTTPMiddleware doesn't propagate
+        # reliably to inner raw ASGI middleware.
+        request_id: str = scope.get("_request_id") or f"req_{ULID()}"
 
         # ── Decode request headers once ───────────────────────────────────────
         raw_headers: dict[str, str] = {
@@ -301,6 +315,8 @@ class RequestLoggingMiddleware:
         async def send_wrapper(message: Message) -> None:
             nonlocal status_code, response_headers
 
+            logger.debug("request_log_send_message", path=path, msg_type=message["type"])
+
             if message["type"] == "http.response.start":
                 status_code = message.get("status", 0)
                 response_headers = {
@@ -313,13 +329,27 @@ class RequestLoggingMiddleware:
                 if chunk:
                     response_chunks.append(chunk)
 
-                if not message.get("more_body", False):
+                more_body = message.get("more_body", False)
+                logger.debug(
+                    "request_log_body_chunk",
+                    path=path,
+                    chunk_len=len(chunk),
+                    more_body=more_body,
+                )
+                if not more_body:
                     # Last byte sent — schedule MongoDB write in background
                     latency_ms = int((time.monotonic() - start_time) * 1000)
-                    state = scope.get("state")
-                    request_id = getattr(state, "request_id", None) or f"req_{ULID()}"
-                    owner = getattr(state, "owner", None)
+                    # request_id captured at __call__ entry (see above).
+                    # owner is set by the auth dep during request processing,
+                    # so read it here after the route handler has run.
+                    owner = getattr(scope.get("state"), "owner", None)
 
+                    logger.debug(
+                        "request_log_scheduling",
+                        path=path,
+                        request_id=request_id,
+                        status_code=status_code,
+                    )
                     asyncio.create_task(
                         _write_request_log(
                             request_id=request_id,
@@ -366,6 +396,13 @@ async def _write_request_log(
     Persist one request/response document to MongoDB request_logs collection.
     All errors are caught and logged — must never affect the request path.
     """
+    logger.debug(
+        "request_log_attempt",
+        request_id=request_id,
+        method=method,
+        path=path,
+        status_code=status_code,
+    )
     try:
         from app.db.mongo import get_mongo_db
 
@@ -423,6 +460,7 @@ async def _write_request_log(
 
         db = get_mongo_db()
         await db.request_logs.insert_one(doc)
+        logger.debug("request_log_inserted", request_id=request_id)
 
     except Exception as exc:  # noqa: BLE001
         logger.error("request_log_mongo_failed", request_id=request_id, error=str(exc))
