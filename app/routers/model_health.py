@@ -38,16 +38,16 @@ logger = structlog.get_logger()
 router = APIRouter(tags=["model-health"])
 
 _CONCURRENCY = 5
-_TIMEOUT_S = 20.0
+_TIMEOUT_S = 60.0
 _TEST_MESSAGES = [Message(role="user", content="Say hi")]
-_MAX_TOKENS = 10
+_MAX_TOKENS = 1024
 
 
 # ── Response schema ───────────────────────────────────────────────────────────
 
 class ModelHealthResult(BaseModel):
     model_id: str
-    status: str          # "pass" | "fail" | "timeout"
+    status: str          # "pass" | "fail" | "timeout" | "degraded"
     latency_ms: int
     error: str | None = None
     provider: str | None = None
@@ -124,7 +124,11 @@ async def _test_model(model_id: str) -> ModelHealthResult:
         upstream_body = getattr(getattr(cause, "response", None), "text", None)
         if upstream_body:
             upstream_body = upstream_body[:300]
-        logger.exception(
+        # 429 = model exists and works, provider is just rate-limiting the health check.
+        # Report as "degraded" so it doesn't page alongside genuine failures.
+        status = "degraded" if upstream_status == 429 else "fail"
+        log_fn = logger.warning if status == "degraded" else logger.exception
+        log_fn(
             "model_health_fail",
             latency_ms=latency_ms,
             exc_type=type(exc).__name__,
@@ -138,7 +142,7 @@ async def _test_model(model_id: str) -> ModelHealthResult:
         )
         return ModelHealthResult(
             model_id=model_id,
-            status="fail",
+            status=status,
             latency_ms=latency_ms,
             error=str(exc),
             provider=provider,
@@ -179,9 +183,11 @@ async def run_model_health(
         results.extend(batch_results)
 
     passed = [r for r in results if r.status == "pass"]
-    failed = [r for r in results if r.status != "pass"]
     timeouts = [r for r in results if r.status == "timeout"]
     pure_fails = [r for r in results if r.status == "fail"]
+    degraded = [r for r in results if r.status == "degraded"]
+    # "not working" = genuine failures + timeouts; degraded (429) excluded
+    not_working = pure_fails + timeouts
     total = len(results)
     pass_rate = f"{(len(passed) / total * 100):.1f}%" if total else "0.0%"
     avg_latency = (
@@ -192,15 +198,18 @@ async def run_model_health(
         "model_health_check_completed",
         total=total,
         passed=len(passed),
+        degraded=len(degraded),
         failed=len(pure_fails),
         timeouts=len(timeouts),
         avg_latency_ms=avg_latency,
     )
 
+    # Build Slack message — group by status for clarity
+    non_passing = not_working + degraded
     failed_message: str | None = None
-    if failed:
+    if non_passing:
         lines = []
-        for r in failed:
+        for r in non_passing:
             detail = ""
             if r.provider:
                 detail = f" {r.provider}"
@@ -208,7 +217,7 @@ async def run_model_health(
                     detail += f" → HTTP {r.upstream_status}"
             if r.status == "timeout":
                 detail += f" ({_TIMEOUT_S}s timeout)"
-            err_str = f": {r.error}" if r.error and r.status != "timeout" else ""
+            err_str = f": {r.error}" if r.error and r.status not in ("timeout", "degraded") else ""
             lines.append(f"• `{r.model_id}` [{r.status}]{detail}{err_str}")
         failed_message = "\n".join(lines)
 
@@ -220,15 +229,16 @@ async def run_model_health(
             {"label": "Avg Latency (passing)", "value": f"{avg_latency}ms"},
             {"label": "Failures", "value": str(len(pure_fails))},
             {"label": "Timeouts", "value": str(len(timeouts))},
+            {"label": "Degraded (rate-limited)", "value": str(len(degraded))},
         ],
         message=failed_message,
-        notify_here=bool(failed),
+        notify_here=bool(not_working),  # only page for genuine failures/timeouts, not 429s
     )
 
     return ModelHealthResponse(
         total=total,
         passed=len(passed),
-        failed=len(failed),
+        failed=len(not_working),
         pass_rate=pass_rate,
         avg_latency_ms=avg_latency,
         results=results,
