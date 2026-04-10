@@ -202,10 +202,11 @@ async def _apply_discounts(
             result.append(m)
             continue
 
-        pct = model_discounts.get(m.id) or account_discount
-        if pct is None:
+        candidates = [v for v in [model_discounts.get(m.id), account_discount] if v is not None]
+        if not candidates:
             result.append(m)
             continue
+        pct = max(candidates)
 
         multiplier = 1 - pct / 100
 

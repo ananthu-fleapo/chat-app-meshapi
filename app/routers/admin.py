@@ -36,7 +36,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, model_validator
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from ulid import ULID
@@ -1343,9 +1343,14 @@ class ModelRegistryOut(BaseModel):
     created_at: str
     updated_at: str
     prices: list[ModelPriceOut] = []
+    max_discount_pct: str | None = None
 
 
-def _to_model_out(m: Model, prices: list[ModelPrice] | None = None) -> ModelRegistryOut:
+def _to_model_out(
+    m: Model,
+    prices: list[ModelPrice] | None = None,
+    max_discount_pct: str | None = None,
+) -> ModelRegistryOut:
     return ModelRegistryOut(
         model_id=m.model_id,
         name=m.name,
@@ -1356,6 +1361,7 @@ def _to_model_out(m: Model, prices: list[ModelPrice] | None = None) -> ModelRegi
         created_at=m.created_at.isoformat(),
         updated_at=m.updated_at.isoformat(),
         prices=[_to_price_out(p) for p in (prices or [])],
+        max_discount_pct=max_discount_pct,
     )
 
 
@@ -1407,7 +1413,37 @@ async def list_models_admin(
             models_map[m.model_id] = (m, [])
         if mp is not None:
             models_map[m.model_id][1].append(mp)
-    return [_to_model_out(m, prices) for m, prices in models_map.values()]
+
+    now = datetime.now(timezone.utc)
+    active_filter = [
+        Discount.is_active.is_(True),
+        Discount.valid_from <= now,
+        or_(Discount.valid_until.is_(None), Discount.valid_until > now),
+    ]
+
+    # Max discount per specific model
+    model_rows = await db.execute(
+        select(Discount.model_id, func.max(Discount.discount_pct).label("max_pct"))
+        .where(Discount.model_id.is_not(None), *active_filter)
+        .group_by(Discount.model_id)
+    )
+    max_discounts: dict[str, Decimal] = {r.model_id: r.max_pct for r in model_rows.all()}
+
+    # Max account-level discount (no model_id) — applies to every model
+    account_row = await db.execute(
+        select(func.max(Discount.discount_pct).label("max_pct"))
+        .where(Discount.model_id.is_(None), *active_filter)
+    )
+    global_max: Decimal | None = account_row.scalar_one_or_none()
+
+    def _best(model_id: str) -> str | None:
+        candidates = [v for v in [max_discounts.get(model_id), global_max] if v is not None]
+        return str(max(candidates)) if candidates else None
+
+    return [
+        _to_model_out(m, prices, max_discount_pct=_best(m.model_id))
+        for m, prices in models_map.values()
+    ]
 
 
 @router.patch("/models/{model_id:path}", response_model=ModelRegistryOut)
