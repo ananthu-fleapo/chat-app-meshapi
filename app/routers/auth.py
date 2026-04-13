@@ -62,9 +62,20 @@ def _supabase_headers() -> dict[str, str]:
     }
 
 
+_DEV_ALLOWED_DOMAINS = {"fleapo.com", "tagmango.com", "aifiesta.ai", "meshapi.ai"}
+
+
 def _check_supabase_configured() -> None:
     if not settings.supabase_url or not settings.supabase_anon_key:
         raise HTTPException(status_code=503, detail="Auth service not configured")
+
+
+def _check_email_allowed(email: str) -> None:
+    if settings.env != "dev":
+        return
+    domain = email.rsplit("@", 1)[-1].lower()
+    if domain not in _DEV_ALLOWED_DOMAINS:
+        raise HTTPException(status_code=403, detail="Email domain not allowed in dev environment")
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -76,6 +87,7 @@ async def send_otp(body: SendOtpRequest) -> dict[str, str]:
     Creates the user in Supabase if they don't exist yet.
     """
     _check_supabase_configured()
+    _check_email_allowed(body.email)
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -108,6 +120,7 @@ async def verify_otp(
     - Upserts the User record in the local DB.
     """
     _check_supabase_configured()
+    _check_email_allowed(body.email)
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
