@@ -876,6 +876,9 @@ class ModelPriceIn(BaseModel):
     upstream_completion_usd_per_1k: float | None = None
     upstream_prompt_usd_per_1m: float | None = None
     upstream_completion_usd_per_1m: float | None = None
+    supports_thinking: bool = False
+    supports_completions_api: bool = True
+    supports_responses_api: bool = False
 
     @model_validator(mode="after")
     def _validate_pricing_consistency(self) -> "ModelPriceIn":
@@ -934,6 +937,9 @@ class ModelPriceUpdateIn(BaseModel):
     upstream_completion_usd_per_1k: float | None = None
     upstream_prompt_usd_per_1m: float | None = None
     upstream_completion_usd_per_1m: float | None = None
+    supports_thinking: bool | None = None
+    supports_completions_api: bool | None = None
+    supports_responses_api: bool | None = None
 
     @model_validator(mode="after")
     def _validate_dual_units(self) -> "ModelPriceUpdateIn":
@@ -987,6 +993,9 @@ class ModelPriceOut(BaseModel):
     upstream_completion_usd_per_1k: str | None
     upstream_prompt_usd_per_1m: str | None
     upstream_completion_usd_per_1m: str | None
+    supports_thinking: bool
+    supports_completions_api: bool
+    supports_responses_api: bool
     updated_at: str
 
 
@@ -999,6 +1008,9 @@ def _to_price_out(p: ModelPrice) -> ModelPriceOut:
         completion_usd_per_1k=str(p.completion_usd_per_1k),
         prompt_usd_per_1m=_per_1m(p.prompt_usd_per_1k),
         completion_usd_per_1m=_per_1m(p.completion_usd_per_1k),
+        supports_thinking=p.supports_thinking,
+        supports_completions_api=p.supports_completions_api,
+        supports_responses_api=p.supports_responses_api,
         is_free=p.is_free,
         upstream_prompt_usd_per_1k=str(p.upstream_prompt_usd_per_1k) if p.upstream_prompt_usd_per_1k is not None else None,
         upstream_completion_usd_per_1k=str(p.upstream_completion_usd_per_1k) if p.upstream_completion_usd_per_1k is not None else None,
@@ -1080,6 +1092,9 @@ async def create_model_price(
             is_free=body.is_free,
             upstream_prompt_usd_per_1k=up_prompt,
             upstream_completion_usd_per_1k=up_completion,
+            supports_thinking=body.supports_thinking,
+            supports_completions_api=body.supports_completions_api,
+            supports_responses_api=body.supports_responses_api,
         )
         db.add(price)
     else:
@@ -1089,6 +1104,9 @@ async def create_model_price(
         price.is_free = body.is_free
         price.upstream_prompt_usd_per_1k = up_prompt
         price.upstream_completion_usd_per_1k = up_completion
+        price.supports_thinking = body.supports_thinking
+        price.supports_completions_api = body.supports_completions_api
+        price.supports_responses_api = body.supports_responses_api
 
     await db.flush()
     await db.refresh(price)
@@ -1204,6 +1222,12 @@ async def update_model_price(
     price.is_free = final_is_free
     if body.is_default is not None:
         price.is_default = body.is_default
+    if body.supports_thinking is not None:
+        price.supports_thinking = body.supports_thinking
+    if body.supports_completions_api is not None:
+        price.supports_completions_api = body.supports_completions_api
+    if body.supports_responses_api is not None:
+        price.supports_responses_api = body.supports_responses_api
 
     await db.flush()
     await db.refresh(price)
@@ -1361,9 +1385,6 @@ class ModelIn(BaseModel):
     context_length: int | None = None
     description: str | None = None
     is_enabled: bool = True
-    supports_thinking: bool = False
-    supports_completions_api: bool = True
-    supports_responses_api: bool = False
 
 
 class ModelUpdateIn(BaseModel):
@@ -1371,9 +1392,6 @@ class ModelUpdateIn(BaseModel):
     context_length: int | None = None
     description: str | None = None
     is_enabled: bool | None = None
-    supports_thinking: bool | None = None
-    supports_completions_api: bool | None = None
-    supports_responses_api: bool | None = None
 
 
 class ModelRegistryOut(BaseModel):
@@ -1383,9 +1401,6 @@ class ModelRegistryOut(BaseModel):
     context_length: int | None
     description: str | None
     is_enabled: bool
-    supports_thinking: bool
-    supports_completions_api: bool
-    supports_responses_api: bool
     created_at: str
     updated_at: str
     prices: list[ModelPriceOut] = []
@@ -1404,9 +1419,6 @@ def _to_model_out(
         context_length=m.context_length,
         description=m.description,
         is_enabled=m.is_enabled,
-        supports_thinking=m.supports_thinking,
-        supports_completions_api=m.supports_completions_api,
-        supports_responses_api=m.supports_responses_api,
         created_at=m.created_at.isoformat(),
         updated_at=m.updated_at.isoformat(),
         prices=[_to_price_out(p) for p in (prices or [])],
@@ -1437,9 +1449,6 @@ async def create_model(
         context_length=body.context_length,
         description=body.description,
         is_enabled=body.is_enabled,
-        supports_thinking=body.supports_thinking,
-        supports_completions_api=body.supports_completions_api,
-        supports_responses_api=body.supports_responses_api,
     )
     db.add(model)
     await db.flush()
@@ -1523,12 +1532,6 @@ async def update_model(
         model.description = body.description
     if body.is_enabled is not None:
         model.is_enabled = body.is_enabled
-    if body.supports_thinking is not None:
-        model.supports_thinking = body.supports_thinking
-    if body.supports_completions_api is not None:
-        model.supports_completions_api = body.supports_completions_api
-    if body.supports_responses_api is not None:
-        model.supports_responses_api = body.supports_responses_api
 
     await db.flush()
     await db.refresh(model)

@@ -22,7 +22,7 @@ from app.auth.config_resolver import resolve_config
 from app.auth.dependencies import get_authenticated_key
 from app.cache.rate_limiter import check_free_model_rate_limits, check_rate_limits
 from app.config import settings
-from app.db.models import ApiKey, Model
+from app.db.models import ApiKey, ModelPrice
 from app.db.session import get_db_session
 from app.exceptions import ModelCapabilityError
 from app.providers.key_resolver import resolve_upstream_key
@@ -82,11 +82,6 @@ async def chat_completions(
     # Must happen before balance check so we have the final resolved model name.
     body = resolve_config(raw_body, key, template, rendered_messages)
 
-    # ── Capability check: model must support chat/completions ─────────────────
-    _model_row = await db.get(Model, body.model)
-    if _model_row is not None and not _model_row.supports_completions_api:
-        raise ModelCapabilityError(body.model, "chat/completions")
-
     # ── Balance check + free-model rate limit ────────────────────────────────
     is_free_model = await check_balance(key.owner, body.model, db)
     if is_free_model:
@@ -104,7 +99,13 @@ async def chat_completions(
         template=raw_body.template,
     )
     # ── Phase 6: Resolve provider + per-owner upstream API key ───────────────
-    provider, provider_model_id = await resolve_routing(body.model, db)
+    provider, provider_model_id, _ = await resolve_routing(body.model, db)
+
+    # ── Capability check: model+provider must support chat/completions ────────
+    _price_row = await db.get(ModelPrice, (body.model, provider))
+    if _price_row is not None and not _price_row.supports_completions_api:
+        raise ModelCapabilityError(body.model, "chat/completions")
+
     upstream_key = await resolve_upstream_key(owner=key.owner, provider=provider, db=db)
 
     adapter = get_adapter(provider)

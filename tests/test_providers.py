@@ -1050,19 +1050,20 @@ class TestBedrockBearerPath:
 # Provider Registry
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _make_routing_row(provider: str, provider_model_id: str | None = None):
-    """Build a mock SQLAlchemy Row with .provider and .provider_model_id attributes."""
+def _make_routing_row(provider: str, provider_model_id: str | None = None, responses_provider_model_id: str | None = None):
+    """Build a mock SQLAlchemy Row with routing attributes."""
     row = MagicMock()
     row.provider = provider
     row.provider_model_id = provider_model_id
+    row.responses_provider_model_id = responses_provider_model_id
     return row
 
 
-def _make_routing_result(provider: str | None, provider_model_id: str | None = None):
+def _make_routing_result(provider: str | None, provider_model_id: str | None = None, responses_provider_model_id: str | None = None):
     """make_execute_result variant for resolve_routing (uses .one_or_none())."""
     result = MagicMock()
     result.one_or_none.return_value = (
-        _make_routing_row(provider, provider_model_id) if provider is not None else None
+        _make_routing_row(provider, provider_model_id, responses_provider_model_id) if provider is not None else None
     )
     return result
 
@@ -1072,14 +1073,14 @@ class TestRegistry:
     # ── resolve_routing ──────────────────────────────────────────────────────
 
     async def test_resolve_routing_returns_provider_and_model_id(self, mock_db):
-        """is_default=True row → returns (provider, provider_model_id) tuple."""
+        """is_default=True row → returns (provider, provider_model_id, responses_provider_model_id) tuple."""
         from app.providers.registry import resolve_routing
 
         mock_db.execute.return_value = _make_routing_result(
             "bedrock", "us.anthropic.claude-3-haiku-20240307-v1:0"
         )
 
-        provider, model_id = await resolve_routing("anthropic/claude-3-haiku", mock_db)
+        provider, model_id, _ = await resolve_routing("anthropic/claude-3-haiku", mock_db)
 
         assert provider == "bedrock"
         assert model_id == "us.anthropic.claude-3-haiku-20240307-v1:0"
@@ -1091,22 +1092,23 @@ class TestRegistry:
 
         mock_db.execute.return_value = _make_routing_result("openrouter", None)
 
-        provider, model_id = await resolve_routing("openai/gpt-4o", mock_db)
+        provider, model_id, _ = await resolve_routing("openai/gpt-4o", mock_db)
 
         assert provider == "openrouter"
         assert model_id is None
 
     async def test_resolve_routing_falls_back_to_openrouter_if_not_in_db(self, mock_db):
-        """Model absent from model_prices → ('openrouter', None)."""
+        """Model absent from model_prices → ('openrouter', None, None)."""
         from app.providers.registry import resolve_routing
 
         no_row = _make_routing_result(None)
         mock_db.execute.side_effect = [no_row, no_row]
 
-        provider, model_id = await resolve_routing("unknown/model", mock_db)
+        provider, model_id, responses_model_id = await resolve_routing("unknown/model", mock_db)
 
         assert provider == "openrouter"
         assert model_id is None
+        assert responses_model_id is None
 
     async def test_resolve_routing_falls_back_to_any_row(self, mock_db):
         """No is_default row → any row for this model is used."""
@@ -1117,7 +1119,7 @@ class TestRegistry:
             _make_routing_result("vertex", None),    # any-row hit
         ]
 
-        provider, model_id = await resolve_routing("google/gemini-flash-1.5", mock_db)
+        provider, model_id, _ = await resolve_routing("google/gemini-flash-1.5", mock_db)
 
         assert provider == "vertex"
         assert mock_db.execute.call_count == 2

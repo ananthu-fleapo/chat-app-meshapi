@@ -26,7 +26,7 @@ from app.auth.config_resolver import resolve_responses_config
 from app.auth.dependencies import get_authenticated_key
 from app.cache.rate_limiter import check_free_model_rate_limits, check_rate_limits
 from app.config import settings
-from app.db.models import ApiKey, Model
+from app.db.models import ApiKey, ModelPrice
 from app.db.session import get_db_session
 from app.exceptions import ModelCapabilityError
 from app.providers.base import ProviderAdapter
@@ -94,11 +94,6 @@ async def create_response(
     # ── Resolve model + params from key defaults ───────────────────────────────
     body = resolve_responses_config(raw_body, key)
 
-    # ── Capability check: model must support responses API ────────────────────
-    _model_row = await db.get(Model, body.model)
-    if _model_row is not None and not _model_row.supports_responses_api:
-        raise ModelCapabilityError(body.model, "responses")
-
     # ── Balance check + free-model rate limit ─────────────────────────────────
     is_free_model = await check_balance(key.owner, body.model, db)
     if is_free_model:
@@ -109,7 +104,13 @@ async def create_response(
         )
 
     # ── Provider routing (DB-driven, same as inference.py) ────────────────────
-    provider, provider_model_id = await resolve_routing(body.model, db)
+    provider, provider_model_id, responses_provider_model_id = await resolve_routing(body.model, db)
+    effective_model_id = responses_provider_model_id or provider_model_id
+
+    # ── Capability check: model+provider must support responses API ───────────
+    _price_row = await db.get(ModelPrice, (body.model, provider))
+    if _price_row is not None and not _price_row.supports_responses_api:
+        raise ModelCapabilityError(body.model, "responses")
 
     logger.info(
         "responses_request_start", 
@@ -148,7 +149,7 @@ async def create_response(
             try:
                 async for chunk in adapter.stream_responses_create(
                     body, api_key=upstream_key, owner=key.owner,
-                    provider_model_id=provider_model_id,
+                    provider_model_id=effective_model_id,
                 ):
                     if await request.is_disconnected():
                         logger.info("responses_stream_client_disconnected", bytes_sent=byte_count)
@@ -245,7 +246,7 @@ async def create_response(
     try:
         response_body = await adapter.responses_create(
             body, api_key=upstream_key, owner=key.owner,
-            provider_model_id=provider_model_id,
+            provider_model_id=effective_model_id,
         )
     except Exception as exc:
         status = "error"

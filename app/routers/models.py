@@ -105,9 +105,9 @@ def _row_to_model_out(m: Model, mp: ModelPrice) -> ModelOut:
         is_free=mp.is_free,
         pricing=pricing,
         description=m.description,
-        supports_thinking=m.supports_thinking,
-        supports_completions_api=m.supports_completions_api,
-        supports_responses_api=m.supports_responses_api,
+        supports_thinking=mp.supports_thinking,
+        supports_completions_api=mp.supports_completions_api,
+        supports_responses_api=mp.supports_responses_api,
     )
 
 

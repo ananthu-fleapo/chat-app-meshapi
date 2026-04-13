@@ -59,25 +59,31 @@ def get_adapter(provider: str) -> ProviderAdapter:
 
 async def resolve_routing(
     model: str, db: AsyncSession
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, str | None]:
     """
-    Return (provider, provider_model_id) for *model* in a single DB query.
+    Return (provider, provider_model_id, responses_provider_model_id) for
+    *model* in a single DB query.
 
-    provider_model_id is the exact upstream model ID stored in
-    model_prices.provider_model_id (e.g. "us.anthropic.claude-3-haiku-20240307-v1:0").
-    It is None when the column is unset — adapters fall back to their internal
-    _MODEL_MAP translation in that case.
+    provider_model_id is the completions default — the exact upstream model ID
+    used for /chat/completions (e.g. Bedrock Converse).
+
+    responses_provider_model_id is an optional override used for /v1/responses
+    when the provider requires a different model ID on that path. None when
+    unset — callers fall back to provider_model_id in that case.
+
+    Both IDs are None when the column is unset — adapters fall back to their
+    internal _MODEL_MAP translation in that case.
 
     Lookup order:
       1. Row where (model_id=model, is_default=True)   — explicit default
       2. Any row where model_id=model                  — first available
-      3. ("openrouter", None)                          — safe fallback
+      3. ("openrouter", None, None)                    — safe fallback
     """
     from app.db.models import ModelPrice
 
-    # Prefer the is_default row; fetch both columns in one round-trip
+    # Prefer the is_default row; fetch all routing columns in one round-trip
     result = await db.execute(
-        select(ModelPrice.provider, ModelPrice.provider_model_id)
+        select(ModelPrice.provider, ModelPrice.provider_model_id, ModelPrice.responses_provider_model_id)
         .where(
             ModelPrice.model_id == model,
             ModelPrice.is_default.is_(True),
@@ -86,11 +92,11 @@ async def resolve_routing(
     )
     row = result.one_or_none()
     if row is not None:
-        return row.provider, row.provider_model_id
+        return row.provider, row.provider_model_id, row.responses_provider_model_id
 
     # Fall back to any row for this model
     result = await db.execute(
-        select(ModelPrice.provider, ModelPrice.provider_model_id)
+        select(ModelPrice.provider, ModelPrice.provider_model_id, ModelPrice.responses_provider_model_id)
         .where(ModelPrice.model_id == model)
         .limit(1)
     )
@@ -101,11 +107,11 @@ async def resolve_routing(
             model=model,
             provider=row.provider,
         )
-        return row.provider, row.provider_model_id
+        return row.provider, row.provider_model_id, row.responses_provider_model_id
 
     # Model not in price table — default to OpenRouter
     logger.debug("provider_resolved_fallback_openrouter", model=model)
-    return "openrouter", None
+    return "openrouter", None, None
 
 
 async def resolve_provider(model: str, db: AsyncSession) -> str:
@@ -113,5 +119,5 @@ async def resolve_provider(model: str, db: AsyncSession) -> str:
     Return the provider slug for *model*.
     Thin wrapper around resolve_routing kept for backward-compatibility.
     """
-    provider, _ = await resolve_routing(model, db)
+    provider, *_ = await resolve_routing(model, db)
     return provider
