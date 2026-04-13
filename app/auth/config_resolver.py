@@ -35,6 +35,26 @@ from app.db.models import ApiKey, Template
 from app.exceptions import UnprocessableEntityError
 from app.schemas.chat import ChatCompletionRequest, Message
 from app.schemas.responses import ResponsesRequest
+from app.schemas.embeddings import EmbeddingsRequest
+
+def _resolve_model(
+    model: str | None,
+    key: ApiKey,
+    template: "Template | None" = None,
+) -> str:
+    """Return the first non-None model in priority order: body → key → template."""
+    if model is not None:
+        return model
+    if key.default_model is not None:
+        return key.default_model
+    if template is not None and template.model is not None:
+        return template.model
+    suffix = " or specify a model in the template." if template is not None else "."
+    raise UnprocessableEntityError(
+        "model is required. Set it in the request or configure default_model "
+        f"on your API key{suffix}"
+    )
+
 
 _MERGEABLE_PARAMS: tuple[str, ...] = (
     "temperature",
@@ -85,6 +105,8 @@ def resolve_config(
             "model is required. Set it in the request, configure default_model "
             "on your API key, or specify a model in the template."
         )
+        
+    data["model"] = _resolve_model(data["model"], key, template)
 
     # ── Inference params: body → key → template ───────────────────────────────
     for param in _MERGEABLE_PARAMS:
@@ -152,3 +174,14 @@ def resolve_responses_config(
             data[param] = key_defaults[param]
 
     return ResponsesRequest(**data)
+def resolve_embeddings_config(
+    body: EmbeddingsRequest,
+    key: ApiKey,
+) -> EmbeddingsRequest:
+    """
+    Merge key defaults into an embeddings request.
+
+    Only model defaulting applies here — embeddings requests do not inherit
+    chat-centric params like temperature or template messages.
+    """
+    return body.model_copy(update={"model": _resolve_model(body.model, key)})

@@ -22,8 +22,14 @@ from app.exceptions import GatewayTimeoutError, UpstreamError
 from app.providers.base import ProviderAdapter
 from app.schemas.chat import ROUTERV_ONLY_FIELDS, ChatCompletionRequest
 from app.schemas.responses import RESPONSES_ONLY_FIELDS, ResponsesRequest
+from app.schemas.embeddings import EmbeddingsRequest
 
 logger = structlog.get_logger()
+
+
+def _owner_user_label(owner: str | None) -> str | None:
+    """Format the owner identifier for the upstream `user` field (≤256 chars)."""
+    return f"owner:{owner}"[:256] if owner is not None else None
 
 
 def _build_payload(
@@ -50,11 +56,29 @@ def _build_payload(
         payload.setdefault("stream_options", {})["include_usage"] = True
     # Stable per-owner identifier — OpenRouter uses this for abuse detection.
     # We use owner label (not key ID) so all keys for an owner share one bucket.
-    if owner is not None:
-        # OpenRouter enforces <=256 chars on the user field.
-        # Truncate defensively — owner should always be a short UUID but
-        # this guards against any unexpected long values in the DB.
-        payload.setdefault("user", f"owner:{owner}"[:256])
+    if (label := _owner_user_label(owner)) is not None:
+        payload.setdefault("user", label)
+    return payload
+
+
+def _build_embeddings_payload(
+    request: EmbeddingsRequest,
+    *,
+    owner: str | None = None,
+) -> dict:
+    """
+    Serialize an embeddings request for OpenRouter.
+
+    The embeddings endpoint is non-streaming, so we only strip None values and
+    apply the same `user` defaulting used for chat requests.
+    """
+    payload = request.model_dump(exclude_none=True)
+    if (label := _owner_user_label(owner)) is not None:
+        payload.setdefault("user", label)
+    # OpenRouter requires `provider` to be an object. Callers may pass a bare
+    # provider slug string as a convenience; normalise it here.
+    if isinstance(payload.get("provider"), str):
+        payload["provider"] = {"order": [payload["provider"]]}
     return payload
 
 
@@ -163,9 +187,40 @@ class OpenRouterAdapter(ProviderAdapter):
             return response.json()
 
         except httpx.HTTPStatusError as exc:
-            body = exc.response.text[:300]
-            log.warning("upstream_http_error", status=exc.response.status_code, body=body)
-            raise UpstreamError() from exc
+            body = exc.response.text
+            log.warning("upstream_http_error", status=exc.response.status_code, body=body[:300])
+            raise UpstreamError(upstream_detail=body) from exc
+
+        except httpx.TimeoutException as exc:
+            log.warning("upstream_timeout", model=request.model)
+            raise GatewayTimeoutError() from exc
+
+    async def embeddings(
+        self,
+        request: EmbeddingsRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> dict:
+        payload = _build_embeddings_payload(request, owner=owner)
+        if provider_model_id:
+            payload["model"] = provider_model_id
+        log = logger.bind(model=request.model)
+
+        try:
+            response = await self._client.post(
+                "/embeddings",
+                json=payload,
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            return response.json()
+
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text
+            log.warning("upstream_http_error", status=exc.response.status_code, body=body[:300])
+            raise UpstreamError(upstream_detail=body) from exc
 
         except httpx.TimeoutException as exc:
             log.warning("upstream_timeout", model=request.model)

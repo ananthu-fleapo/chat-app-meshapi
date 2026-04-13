@@ -49,7 +49,7 @@ async def _calc_upstream_cost(
     model: str,
     provider: str,
     prompt_tokens: int,
-    completion_tokens: int,
+    completion_tokens: int = 0,
 ) -> Decimal | None:
     """
     Calculate upstream cost from model_prices.upstream_*_usd_per_1k.
@@ -70,11 +70,14 @@ async def _calc_upstream_cost(
             )
             row = result.scalar_one_or_none()
 
-        if row is None or row.upstream_prompt_usd_per_1k is None or row.upstream_completion_usd_per_1k is None:
+        if row is None or row.upstream_prompt_usd_per_1k is None:
             return None
 
         prompt_cost = Decimal(str(row.upstream_prompt_usd_per_1k)) * prompt_tokens / 1000
-        completion_cost = Decimal(str(row.upstream_completion_usd_per_1k)) * completion_tokens / 1000
+        # Embedding models have no completion rate; treat missing/zero as 0 so
+        # prompt-only cost still resolves rather than returning None.
+        completion_rate = Decimal(str(row.upstream_completion_usd_per_1k or 0))
+        completion_cost = completion_rate * completion_tokens / 1000
         return (prompt_cost + completion_cost).quantize(Decimal("0.00000001"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("upstream_cost_calc_failed", model=model, provider=provider, error=str(exc))
@@ -84,7 +87,7 @@ async def _calc_upstream_cost(
 async def _our_cost(
     model: str,
     prompt_tokens: int,
-    completion_tokens: int,
+    completion_tokens: int = 0,
 ) -> Decimal | None:
     """
     Resolve cost using our model_prices table (what we charge the user).
@@ -104,7 +107,7 @@ async def _our_cost(
             if row.is_free:
                 return Decimal("0")
             prompt_cost = Decimal(str(row.prompt_usd_per_1k)) * prompt_tokens / 1000
-            completion_cost = Decimal(str(row.completion_usd_per_1k)) * completion_tokens / 1000
+            completion_cost = Decimal(str(row.completion_usd_per_1k or 0)) * completion_tokens / 1000
             return (prompt_cost + completion_cost).quantize(Decimal("0.00000001"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("our_cost_lookup_failed", model=model, error=str(exc))
@@ -190,12 +193,12 @@ async def log_usage_event(
     cost: Decimal | None = None
     total_tokens: int | None = None
 
-    if prompt_tokens is not None and completion_tokens is not None:
-        total_tokens = prompt_tokens + completion_tokens
+    if prompt_tokens is not None:
+        total_tokens = prompt_tokens + (completion_tokens or 0)
 
     # ── Cost resolution — use our model_prices (what we charge the user) ──────
-    if prompt_tokens is not None and completion_tokens is not None:
-        cost = await _our_cost(model, prompt_tokens, completion_tokens)
+    if prompt_tokens is not None:
+        cost = await _our_cost(model, prompt_tokens, completion_tokens or 0)
 
     # ── Apply discount if one is active for this owner + model ───────────────
     if cost is not None and cost > 0:
@@ -212,8 +215,13 @@ async def log_usage_event(
     upstream_cost_decimal: Decimal | None
     if upstream_cost is not None:
         upstream_cost_decimal = Decimal(str(upstream_cost)).quantize(Decimal("0.00000001"))
-    elif prompt_tokens is not None and completion_tokens is not None:
-        upstream_cost_decimal = await _calc_upstream_cost(model, provider, prompt_tokens, completion_tokens)
+    elif prompt_tokens is not None:
+        upstream_cost_decimal = await _calc_upstream_cost(
+            model,
+            provider,
+            prompt_tokens,
+            completion_tokens or 0,
+        )
     else:
         upstream_cost_decimal = None
 

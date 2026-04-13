@@ -53,6 +53,7 @@ from app.exceptions import GatewayTimeoutError, UpstreamError
 from app.providers.base import ProviderAdapter
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.responses import RESPONSES_ONLY_FIELDS, ResponsesRequest
+from app.schemas.embeddings import EmbeddingsRequest
 
 logger = structlog.get_logger()
 
@@ -73,6 +74,12 @@ _MODEL_MAP: dict[str, str] = {
     "amazon/nova-lite-v1":                "us.amazon.nova-lite-v1:0",
     "amazon/nova-micro-v1":               "us.amazon.nova-micro-v1:0",
     "amazon/nova-pro-v1":                 "us.amazon.nova-pro-v1:0",
+    # ── Amazon Titan Embed ────────────────────────────────────────────────────
+    "amazon/titan-embed-text-v2":          "amazon.titan-embed-text-v2:0",
+    "amazon/titan-embed-text-v1":          "amazon.titan-embed-text-v1:2",
+    # ── Cohere Embed ──────────────────────────────────────────────────────────
+    "cohere/embed-english-v3":             "cohere.embed-english-v3",
+    "cohere/embed-multilingual-v3":        "cohere.embed-multilingual-v3",
 }
 
 
@@ -393,6 +400,79 @@ def _bedrock_stream_events_to_sse(
     return b"".join(chunks)
 
 
+def _build_bedrock_embed_body(request: "EmbeddingsRequest", model_id: str) -> dict:
+    """
+    Build the InvokeModel request body for Bedrock embedding models.
+
+    - Amazon Titan Text (titan-embed-text-*): accepts a single string.
+    - Cohere Embed: accepts a list of strings.
+
+    Token-array inputs (list[int] / list[list[int]]) are not supported and
+    raise UpstreamError immediately.
+    """
+    raw_input = request.input
+
+    # Reject token arrays
+    if isinstance(raw_input, list) and raw_input and isinstance(raw_input[0], int):
+        raise UpstreamError(upstream_detail="Bedrock embedding models do not accept pre-tokenised (integer) inputs.")
+    if isinstance(raw_input, list) and raw_input and isinstance(raw_input[0], list):
+        raise UpstreamError(upstream_detail="Bedrock embedding models do not accept pre-tokenised (integer) inputs.")
+
+    # ── Titan Text ────────────────────────────────────────────────────────────
+    if model_id.startswith("amazon.titan-embed"):
+        if isinstance(raw_input, list) and len(raw_input) > 1:
+            raise UpstreamError(
+                upstream_detail="Amazon Titan Embed does not support batched inputs. Send one string at a time."
+            )
+        text = raw_input if isinstance(raw_input, str) else (raw_input[0] if raw_input else "")
+        body = {"inputText": text}
+        if request.dimensions is not None:
+            body["dimensions"] = request.dimensions
+        return body
+
+    # ── Cohere Embed ──────────────────────────────────────────────────────────
+    if model_id.startswith("cohere.embed"):
+        texts = [raw_input] if isinstance(raw_input, str) else list(raw_input)
+        _input_type_map = {
+            "query": "search_query",
+            "document": "search_document",
+            "classification": "classification",
+            "clustering": "clustering",
+        }
+        cohere_input_type = _input_type_map.get(request.input_type or "", "search_document")
+        body = {"texts": texts, "input_type": cohere_input_type}
+        if request.encoding_format == "float":
+            body["embedding_types"] = ["float"]
+        return body
+
+    raise UpstreamError(upstream_detail=f"Unsupported Bedrock embedding model: {model_id}")
+
+
+def _bedrock_embed_response_to_openai(response_body: dict, model_id: str, canonical_model: str) -> dict:
+    """Convert a Bedrock InvokeModel embedding response to OpenAI list format."""
+    if model_id.startswith("amazon.titan-embed"):
+        embeddings = [response_body["embedding"]]
+        token_count = response_body.get("inputTextTokenCount", 0)
+    elif model_id.startswith("cohere.embed"):
+        raw = response_body.get("embeddings", [])
+        # When embedding_types was requested, Cohere returns {"float": [[...]]}
+        embeddings = raw.get("float", []) if isinstance(raw, dict) else raw
+        token_count = 0  # Cohere InvokeModel does not return token counts
+    else:
+        embeddings = []
+        token_count = 0
+
+    return {
+        "object": "list",
+        "data": [
+            {"object": "embedding", "index": i, "embedding": emb}
+            for i, emb in enumerate(embeddings)
+        ],
+        "model": canonical_model,
+        "usage": {"prompt_tokens": token_count, "total_tokens": token_count},
+    }
+
+
 # ── Adapter ───────────────────────────────────────────────────────────────────
 
 class BedrockAdapter(ProviderAdapter):
@@ -423,10 +503,10 @@ class BedrockAdapter(ProviderAdapter):
         self._api_key = api_key
         self._aws_access_key_id = aws_access_key_id
         self._aws_secret_access_key = aws_secret_access_key
-        # Shared httpx client for bearer-token path (connection-pooled)
-        self._http_client: httpx.AsyncClient | None = (
-            httpx.AsyncClient(timeout=timeout) if api_key else None
-        )
+        # Shared httpx client for bearer-token path (connection-pooled).
+        # Always initialized so per-request bearer keys work even when no
+        # system api_key is configured.
+        self._http_client: httpx.AsyncClient = httpx.AsyncClient(timeout=timeout)
         # Dedicated client for the bedrock-mantle OpenAI-compatible endpoint.
         # Always initialized — used for both bearer and SigV4 auth on /responses.
         self._mantle_client = httpx.AsyncClient(timeout=timeout)
@@ -581,9 +661,64 @@ class BedrockAdapter(ProviderAdapter):
                 log.warning("bedrock_stream_timeout")
                 raise GatewayTimeoutError() from exc
             log.warning("bedrock_stream_error", error=str(exc))
-            raise UpstreamError() from exc
+            raise UpstreamError(upstream_detail=str(exc)) from exc
 
         yield b"data: [DONE]\n\n"
+
+    async def embeddings(
+        self,
+        request: "EmbeddingsRequest",
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> dict:
+        bedrock_model = provider_model_id or _bedrock_model_id(request.model)
+        log = logger.bind(model=request.model, bedrock_model=bedrock_model)
+
+        try:
+            body = _build_bedrock_embed_body(request, bedrock_model)
+            if self._use_bearer(api_key):
+                return await self._embed_http(request.model, bedrock_model, body, api_key, log)
+            else:
+                return await self._embed_sigv4(request.model, bedrock_model, body, log)
+        except (GatewayTimeoutError, UpstreamError):
+            raise
+        except Exception as exc:
+            err_name = type(exc).__name__
+            if "Timeout" in err_name or "timeout" in str(exc).lower():
+                log.warning("bedrock_embed_timeout")
+                raise GatewayTimeoutError() from exc
+            log.warning("bedrock_embed_error", error=str(exc))
+            raise UpstreamError(upstream_detail=str(exc)) from exc
+
+    async def _embed_http(
+        self, canonical_model: str, bedrock_model: str, body: dict, api_key: str | None, log
+    ) -> dict:
+        key = self._bearer_key(api_key)
+        url = self._runtime_url(f"/model/{bedrock_model}/invoke")
+        resp = await self._http_client.post(
+            url,
+            content=json.dumps(body),
+            headers={**self._bearer_headers(key), "Accept": "application/json"},
+        )
+        if resp.status_code != 200:
+            log.warning("bedrock_embed_http_error", status=resp.status_code, body=resp.text[:200])
+            raise UpstreamError(upstream_detail=resp.text)
+        return _bedrock_embed_response_to_openai(resp.json(), bedrock_model, canonical_model)
+
+    async def _embed_sigv4(
+        self, canonical_model: str, bedrock_model: str, body: dict, log
+    ) -> dict:
+        async with self._make_sigv4_session() as client:
+            response = await client.invoke_model(
+                modelId=bedrock_model,
+                body=json.dumps(body),
+                contentType="application/json",
+                accept="application/json",
+            )
+            response_body = json.loads(await response["body"].read())
+        return _bedrock_embed_response_to_openai(response_body, bedrock_model, canonical_model)
 
     # ── Bearer / httpx path ───────────────────────────────────────────────────
 

@@ -72,6 +72,85 @@ def _make_chat_request(model: str = "openai/gpt-4o-mini") -> MagicMock:
     )
 
 
+def _make_embeddings_request(model: str = "openai/text-embedding-3-small") -> MagicMock:
+    """Minimal EmbeddingsRequest-like instance."""
+    from app.schemas.embeddings import EmbeddingsRequest
+    return EmbeddingsRequest(
+        model=model,
+        input="hello world",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OpenRouter — adapter behaviour
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestOpenRouterAdapter:
+
+    def _make_adapter(self) -> "OpenRouterAdapter":
+        from app.providers.openrouter import OpenRouterAdapter
+        OpenRouterAdapter._instance = None
+        return OpenRouterAdapter.init(
+            api_key="test-openrouter-key",
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+    async def test_embeddings_success(self):
+        adapter = self._make_adapter()
+        body = {"object": "list", "data": [], "usage": {"prompt_tokens": 12}}
+        adapter._client.post = AsyncMock(return_value=_make_httpx_response(200, body))
+
+        result = await adapter.embeddings(_make_embeddings_request())
+
+        assert result["object"] == "list"
+        call_kwargs = adapter._client.post.call_args
+        assert call_kwargs.args[0] == "/embeddings"
+        assert call_kwargs.kwargs["json"]["model"] == "openai/text-embedding-3-small"
+
+    async def test_embeddings_http_error_raises_upstream(self):
+        from app.exceptions import UpstreamError
+
+        adapter = self._make_adapter()
+        adapter._client.post = AsyncMock(
+            return_value=_make_httpx_response(429, {"error": "rate limited"})
+        )
+
+        with pytest.raises(UpstreamError):
+            await adapter.embeddings(_make_embeddings_request())
+
+    async def test_embeddings_timeout_raises_gateway_timeout(self):
+        from app.exceptions import GatewayTimeoutError
+
+        adapter = self._make_adapter()
+        adapter._client.post = AsyncMock(side_effect=httpx.ReadTimeout("timed out"))
+
+        with pytest.raises(GatewayTimeoutError):
+            await adapter.embeddings(_make_embeddings_request())
+
+    async def test_embeddings_per_request_api_key_overrides_default(self):
+        adapter = self._make_adapter()
+        body = {"object": "list", "data": []}
+        adapter._client.post = AsyncMock(return_value=_make_httpx_response(200, body))
+
+        await adapter.embeddings(_make_embeddings_request(), api_key="owner-key")
+
+        call_kwargs = adapter._client.post.call_args
+        assert call_kwargs.kwargs["headers"] == {"Authorization": "Bearer owner-key"}
+
+    async def test_embeddings_provider_model_id_overrides_request_model(self):
+        adapter = self._make_adapter()
+        body = {"object": "list", "data": []}
+        adapter._client.post = AsyncMock(return_value=_make_httpx_response(200, body))
+
+        await adapter.embeddings(
+            _make_embeddings_request("alias/model"),
+            provider_model_id="openai/text-embedding-3-small",
+        )
+
+        call_kwargs = adapter._client.post.call_args
+        assert call_kwargs.kwargs["json"]["model"] == "openai/text-embedding-3-small"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # OpenAI Direct — model translation
 # ─────────────────────────────────────────────────────────────────────────────

@@ -122,6 +122,20 @@ class TestCalcUpstreamCost:
 
         assert cost is None
 
+    async def test_embeddings_uses_prompt_rate_only_when_completion_rate_zero(self):
+        """Prompt-only usage still resolves upstream cost for embeddings."""
+        from app.usage.logger import _calc_upstream_cost
+
+        row = _make_model_price_row(upstream_prompt=0.00002, upstream_completion=0)
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=row)))
+        sf = _make_session_factory(session)
+
+        with patch("app.usage.logger.get_session_factory", sf):
+            cost = await _calc_upstream_cost("openai/text-embedding-3-small", "openrouter", 500, 0)
+
+        assert cost == Decimal("0.00001000")
+
 
 class TestOurCost:
 
@@ -183,6 +197,18 @@ class TestOurCost:
             cost = await _our_cost("unknown/model-xyz", 100, 100)
 
         assert cost is None
+
+    async def test_embeddings_cost_uses_prompt_rate_only(self):
+        """Embeddings rows with completion price 0 bill on prompt tokens only."""
+        from app.usage.logger import _our_cost
+
+        row = _make_model_price_row(is_free=False, prompt=0.00002, completion=0)
+        sf = _make_session_factory(AsyncMock())
+        with patch("app.usage.logger.get_session_factory", sf), \
+             patch("app.usage.balance._lookup_model_price", AsyncMock(return_value=row)):
+            cost = await _our_cost("openai/text-embedding-3-small", 500, 0)
+
+        assert cost == Decimal("0.00001000")
 
 
 # ── log_usage_event ───────────────────────────────────────────────────────────
@@ -264,6 +290,24 @@ class TestLogUsageEvent:
             await log_usage_event(**self._log_kwargs(prompt_tokens=None, completion_tokens=None))
 
         mock_our_cost.assert_not_called()
+
+    async def test_embeddings_success_stores_zero_completion_tokens(self):
+        """Prompt-only usage logs completion_tokens=0 and total_tokens=prompt_tokens."""
+        from app.usage.logger import log_usage_event
+
+        write_session = _make_write_session()
+        sf = _make_session_factory(write_session)
+
+        with patch("app.usage.logger._our_cost", AsyncMock(return_value=Decimal("0.01"))), \
+             patch("app.usage.logger.get_session_factory", sf), \
+             patch("app.usage.balance.deduct_balance", AsyncMock()), \
+             patch("app.metrics.record_inference", MagicMock()):
+            await log_usage_event(**self._log_kwargs(prompt_tokens=100, completion_tokens=0))
+
+        added_event = write_session.add.call_args[0][0]
+        assert added_event.prompt_tokens == 100
+        assert added_event.completion_tokens == 0
+        assert added_event.total_tokens == 100
 
     async def test_db_write_failure_silently_swallowed(self):
         """DB error during event write → no exception propagates."""

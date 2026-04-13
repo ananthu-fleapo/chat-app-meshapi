@@ -25,6 +25,7 @@ from app.providers.base import ProviderAdapter
 from app.providers.openrouter import _build_payload
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.responses import RESPONSES_ONLY_FIELDS, ResponsesRequest
+from app.schemas.embeddings import EmbeddingsRequest
 
 logger = structlog.get_logger()
 
@@ -333,7 +334,7 @@ class OpenAIDirectAdapter(ProviderAdapter):
     async def responses_create(
         self,
         request: ResponsesRequest,
-        *,
+          *,
         api_key: str | None = None,
         owner: str | None = None,
         provider_model_id: str | None = None,
@@ -345,8 +346,8 @@ class OpenAIDirectAdapter(ProviderAdapter):
 
         try:
             response = await self._client.post(
-                "/responses",
-                json=payload,
+                 "/responses",
+                 json=payload,
                 headers=self._auth_headers(api_key),
             )
             response.raise_for_status()
@@ -401,4 +402,43 @@ class OpenAIDirectAdapter(ProviderAdapter):
 
         except httpx.TimeoutException as exc:
             log.warning("openai_direct_responses_stream_timeout")
+            raise GatewayTimeoutError() from exc
+
+            
+    async def embeddings(
+        self,
+        request: EmbeddingsRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> dict:
+        from app.providers.openrouter import _owner_user_label
+
+        # OpenAI API doesn't support input_type; exclude it
+        payload = request.model_dump(exclude_none=True, exclude={"model", "provider", "input_type"})
+        model_id = provider_model_id or request.model
+        if not model_id:
+            raise ValueError("Embeddings model must be resolved before adapter call")
+        payload["model"] = _openai_model_id(model_id)
+        if (label := _owner_user_label(owner)) is not None:
+            payload.setdefault("user", label)
+        log = logger.bind(model=request.model, openai_model=payload["model"])
+
+        try:
+            response = await self._client.post(
+                 "/embeddings",
+                 json=payload,
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            return response.json()
+
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text
+            log.warning("openai_direct_embed_http_error", status=exc.response.status_code, body=body[:300])
+            raise UpstreamError(upstream_detail=body) from exc
+
+        except httpx.TimeoutException as exc:
+            log.warning("openai_direct_embed_timeout")
             raise GatewayTimeoutError() from exc

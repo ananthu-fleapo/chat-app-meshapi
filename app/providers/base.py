@@ -11,9 +11,26 @@ from collections.abc import AsyncGenerator
 
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.responses import ResponsesRequest
+from app.schemas.embeddings import EmbeddingsRequest
 
 
 class ProviderAdapter(ABC):
+    async def embeddings(
+        self,
+        request: EmbeddingsRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> dict:
+        """
+        Non-streaming embeddings request.
+
+        Adapters that do not support embeddings may inherit this default and
+        raise NotImplementedError until support is added.
+        """
+        raise NotImplementedError("Embeddings are not implemented for this provider.")
+
     @abstractmethod
     async def chat_completion(
         self,

@@ -143,6 +143,10 @@ class UpstreamError(RouterVError):
     error_code = "upstream_error"
     message = "Upstream provider returned an error."
 
+    def __init__(self, upstream_detail: str | None = None) -> None:
+        super().__init__()
+        self.upstream_detail = upstream_detail
+
 
 class GatewayTimeoutError(RouterVError):
     status_code = 500
@@ -191,15 +195,14 @@ async def routerv_exception_handler(request: Request, exc: RouterVError) -> JSON
     if isinstance(exc, RateLimitError):
         headers["Retry-After"] = str(exc.retry_after)
 
+    error_body: dict = {"code": exc.error_code, "message": exc.message}
+    if isinstance(exc, UpstreamError) and exc.upstream_detail:
+        # Truncate to first 500 chars to avoid leaking provider metadata (account IDs, quotas, etc.)
+        error_body["upstream_detail"] = exc.upstream_detail[:500]
+
     return JSONResponse(
         status_code=exc.status_code,
-        content={
-            "error": {
-                "code": exc.error_code,
-                "message": exc.message,
-            },
-            "request_id": rid,
-        },
+        content={"error": error_body, "request_id": rid},
         headers=headers,
     )
 

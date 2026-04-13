@@ -38,6 +38,7 @@ from app.exceptions import GatewayTimeoutError, UpstreamError
 from app.providers.base import ProviderAdapter
 from app.providers.openrouter import _build_payload
 from app.schemas.chat import ChatCompletionRequest
+from app.schemas.embeddings import EmbeddingsRequest
 
 logger = structlog.get_logger()
 
@@ -97,6 +98,74 @@ def _vertex_model_id(canonical: str) -> str:
     return f"google/{canonical}"
 
 
+# input_type → Vertex AI task_type
+_TASK_TYPE_MAP: dict[str, str] = {
+    "query": "RETRIEVAL_QUERY",
+    "document": "RETRIEVAL_DOCUMENT",
+    "classification": "CLASSIFICATION",
+    "clustering": "CLUSTERING",
+    "question_answering": "QUESTION_ANSWERING",
+    "fact_verification": "FACT_VERIFICATION",
+    "semantic_similarity": "SEMANTIC_SIMILARITY",
+    "code_retrieval_query": "CODE_RETRIEVAL_QUERY",
+}
+
+
+def _build_vertex_embed_instances(request: EmbeddingsRequest) -> tuple[list[dict], dict]:
+    """
+    Translate EmbeddingsRequest into Vertex AI predict instances + parameters.
+
+    Returns (instances, parameters). parameters may be empty.
+    """
+    inp = request.input
+    task_type = _TASK_TYPE_MAP.get(request.input_type or "")
+    parameters: dict = {}
+
+    if isinstance(inp, list) and inp and isinstance(inp[0], int):
+        raise UpstreamError(
+            upstream_detail="Vertex AI text embeddings do not support token array inputs."
+        )
+    if isinstance(inp, list) and inp and isinstance(inp[0], list):
+        raise UpstreamError(
+            upstream_detail="Vertex AI text embeddings do not support token array inputs."
+        )
+
+    if isinstance(inp, str):
+        raw = [inp]
+    else:
+        raw = inp  # type: ignore[assignment]
+
+    instances = [{"content": t} for t in raw]
+    if task_type:
+        for inst in instances:
+            inst["task_type"] = task_type
+    if request.dimensions:
+        parameters["outputDimensionality"] = request.dimensions
+
+    return instances, parameters
+
+
+def _vertex_embed_response_to_openai(body: dict, model: str | None = None) -> dict:
+    """Convert Vertex AI predict response to OpenAI embeddings response shape."""
+    predictions = body.get("predictions", [])
+    data = []
+    total_tokens = 0
+
+    for i, pred in enumerate(predictions):
+        embedding = pred["embeddings"]["values"]
+        total_tokens += pred["embeddings"].get("statistics", {}).get("token_count", 0)
+        data.append({"object": "embedding", "index": i, "embedding": embedding})
+
+    result: dict = {
+        "object": "list",
+        "data": data,
+        "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
+    }
+    if model:
+        result["model"] = model
+    return result
+
+
 def _refresh_token_sync(service_account_json: str) -> tuple[str, float]:
     """
     Synchronous token refresh — called inside a thread pool so it doesn't
@@ -129,6 +198,8 @@ class VertexAIAdapter(ProviderAdapter):
         self._service_account_json = service_account_json
         self._access_token: str | None = None
         self._token_expiry: float = 0.0
+        self._project_id = project_id
+        self._location = location
 
         base_url = (
             f"https://{location}-aiplatform.googleapis.com/v1beta1"
@@ -258,4 +329,46 @@ class VertexAIAdapter(ProviderAdapter):
 
         except httpx.TimeoutException as exc:
             log.warning("vertex_stream_timeout")
+            raise GatewayTimeoutError() from exc
+
+    def _build_vertex_embed_predict_url(self, vertex_model_id: str) -> str:
+        """Build the :predict URL for Vertex AI embeddings."""
+        model_segment = vertex_model_id.split("/")[-1]
+        return (
+            f"https://{self._location}-aiplatform.googleapis.com/v1"
+            f"/projects/{self._project_id}/locations/{self._location}"
+            f"/publishers/google/models/{model_segment}:predict"
+        )
+
+    async def embeddings(
+        self,
+        request: EmbeddingsRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> dict:
+        vertex_model = _vertex_model_id(provider_model_id or request.model)
+        log = logger.bind(model=request.model, vertex_model=vertex_model)
+
+        instances, parameters = _build_vertex_embed_instances(request)
+
+        url = self._build_vertex_embed_predict_url(vertex_model)
+        payload: dict = {"instances": instances}
+        if parameters:
+            payload["parameters"] = parameters
+
+        try:
+            headers = await self._auth_headers()
+            response = await self._client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            return _vertex_embed_response_to_openai(response.json(), model=vertex_model)
+
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text
+            log.warning("vertex_embed_http_error", status=exc.response.status_code, body=body[:300])
+            raise UpstreamError(upstream_detail=body) from exc
+
+        except httpx.TimeoutException as exc:
+            log.warning("vertex_embed_timeout")
             raise GatewayTimeoutError() from exc

@@ -36,10 +36,11 @@ from app.providers.base import ProviderAdapter
 from app.providers.openrouter import _build_payload
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.responses import RESPONSES_ONLY_FIELDS, ResponsesRequest
+from app.schemas.embeddings import EmbeddingsRequest
 
 logger = structlog.get_logger()
 
-# DashScope OpenAI-compatible endpoint
+# DashScope OpenAI-compatible endpoint (text embeddings + chat)
 _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
@@ -51,6 +52,16 @@ def _qwen_model_id(canonical: str) -> str:
     if canonical.startswith("qwen/"):
         return canonical[len("qwen/"):]
     return canonical
+
+
+def _qwen_text_type(input_type: str | None) -> str | None:
+    """
+    Map input_type to Qwen text_type.
+    Qwen only supports 'query' and 'document' (default).
+    """
+    if input_type in ("query", "document"):
+        return input_type
+    return None
 
 
 class QwenAdapter(ProviderAdapter):
@@ -172,7 +183,7 @@ class QwenAdapter(ProviderAdapter):
     async def responses_create(
         self,
         request: ResponsesRequest,
-        *,
+         *,
         api_key: str | None = None,
         owner: str | None = None,
         provider_model_id: str | None = None,
@@ -241,4 +252,43 @@ class QwenAdapter(ProviderAdapter):
 
         except httpx.TimeoutException as exc:
             log.warning("qwen_responses_stream_timeout")
+            raise GatewayTimeoutError() from exc
+
+
+    async def embeddings(
+        self,
+        request: EmbeddingsRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> dict:
+        from app.providers.openrouter import _owner_user_label
+
+        model_id = provider_model_id or _qwen_model_id(request.model)
+        log = logger.bind(model=request.model, qwen_model=model_id)
+
+        try:
+            payload = request.model_dump(exclude_none=True, exclude={"model", "provider", "input_type"})
+            payload["model"] = model_id
+            if (label := _owner_user_label(owner)) is not None:
+                payload.setdefault("user", label)
+            # Qwen uses 'text_type' (not 'input_type') with values 'query' or 'document'
+            if (text_type := _qwen_text_type(request.input_type)) is not None:
+                payload["text_type"] = text_type
+            response = await self._client.post(
+                "/embeddings",
+                json=payload,
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            return response.json()
+
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text
+            log.warning("qwen_embed_http_error", status=exc.response.status_code, body=body[:300])
+            raise UpstreamError(upstream_detail=body) from exc
+
+        except httpx.TimeoutException as exc:
+            log.warning("qwen_embed_timeout")
             raise GatewayTimeoutError() from exc
