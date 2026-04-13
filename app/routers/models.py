@@ -188,20 +188,21 @@ async def _apply_discounts(
     result_rows = await db.execute(
         select(Discount.model_id, Discount.discount_pct)
         .where(
-            Discount.user_id == owner,
+            or_(Discount.user_id == owner, Discount.user_id == None),
             Discount.valid_from <= now,
             or_(Discount.valid_until.is_(None), Discount.valid_until > now),
             Discount.ended_at.is_(None),
         )
     )
+    rows = result_rows.all()
     model_discounts: dict[str, Decimal] = {}
     account_discount: Decimal | None = None
-    for model_id, pct in result_rows.all():
+    for model_id, pct in rows:
         if model_id is None:
-            account_discount = pct
+            account_discount = max(account_discount or Decimal(0), pct)
         else:
-            model_discounts[model_id] = pct
-
+            existing = model_discounts.get(model_id)
+            model_discounts[model_id] = max(existing or Decimal(0), pct)
     result = []
     for m in models:
         if m.is_free:
