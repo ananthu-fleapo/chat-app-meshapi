@@ -18,7 +18,7 @@ from app.providers.registry import register_adapter
 from prometheus_fastapi_instrumentator import Instrumentator
 import asyncio
 
-from app.routers import auth, balance, inference, keys, models, payments, usage, fx_rates, gstin, admin, error_logs
+from app.routers import auth, balance, inference, keys, models, payments, responses, usage, fx_rates, gstin, admin, error_logs
 
 from fastapi.middleware.cors import CORSMiddleware 
 
@@ -243,6 +243,7 @@ def create_app() -> FastAPI:
     # ── Routers ───────────────────────────────────────────────────────────────
     app.include_router(auth.router)
     app.include_router(inference.router)
+    app.include_router(responses.router)
     app.include_router(keys.router)
     app.include_router(balance.router)
     app.include_router(usage.router)

@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 
 from app.schemas.chat import ChatCompletionRequest
+from app.schemas.responses import ResponsesRequest
 
 
 class ProviderAdapter(ABC):
@@ -53,4 +54,31 @@ class ProviderAdapter(ABC):
         provider_model_id: exact upstream model ID (see chat_completion docstring).
         """
         ...
+        yield b""  # make the type-checker treat this as an async generator
+
+    async def responses_create(
+        self,
+        request: ResponsesRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> dict:
+        """Non-streaming Responses API. Not supported by default; override in adapters that support it."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support the Responses API."
+        )
+
+    async def stream_responses_create(
+        self,
+        request: ResponsesRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        """Streaming Responses API. Not supported by default; override in adapters that support it."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support the Responses API."
+        )
         yield b""  # make the type-checker treat this as an async generator

@@ -21,6 +21,7 @@ import structlog
 from app.exceptions import GatewayTimeoutError, UpstreamError
 from app.providers.base import ProviderAdapter
 from app.schemas.chat import ROUTERV_ONLY_FIELDS, ChatCompletionRequest
+from app.schemas.responses import RESPONSES_ONLY_FIELDS, ResponsesRequest
 
 logger = structlog.get_logger()
 
@@ -53,6 +54,35 @@ def _build_payload(
         # OpenRouter enforces <=256 chars on the user field.
         # Truncate defensively — owner should always be a short UUID but
         # this guards against any unexpected long values in the DB.
+        payload.setdefault("user", f"owner:{owner}"[:256])
+    return payload
+
+
+def _build_responses_payload(
+    request: ResponsesRequest,
+    *,
+    stream: bool,
+    owner: str | None = None,
+    provider_model_id: str | None = None,
+) -> dict:
+    """
+    Serialize a ResponsesRequest for the OpenRouter /responses endpoint.
+    - Excludes None fields.
+    - Strips RouterV-only fields (template, variables, session_id).
+    - Forces stream=True/False explicitly.
+    - Does NOT inject stream_options — the Responses API sends usage in the
+      final SSE chunk natively, without needing include_usage=true.
+    - Sets user=owner:<label> for OpenRouter abuse-detection.
+    - Overrides model with provider_model_id when set (same pattern as _build_payload).
+    """
+    payload = request.model_dump(
+        exclude_none=True,
+        exclude=RESPONSES_ONLY_FIELDS,
+    )
+    payload["stream"] = stream
+    if provider_model_id:
+        payload["model"] = provider_model_id
+    if owner is not None:
         payload.setdefault("user", f"owner:{owner}"[:256])
     return payload
 
@@ -174,4 +204,71 @@ class OpenRouterAdapter(ProviderAdapter):
 
         except httpx.TimeoutException as exc:
             log.warning("upstream_stream_timeout")
+            raise GatewayTimeoutError() from exc
+
+    # ── Responses API ─────────────────────────────────────────────────────────
+
+    async def responses_create(
+        self,
+        request: ResponsesRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> dict:
+        payload = _build_responses_payload(
+            request, stream=False, owner=owner, provider_model_id=provider_model_id
+        )
+        log = logger.bind(model=request.model)
+
+        try:
+            response = await self._client.post(
+                "/responses",
+                json=payload,
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            return response.json()
+
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:300]
+            log.warning("upstream_http_error", status=exc.response.status_code, body=body)
+            raise UpstreamError() from exc
+
+        except httpx.TimeoutException as exc:
+            log.warning("upstream_timeout", model=request.model)
+            raise GatewayTimeoutError() from exc
+
+    async def stream_responses_create(
+        self,
+        request: ResponsesRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        payload = _build_responses_payload(
+            request, stream=True, owner=owner, provider_model_id=provider_model_id
+        )
+        log = logger.bind(model=request.model)
+
+        try:
+            async with self._client.stream(
+                "POST",
+                "/responses",
+                json=payload,
+                headers=self._auth_headers(api_key),
+            ) as response:
+                if response.status_code >= 400:
+                    await response.aread()
+                    body = response.text[:300]
+                    log.warning("upstream_stream_error", status=response.status_code, body=body)
+                    raise UpstreamError()
+
+                log.debug("upstream_responses_stream_open")
+                async for chunk in response.aiter_raw():
+                    yield chunk
+
+        except httpx.TimeoutException as exc:
+            log.warning("upstream_responses_stream_timeout")
             raise GatewayTimeoutError() from exc

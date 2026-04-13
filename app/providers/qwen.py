@@ -35,6 +35,7 @@ from app.exceptions import GatewayTimeoutError, UpstreamError
 from app.providers.base import ProviderAdapter
 from app.providers.openrouter import _build_payload
 from app.schemas.chat import ChatCompletionRequest
+from app.schemas.responses import RESPONSES_ONLY_FIELDS, ResponsesRequest
 
 logger = structlog.get_logger()
 
@@ -164,4 +165,80 @@ class QwenAdapter(ProviderAdapter):
 
         except httpx.TimeoutException as exc:
             log.warning("qwen_stream_timeout")
+            raise GatewayTimeoutError() from exc
+
+    # ── Responses API ─────────────────────────────────────────────────────────
+
+    async def responses_create(
+        self,
+        request: ResponsesRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> dict:
+        payload = request.model_dump(exclude_none=True, exclude=RESPONSES_ONLY_FIELDS)
+        payload["stream"] = False
+        payload["model"] = provider_model_id or _qwen_model_id(payload.get("model", ""))
+        payload["enable_thinking"] = False
+        if owner is not None:
+            payload.setdefault("user", f"owner:{owner}"[:256])
+        if "response_format" in payload:
+            payload["text"] = {"format": payload.pop("response_format")}
+        log = logger.bind(model=request.model, qwen_model=payload["model"])
+
+        try:
+            response = await self._client.post(
+                "/responses",
+                json=payload,
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            return response.json()
+
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:300]
+            log.warning("qwen_responses_http_error", status=exc.response.status_code, body=body)
+            raise UpstreamError() from exc
+
+        except httpx.TimeoutException as exc:
+            log.warning("qwen_responses_timeout")
+            raise GatewayTimeoutError() from exc
+
+    async def stream_responses_create(
+        self,
+        request: ResponsesRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        payload = request.model_dump(exclude_none=True, exclude=RESPONSES_ONLY_FIELDS)
+        payload["stream"] = True
+        payload["model"] = provider_model_id or _qwen_model_id(payload.get("model", ""))
+        if owner is not None:
+            payload.setdefault("user", f"owner:{owner}"[:256])
+        if "response_format" in payload:
+            payload["text"] = {"format": payload.pop("response_format")}
+        log = logger.bind(model=request.model, qwen_model=payload["model"])
+
+        try:
+            async with self._client.stream(
+                "POST",
+                "/responses",
+                json=payload,
+                headers=self._auth_headers(api_key),
+            ) as response:
+                if response.status_code >= 400:
+                    await response.aread()
+                    body = response.text[:300]
+                    log.warning("qwen_responses_stream_error", status=response.status_code, body=body)
+                    raise UpstreamError()
+
+                log.debug("qwen_responses_stream_open")
+                async for chunk in response.aiter_raw():
+                    yield chunk
+
+        except httpx.TimeoutException as exc:
+            log.warning("qwen_responses_stream_timeout")
             raise GatewayTimeoutError() from exc

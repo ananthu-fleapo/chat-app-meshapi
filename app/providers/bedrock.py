@@ -52,6 +52,7 @@ import structlog
 from app.exceptions import GatewayTimeoutError, UpstreamError
 from app.providers.base import ProviderAdapter
 from app.schemas.chat import ChatCompletionRequest
+from app.schemas.responses import RESPONSES_ONLY_FIELDS, ResponsesRequest
 
 logger = structlog.get_logger()
 
@@ -177,6 +178,26 @@ def _build_bedrock_request(request: ChatCompletionRequest, model_id: str) -> dic
     return {"modelId": model_id, **_build_bedrock_body(request)}
 
 
+def _build_responses_payload(
+    request: ResponsesRequest,
+    *,
+    stream: bool,
+    provider_model_id: str | None = None,
+) -> dict:
+    """
+    Build the payload for the Bedrock mantle /responses endpoint.
+
+    The bedrock-mantle endpoint is OpenAI-compatible so the payload mirrors the
+    OpenAI Responses API format.  RouterV-only fields (template, variables,
+    session_id) are stripped; model is translated via _bedrock_model_id if no
+    explicit provider_model_id is supplied.
+    """
+    payload = request.model_dump(exclude_none=True, exclude=RESPONSES_ONLY_FIELDS)
+    payload["stream"] = stream
+    payload["model"] = provider_model_id or _bedrock_model_id(request.model or "")
+    return payload
+
+
 # ── AWS EventStream binary parser ─────────────────────────────────────────────
 
 def _parse_eventstream_frames(buf: bytes) -> tuple[list[dict], bytes]:
@@ -240,6 +261,25 @@ def _parse_eventstream_frames(buf: bytes) -> tuple[list[dict], bytes]:
 
 
 # ── Response format conversion ────────────────────────────────────────────────
+
+def _normalize_responses_usage(body: dict) -> None:
+    """
+    Normalize OpenAI-style usage field names in a Responses API response body.
+
+    The bedrock-mantle endpoint returns OpenAI field names (input_tokens /
+    output_tokens).  RouterV usage logging expects prompt_tokens /
+    completion_tokens.  Mutates body in-place.
+    """
+    usage = body.get("usage")
+    if not usage:
+        return
+    if "input_tokens" in usage and "prompt_tokens" not in usage:
+        usage["prompt_tokens"] = usage.pop("input_tokens")
+    if "output_tokens" in usage and "completion_tokens" not in usage:
+        usage["completion_tokens"] = usage.pop("output_tokens")
+    if "input_tokens_details" in usage and "prompt_tokens_details" not in usage:
+        usage["prompt_tokens_details"] = usage.pop("input_tokens_details")
+
 
 def _bedrock_response_to_openai(bedrock_resp: dict, canonical_model: str) -> dict:
     """Convert a Bedrock Converse response to OpenAI chat.completion format."""
@@ -387,6 +427,9 @@ class BedrockAdapter(ProviderAdapter):
         self._http_client: httpx.AsyncClient | None = (
             httpx.AsyncClient(timeout=timeout) if api_key else None
         )
+        # Dedicated client for the bedrock-mantle OpenAI-compatible endpoint.
+        # Always initialized — used for both bearer and SigV4 auth on /responses.
+        self._mantle_client = httpx.AsyncClient(timeout=timeout)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -420,8 +463,10 @@ class BedrockAdapter(ProviderAdapter):
 
     @classmethod
     async def close(cls) -> None:
-        if cls._instance and cls._instance._http_client:
-            await cls._instance._http_client.aclose()
+        if cls._instance:
+            if cls._instance._http_client:
+                await cls._instance._http_client.aclose()
+            await cls._instance._mantle_client.aclose()
         cls._instance = None
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -453,6 +498,21 @@ class BedrockAdapter(ProviderAdapter):
             aws_access_key_id=self._aws_access_key_id,
             aws_secret_access_key=self._aws_secret_access_key,
         )
+
+    def _mantle_url(self, path: str) -> str:
+        return f"https://bedrock-mantle.{self._region}.api.aws/v1{path}"
+
+    def _sign_sigv4_headers(self, method: str, url: str, body_bytes: bytes) -> dict[str, str]:
+        """Sign an arbitrary HTTP request with SigV4 for the bedrock service."""
+        from botocore.auth import SigV4Auth  # type: ignore[import]
+        from botocore.awsrequest import AWSRequest  # type: ignore[import]
+        from botocore.credentials import Credentials  # type: ignore[import]
+
+        creds = Credentials(self._aws_access_key_id, self._aws_secret_access_key)
+        req = AWSRequest(method=method, url=url, data=body_bytes)
+        req.headers["Content-Type"] = "application/json"
+        SigV4Auth(creds, "bedrock-mantle", self._region).add_auth(req)
+        return dict(req.headers)
 
     # ── ProviderAdapter interface ─────────────────────────────────────────────
 
@@ -586,3 +646,131 @@ class BedrockAdapter(ProviderAdapter):
                 sse_bytes = _bedrock_stream_events_to_sse([event], completion_id, request.model)
                 if sse_bytes:
                     yield sse_bytes
+
+    # ── Responses API — bearer path ───────────────────────────────────────────
+
+    async def _responses_http(
+        self, request: ResponsesRequest, bedrock_model: str, api_key: str | None, log
+    ) -> dict:
+        key = self._bearer_key(api_key)
+        url = self._mantle_url("/responses")
+        payload = _build_responses_payload(request, stream=False, provider_model_id=bedrock_model)
+        resp = await self._mantle_client.post(
+            url, json=payload, headers=self._bearer_headers(key)
+        )
+        if resp.status_code != 200:
+            log.warning("bedrock_responses_http_error", status=resp.status_code, body=resp.text[:200])
+            raise UpstreamError()
+        body = resp.json()
+        _normalize_responses_usage(body)
+        return body
+
+    async def _responses_stream_http(
+        self, request: ResponsesRequest, bedrock_model: str, api_key: str | None, log
+    ) -> AsyncGenerator[bytes, None]:
+        key = self._bearer_key(api_key)
+        url = self._mantle_url("/responses")
+        payload = _build_responses_payload(request, stream=True, provider_model_id=bedrock_model)
+        log.debug("bedrock_responses_stream_open", auth="bearer")
+        async with self._mantle_client.stream(
+            "POST", url, json=payload, headers=self._bearer_headers(key)
+        ) as resp:
+            if resp.status_code != 200:
+                await resp.aread()
+                log.warning("bedrock_responses_stream_http_error", status=resp.status_code)
+                raise UpstreamError()
+            async for chunk in resp.aiter_raw():
+                yield chunk
+
+    # ── Responses API — SigV4 path ────────────────────────────────────────────
+
+    async def _responses_sigv4(
+        self, request: ResponsesRequest, bedrock_model: str, log
+    ) -> dict:
+        url = self._mantle_url("/responses")
+        payload = _build_responses_payload(request, stream=False, provider_model_id=bedrock_model)
+        body_bytes = json.dumps(payload).encode()
+        headers = self._sign_sigv4_headers("POST", url, body_bytes)
+        resp = await self._mantle_client.post(url, content=body_bytes, headers=headers)
+        if resp.status_code != 200:
+            log.warning("bedrock_responses_sigv4_error", status=resp.status_code, body=resp.text[:200])
+            raise UpstreamError()
+        body = resp.json()
+        _normalize_responses_usage(body)
+        return body
+
+    async def _responses_stream_sigv4(
+        self, request: ResponsesRequest, bedrock_model: str, log
+    ) -> AsyncGenerator[bytes, None]:
+        url = self._mantle_url("/responses")
+        payload = _build_responses_payload(request, stream=True, provider_model_id=bedrock_model)
+        body_bytes = json.dumps(payload).encode()
+        headers = self._sign_sigv4_headers("POST", url, body_bytes)
+        log.debug("bedrock_responses_stream_open", auth="sigv4")
+        async with self._mantle_client.stream(
+            "POST", url, content=body_bytes, headers=headers
+        ) as resp:
+            if resp.status_code != 200:
+                await resp.aread()
+                log.warning("bedrock_responses_stream_sigv4_error", status=resp.status_code)
+                raise UpstreamError()
+            async for chunk in resp.aiter_raw():
+                yield chunk
+
+    # ── ProviderAdapter: Responses API ────────────────────────────────────────
+
+    async def responses_create(
+        self,
+        request: ResponsesRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> dict:
+        bedrock_model = provider_model_id or _bedrock_model_id(request.model or "")
+        log = logger.bind(model=request.model, bedrock_model=bedrock_model)
+        try:
+            if self._use_bearer(api_key):
+                return await self._responses_http(request, bedrock_model, api_key, log)
+            else:
+                return await self._responses_sigv4(request, bedrock_model, log)
+        except (GatewayTimeoutError, UpstreamError):
+            raise
+        except Exception as exc:
+            err_name = type(exc).__name__
+            if "Timeout" in err_name or "timeout" in str(exc).lower():
+                log.warning("bedrock_responses_timeout")
+                raise GatewayTimeoutError() from exc
+            log.warning("bedrock_responses_error", error=str(exc))
+            raise UpstreamError() from exc
+
+    async def stream_responses_create(
+        self,
+        request: ResponsesRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        bedrock_model = provider_model_id or _bedrock_model_id(request.model or "")
+        log = logger.bind(model=request.model, bedrock_model=bedrock_model)
+        try:
+            if self._use_bearer(api_key):
+                async for chunk in self._responses_stream_http(
+                    request, bedrock_model, api_key, log
+                ):
+                    yield chunk
+            else:
+                async for chunk in self._responses_stream_sigv4(
+                    request, bedrock_model, log
+                ):
+                    yield chunk
+        except (GatewayTimeoutError, UpstreamError):
+            raise
+        except Exception as exc:
+            err_name = type(exc).__name__
+            if "Timeout" in err_name or "timeout" in str(exc).lower():
+                log.warning("bedrock_responses_stream_timeout")
+                raise GatewayTimeoutError() from exc
+            log.warning("bedrock_responses_stream_error", error=str(exc))
+            raise UpstreamError() from exc

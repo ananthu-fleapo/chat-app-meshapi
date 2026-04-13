@@ -24,8 +24,32 @@ from app.exceptions import GatewayTimeoutError, UpstreamError
 from app.providers.base import ProviderAdapter
 from app.providers.openrouter import _build_payload
 from app.schemas.chat import ChatCompletionRequest
+from app.schemas.responses import RESPONSES_ONLY_FIELDS, ResponsesRequest
 
 logger = structlog.get_logger()
+
+
+def _build_responses_payload(
+    request: ResponsesRequest,
+    *,
+    stream: bool,
+    owner: str | None = None,
+    provider_model_id: str | None = None,
+) -> dict:
+    """
+    Serialize a ResponsesRequest for the OpenAI /responses endpoint.
+    - OpenAI wraps response_format as: {"text": {"format": <original>}}.
+    - model is set from provider_model_id or stripped of the "openai/" prefix.
+    - Does NOT inject stream_options — OpenAI Responses API sends usage natively.
+    """
+    payload = request.model_dump(exclude_none=True, exclude=RESPONSES_ONLY_FIELDS)
+    payload["stream"] = stream
+    payload["model"] = provider_model_id or _openai_model_id(payload.get("model", ""))
+    if "response_format" in payload:
+        payload["text"] = {"format": payload.pop("response_format")}
+    if owner is not None:
+        payload.setdefault("user", f"owner:{owner}"[:256])
+    return payload
 
 
 def _openai_model_id(canonical: str) -> str:
@@ -152,4 +176,80 @@ class OpenAIDirectAdapter(ProviderAdapter):
 
         except httpx.TimeoutException as exc:
             log.warning("openai_direct_stream_timeout")
+            raise GatewayTimeoutError() from exc
+
+    # ── Responses API ─────────────────────────────────────────────────────────
+
+    async def responses_create(
+        self,
+        request: ResponsesRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> dict:
+        payload = _build_responses_payload(
+            request, stream=False, owner=owner, provider_model_id=provider_model_id
+        )
+        log = logger.bind(model=request.model, openai_model=payload["model"])
+
+        try:
+            response = await self._client.post(
+                "/responses",
+                json=payload,
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            body = response.json()
+            return body
+
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:300]
+            log.warning(
+                "openai_direct_responses_http_error",
+                status=exc.response.status_code,
+                body=body,
+            )
+            raise UpstreamError() from exc
+
+        except httpx.TimeoutException as exc:
+            log.warning("openai_direct_responses_timeout")
+            raise GatewayTimeoutError() from exc
+
+    async def stream_responses_create(
+        self,
+        request: ResponsesRequest,
+        *,
+        api_key: str | None = None,
+        owner: str | None = None,
+        provider_model_id: str | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        payload = _build_responses_payload(
+            request, stream=True, owner=owner, provider_model_id=provider_model_id
+        )
+        log = logger.bind(model=request.model, openai_model=payload["model"])
+
+        try:
+            async with self._client.stream(
+                "POST",
+                "/responses",
+                json=payload,
+                headers=self._auth_headers(api_key),
+            ) as response:
+                if response.status_code >= 400:
+                    await response.aread()
+                    body = response.text[:300]
+                    log.warning(
+                        "openai_direct_responses_stream_error",
+                        status=response.status_code,
+                        body=body,
+                    )
+                    raise UpstreamError()
+
+                log.debug("openai_direct_responses_stream_open")
+                async for chunk in response.aiter_raw():
+                    yield chunk
+
+        except httpx.TimeoutException as exc:
+            log.warning("openai_direct_responses_stream_timeout")
             raise GatewayTimeoutError() from exc
