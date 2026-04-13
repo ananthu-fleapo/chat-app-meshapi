@@ -157,9 +157,6 @@ async def test_responses(
             "provider": "qwen"
           }'
     """
-    if settings.env != "dev":
-        raise HTTPException(status_code=404, detail="Not found")
-
     adapter = get_adapter(body.provider)
     key_attr = _PROVIDER_KEYS.get(body.provider)
     api_key = getattr(settings, key_attr, None) if key_attr else None
