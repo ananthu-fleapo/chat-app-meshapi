@@ -18,7 +18,22 @@ from app.providers.registry import register_adapter
 from prometheus_fastapi_instrumentator import Instrumentator
 import asyncio
 
-from app.routers import auth, balance, batch, inference, keys, models, payments, responses, usage, fx_rates, gstin, admin, error_logs
+from app.routers import (
+    admin,
+    admin_test_responses,
+    auth,
+    balance,
+    batch,
+    error_logs,
+    fx_rates,
+    gstin,
+    inference,
+    keys,
+    models,
+    payments,
+    responses,
+    usage,
+)
 
 from fastapi.middleware.cors import CORSMiddleware 
 
@@ -371,6 +386,9 @@ def create_app() -> FastAPI:
     # containing "mesh_api:admin".
     app.include_router(admin.router)
     app.include_router(error_logs.router)
+
+    # Test endpoint — dev only (returns 404 in prod)
+    app.include_router(admin_test_responses.router)
 
     # ── Prometheus metrics ────────────────────────────────────────────────────
     # Instruments HTTP metrics. Endpoint is registered manually below so we
