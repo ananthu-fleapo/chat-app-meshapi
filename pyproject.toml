@@ -24,6 +24,8 @@ dependencies = [
     "prometheus-fastapi-instrumentator>=7.0.0",
     # Control plane JWT verification (Supabase HS256 tokens)
     "PyJWT>=2.9.0",
+    # Multipart form parsing (required for POST /v1/files file uploads)
+    "python-multipart>=0.0.9",
     # MongoDB async driver — request logs + usage event dual-write
     "motor>=3.4.0",
 ]

@@ -653,3 +653,59 @@ class Discount(Base):
     def __repr__(self) -> str:
         scope = f"model={self.model_id!r}" if self.model_id else "account-level"
         return f"<Discount id={self.id} user={self.user_id!r} {scope} pct={self.discount_pct}>"
+
+
+class BatchJob(Base):
+    """
+    Tracks every OpenAI batch job created through MeshAPI.
+
+    Written on POST /v1/batches and updated whenever GET /v1/batches/{batch_id}
+    or the background poller observes a status change.  The background poller
+    queries this table every 60 s to find in-progress batches and triggers
+    usage sync + balance deduction when they complete — even if the customer
+    never polls or downloads through MeshAPI again.
+
+    Columns
+    -------
+    batch_id        OpenAI's batch ID (e.g. "batch_abc123"). Unique.
+    owner           Matches api_key.owner — used to resolve upstream key and
+                    deduct balance.
+    key_id          The RouterV API key that created the batch.
+    input_file_id   OpenAI file ID of the uploaded JSONL.
+    output_file_id  Set when status first transitions to completed. Used by
+                    GET /v1/files/{id}/content to trigger sync on direct download.
+    status          Last known OpenAI status: validating | in_progress |
+                    finalizing | completed | failed | cancelled | expired.
+    usage_synced    True once fire_usage_log has been called for all requests
+                    in this batch. Guards against double-billing.
+    completed_at    Wall-clock time we observed status=completed.
+    """
+
+    __tablename__ = "batch_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    batch_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
+    owner: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    key_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    input_file_id: Mapped[str] = mapped_column(Text, nullable=False)
+    output_file_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="validating")
+    usage_synced: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    # UUID of the UsageEvent row created at batch submission time.
+    # That row starts with status="pending" and is updated to "success"/"error"
+    # when the batch reaches a terminal state.  NULL for legacy rows.
+    usage_event_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"<BatchJob batch_id={self.batch_id!r} owner={self.owner!r} "
+            f"status={self.status!r} synced={self.usage_synced}>"
+        )

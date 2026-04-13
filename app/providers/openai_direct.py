@@ -178,6 +178,156 @@ class OpenAIDirectAdapter(ProviderAdapter):
             log.warning("openai_direct_stream_timeout")
             raise GatewayTimeoutError() from exc
 
+    # ── Batch / Files API ─────────────────────────────────────────────────────
+
+    async def upload_file(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        purpose: str,
+        *,
+        api_key: str | None = None,
+    ) -> dict:
+        try:
+            response = await self._client.post(
+                "/files",
+                files={"file": (filename, file_bytes, "application/octet-stream")},
+                data={"purpose": purpose},
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.warning("openai_upload_file_error", status=exc.response.status_code, body=exc.response.text[:300])
+            raise UpstreamError() from exc
+        except httpx.TimeoutException as exc:
+            logger.warning("openai_upload_file_timeout")
+            raise GatewayTimeoutError() from exc
+
+    async def get_file(self, file_id: str, *, api_key: str | None = None) -> dict:
+        try:
+            response = await self._client.get(
+                f"/files/{file_id}",
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.warning("openai_get_file_error", status=exc.response.status_code)
+            raise UpstreamError() from exc
+        except httpx.TimeoutException as exc:
+            raise GatewayTimeoutError() from exc
+
+    async def delete_file(self, file_id: str, *, api_key: str | None = None) -> dict:
+        try:
+            response = await self._client.delete(
+                f"/files/{file_id}",
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.warning("openai_delete_file_error", status=exc.response.status_code)
+            raise UpstreamError() from exc
+        except httpx.TimeoutException as exc:
+            raise GatewayTimeoutError() from exc
+
+    async def get_file_content(self, file_id: str, *, api_key: str | None = None) -> bytes:
+        try:
+            response = await self._client.get(
+                f"/files/{file_id}/content",
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            return response.content
+        except httpx.HTTPStatusError as exc:
+            logger.warning("openai_get_file_content_error", status=exc.response.status_code)
+            raise UpstreamError() from exc
+        except httpx.TimeoutException as exc:
+            raise GatewayTimeoutError() from exc
+
+    async def create_batch(
+        self,
+        input_file_id: str,
+        endpoint: str,
+        completion_window: str,
+        metadata: dict | None = None,
+        *,
+        api_key: str | None = None,
+    ) -> dict:
+        payload: dict = {
+            "input_file_id": input_file_id,
+            "endpoint": endpoint,
+            "completion_window": completion_window,
+        }
+        if metadata:
+            payload["metadata"] = metadata
+        try:
+            response = await self._client.post(
+                "/batches",
+                json=payload,
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.warning("openai_create_batch_error", status=exc.response.status_code, body=exc.response.text[:300])
+            raise UpstreamError() from exc
+        except httpx.TimeoutException as exc:
+            raise GatewayTimeoutError() from exc
+
+    async def get_batch(self, batch_id: str, *, api_key: str | None = None) -> dict:
+        try:
+            response = await self._client.get(
+                f"/batches/{batch_id}",
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.warning("openai_get_batch_error", status=exc.response.status_code)
+            raise UpstreamError() from exc
+        except httpx.TimeoutException as exc:
+            raise GatewayTimeoutError() from exc
+
+    async def list_batches(
+        self,
+        after: str | None = None,
+        limit: int = 20,
+        *,
+        api_key: str | None = None,
+    ) -> dict:
+        params: dict = {"limit": limit}
+        if after:
+            params["after"] = after
+        try:
+            response = await self._client.get(
+                "/batches",
+                params=params,
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.warning("openai_list_batches_error", status=exc.response.status_code)
+            raise UpstreamError() from exc
+        except httpx.TimeoutException as exc:
+            raise GatewayTimeoutError() from exc
+
+    async def cancel_batch(self, batch_id: str, *, api_key: str | None = None) -> dict:
+        try:
+            response = await self._client.post(
+                f"/batches/{batch_id}/cancel",
+                headers=self._auth_headers(api_key),
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.warning("openai_cancel_batch_error", status=exc.response.status_code)
+            raise UpstreamError() from exc
+        except httpx.TimeoutException as exc:
+            raise GatewayTimeoutError() from exc
+
     # ── Responses API ─────────────────────────────────────────────────────────
 
     async def responses_create(
@@ -200,8 +350,7 @@ class OpenAIDirectAdapter(ProviderAdapter):
                 headers=self._auth_headers(api_key),
             )
             response.raise_for_status()
-            body = response.json()
-            return body
+            return response.json()
 
         except httpx.HTTPStatusError as exc:
             body = exc.response.text[:300]
