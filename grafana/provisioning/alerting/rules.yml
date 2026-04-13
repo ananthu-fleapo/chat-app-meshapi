@@ -15,8 +15,8 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "5xx error rate is {{ $values.rateReduced.Value | printf \"%.2f\" }}%"
-          description: Check application ERROR logs for the root cause.
+          summary: "5xx error rate is {{ $values.rateReduced.Value | printf \"%.2f\" }}% on {{ $labels.handler }}"
+          description: ""
           __dashboardUid__: routerv-slo
           __panelId__: "5"
         data:
@@ -26,7 +26,7 @@ groups:
               from: 600
               to: 0
             model:
-              expr: sum(rate(http_requests_total{job="routersvc"}[5m]))
+              expr: sum by (handler) (rate(http_requests_total{job="routersvc"}[5m]))
               instant: false
               range: true
           - refId: errors5xx
@@ -35,7 +35,7 @@ groups:
               from: 600
               to: 0
             model:
-              expr: sum(rate(http_requests_total{job="routersvc",status=~"5.."}[5m]))
+              expr: sum by (handler) (rate(http_requests_total{job="routersvc",status=~"5.."}[5m]))
               instant: false
               range: true
           - refId: rate
@@ -77,7 +77,7 @@ groups:
           severity: warning
         annotations:
           summary: "Inference p99 latency is {{ $values.B.Value | printf \"%.0f\" }}ms"
-          description: Check application logs sorted by latency_ms for the root cause.
+          description: ""
           __dashboardUid__: routerv-main
           __panelId__: "16"
         data:
@@ -124,7 +124,7 @@ groups:
           severity: warning
         annotations:
           summary: "Non-inference p99 latency is {{ $values.B.Value | printf \"%.0f\" }}ms"
-          description: Check application logs sorted by latency_ms for slow control/data plane handlers.
+          description: ""
           __dashboardUid__: routerv-slo
           __panelId__: "10"
         data:
@@ -171,7 +171,7 @@ groups:
           severity: warning
         annotations:
           summary: "4xx client error rate is {{ $values.rateReduced.Value | printf \"%.2f\" }}%"
-          description: Check application logs for repeated client errors. May indicate broken clients, bad request formats, or missing resources.
+          description: ""
           __dashboardUid__: routerv-slo
           __panelId__: "6"
         data:
@@ -231,8 +231,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "An endpoint success rate dropped below 99.5%: {{ $values.B.Value | printf \"%.2f\" }}%"
-          description: Check application logs filtered by the affected handler for 4xx/5xx errors.
+          summary: "Endpoint success rate is {{ $values.B.Value | printf \"%.2f\" }}% on {{ $labels.handler }}"
+          description: ""
           __dashboardUid__: routerv-slo
           __panelId__: "7"
         data:
@@ -279,7 +279,7 @@ groups:
           severity: warning
         annotations:
           summary: "RAM usage is {{ $values.B.Value | printf \"%.1f\" }}% ({{ $values.rss.Value | printf \"%.0f\" }} MB of {{ $values.total.Value | printf \"%.0f\" }} MB)"
-          description: Check application logs for memory usage patterns. Alert fires when RSS exceeds 80% of total system memory.
+          description: ""
           __dashboardUid__: routerv-slo
           __panelId__: "4"
         data:
@@ -340,7 +340,7 @@ groups:
           severity: warning
         annotations:
           summary: "Total CPU usage is {{ $values.B.Value | printf \"%.1f\" }}% (normalized across {{ $values.cores.Value | printf \"%.0f\" }} cores)"
-          description: Check application logs for CPU usage patterns. Alert fires when machine CPU exceeds 80% of total capacity.
+          description: ""
           __dashboardUid__: routerv-slo
           __panelId__: "2"
         data:

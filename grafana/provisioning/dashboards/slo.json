@@ -312,6 +312,36 @@
           }
         }
       }
+    },
+    {
+      "id": 11,
+      "title": "Control/Data Plane p50 Latency by Endpoint",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 57, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{job=\"routersvc\",handler!=\"/v1/chat/completions\"}[5m])) by (le, handler)) * 1000",
+          "legendFormat": "{{handler}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 500 },
+              { "color": "red", "value": 1000 }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": { "mode": "line" }
+          }
+        }
+      }
     }
   ]
 }

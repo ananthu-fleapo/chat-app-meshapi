@@ -1453,7 +1453,7 @@ async def list_models_admin(
 
     now = datetime.now(timezone.utc)
     active_filter = [
-        Discount.is_active.is_(True),
+        Discount.ended_at.is_(None),
         Discount.valid_from <= now,
         or_(Discount.valid_until.is_(None), Discount.valid_until > now),
     ]
