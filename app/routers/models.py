@@ -173,8 +173,8 @@ async def _apply_discounts(
     """
     Enrich each paid model's pricing with the caller's active discount.
 
-    Fetches all active discounts for the owner in a single query, then applies
-    them in memory — model-level overrides account-level (non-stackable).
+    Fetches all active user-level discounts in a single query and applies
+    the best matching one per model (model-specific wins over account-level).
     Free models are skipped.
     """
     now = datetime.now(UTC)
@@ -183,9 +183,9 @@ async def _apply_discounts(
         select(Discount.model_id, Discount.discount_pct)
         .where(
             Discount.user_id == owner,
-            Discount.is_active.is_(True),
             Discount.valid_from <= now,
             or_(Discount.valid_until.is_(None), Discount.valid_until > now),
+            Discount.ended_at.is_(None),
         )
     )
     model_discounts: dict[str, Decimal] = {}

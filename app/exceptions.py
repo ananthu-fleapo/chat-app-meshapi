@@ -193,14 +193,34 @@ async def routerv_exception_handler(request: Request, exc: RouterVError) -> JSON
     )
 
 
+def _serialize_validation_errors(errors: list) -> list:
+    """Convert Pydantic v2 error dicts to JSON-serializable form.
+
+    Pydantic v2 includes the original Python exception in ctx.error, which
+    is not JSON-serializable by json.dumps. Convert exceptions to strings.
+    """
+    out = []
+    for err in errors:
+        e = dict(err)
+        if "ctx" in e:
+            e["ctx"] = {
+                k: str(v) if isinstance(v, Exception) else v
+                for k, v in e["ctx"].items()
+            }
+        e.pop("url", None)  # strip verbose Pydantic docs URL
+        out.append(e)
+    return out
+
+
 async def validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
+    errors = _serialize_validation_errors(exc.errors())
     logger.info(
         "validation_error",
         path=request.url.path,
         method=request.method,
-        detail=exc.errors(),
+        detail=errors,
     )
     return JSONResponse(
         status_code=422,
@@ -208,7 +228,7 @@ async def validation_exception_handler(
             "error": {
                 "code": "validation_error",
                 "message": "Request validation failed.",
-                "details": exc.errors(),
+                "details": errors,
             },
             "request_id": _request_id(request),
         },

@@ -31,12 +31,14 @@ import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from enum import Enum
 
 import structlog
+from structlog.contextvars import bind_contextvars
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, model_validator
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
+from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from ulid import ULID
@@ -864,6 +866,8 @@ class ModelPriceIn(BaseModel):
     prompt_usd_per_1m: float | None = None
     completion_usd_per_1m: float | None = None
     is_free: bool = False
+    # Optional: create a model-level discount (applies to all users) in the same request.
+    discount_pct: float | None = None   # 0–100; None = no discount created
     # What the upstream provider charges us — used to calculate upstream_cost_usd
     # in usage_events for providers that don't report cost in their API response
     # (Vertex AI, Bedrock, OpenAI Direct, Qwen).  Leave unset for OpenRouter
@@ -1088,6 +1092,39 @@ async def create_model_price(
 
     await db.flush()
     await db.refresh(price)
+
+    # Optionally create a model-level discount (user_id=None = all users) in the same transaction.
+    if body.discount_pct is not None:
+        from datetime import UTC, datetime as _dt
+        if not (0 <= body.discount_pct <= 100):
+            raise HTTPException(status_code=422, detail="discount_pct must be between 0 and 100")
+        _now = _dt.now(UTC)
+        existing_result = await db.execute(
+            select(Discount).where(
+                Discount.user_id.is_(None),
+                Discount.model_id == body.model_id,
+                or_(Discount.valid_until.is_(None), Discount.valid_until > _now),
+                Discount.ended_at.is_(None),
+            )
+        )
+        existing_discounts = existing_result.scalars().all()
+        for d_old in existing_discounts:
+            d_old.valid_until = _now
+            d_old.ended_at = _now
+            d_old.ended_reason = "replaced"
+            logger.info("discount_expired_before_replace", model_id=body.model_id, discount_id=str(d_old.id))
+        discount = Discount(
+            user_id=None,
+            model_id=body.model_id,
+            discount_pct=Decimal(str(body.discount_pct)),
+            valid_from=_now,
+            label=f"Auto-created with model price for {body.model_id}",
+        )
+        db.add(discount)
+        await db.flush()
+        bind_contextvars(model_id=body.model_id)
+        logger.info("discount_created_with_price", model_id=body.model_id, pct=body.discount_pct)
+
     await _invalidate_models_cache()
     logger.info(
         "model_price_set",
@@ -1501,32 +1538,54 @@ async def delete_model(
 
 # ── Discounts ─────────────────────────────────────────────────────────────────
 
+
+class DiscountEndedReason(str, Enum):
+    DISABLED = "disabled"  # Admin manually deactivated via "Expire Now"
+    REPLACED = "replaced"  # Admin expired to create a replacement discount
+    EXPIRED = "expired"    # Discount reached its valid_until timestamp
+
+
 class DiscountIn(BaseModel):
-    user_id: str
-    model_id: str | None = None          # None = account-level
+    user_id: str | None = None           # None = applies to all users for the given model
+    model_id: str | None = None          # None = account-level (all models for this user)
     discount_pct: float                  # 0–100
-    valid_from: str | None = None        # ISO8601; defaults to now
-    valid_until: str | None = None       # ISO8601; None = no expiry
+    valid_from: datetime | None = None   # ISO8601 with timezone; defaults to now() if omitted
+    valid_until: datetime | None = None  # ISO8601 with timezone; None = no expiry
     label: str | None = None
+
+    @field_validator("valid_from", "valid_until", mode="after")
+    @classmethod
+    def require_timezone(cls, v: datetime | None) -> datetime | None:
+        if v is not None and v.tzinfo is None:
+            raise ValueError("datetime must be timezone-aware (include UTC offset)")
+        return v
 
 
 class DiscountUpdateIn(BaseModel):
     discount_pct: float | None = None
-    valid_from: str | None = None
-    valid_until: str | None = None
-    is_active: bool | None = None
+    valid_from: datetime | None = None   # ISO8601 with timezone; only editable for future discounts
+    valid_until: datetime | None = None  # ISO8601 with timezone
+    ended_reason: DiscountEndedReason | None = None
     label: str | None = None
+
+    @field_validator("valid_from", "valid_until", mode="after")
+    @classmethod
+    def require_timezone(cls, v: datetime | None) -> datetime | None:
+        if v is not None and v.tzinfo is None:
+            raise ValueError("datetime must be timezone-aware (include UTC offset)")
+        return v
 
 
 class DiscountOut(BaseModel):
     id: str
-    user_id: str
+    user_id: str | None
     email: str | None
     model_id: str | None
     discount_pct: str
     valid_from: str
     valid_until: str | None
-    is_active: bool
+    ended_at: str | None
+    ended_reason: DiscountEndedReason | None
     label: str | None
     created_at: str
 
@@ -1540,7 +1599,8 @@ def _to_discount_out(d: Discount, *, email: str | None = None) -> DiscountOut:
         discount_pct=str(d.discount_pct),
         valid_from=d.valid_from.isoformat(),
         valid_until=d.valid_until.isoformat() if d.valid_until else None,
-        is_active=d.is_active,
+        ended_at=d.ended_at.isoformat() if d.ended_at else None,
+        ended_reason=DiscountEndedReason(d.ended_reason) if d.ended_reason else None,
         label=d.label,
         created_at=d.created_at.isoformat(),
     )
@@ -1551,27 +1611,46 @@ async def create_discount(
     body: DiscountIn,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Create a discount for a user. model_id=null = account-level (all models)."""
+    """Create a discount. model_id=null = all models; user_id=null = all users.
+    Returns 409 if an active (non-expired) discount already exists for the same scope key."""
     from datetime import UTC, datetime
     from decimal import Decimal as D
 
     if not (0 <= body.discount_pct <= 100):
         raise HTTPException(status_code=422, detail="discount_pct must be between 0 and 100")
 
-    valid_from = datetime.fromisoformat(body.valid_from) if body.valid_from else datetime.now(UTC)
-    valid_until = datetime.fromisoformat(body.valid_until) if body.valid_until else None
+    now = datetime.now(UTC)
+
+    # Conflict check — only one active discount per (user_id, model_id) scope key
+    conflict_result = await db.execute(
+        select(Discount).where(
+            Discount.user_id == body.user_id,
+            Discount.model_id == body.model_id,
+            or_(Discount.valid_until.is_(None), Discount.valid_until > now),
+        )
+    )
+    conflicts = conflict_result.scalars().all()
+    if conflicts:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Active discount already exists for this scope. Expire the existing discount first.",
+                "conflicts": [_to_discount_out(c).model_dump() for c in conflicts],
+            },
+        )
 
     d = Discount(
         user_id=body.user_id,
         model_id=body.model_id,
         discount_pct=D(str(body.discount_pct)),
-        valid_from=valid_from,
-        valid_until=valid_until,
+        valid_from=body.valid_from or now,
+        valid_until=body.valid_until,
         label=body.label,
     )
     db.add(d)
     await db.flush()
     await db.refresh(d)
+    bind_contextvars(user_id=body.user_id, model_id=body.model_id)
     logger.info("discount_created", user_id=body.user_id, model_id=body.model_id, pct=body.discount_pct)
     return _to_discount_out(d)
 
@@ -1604,8 +1683,10 @@ async def update_discount(
     body: DiscountUpdateIn,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Update discount percentage, dates, active state, or label."""
+    """Update discount percentage, expiry, or label.
+    Setting valid_until to now-or-past retires the discount and stamps ended_at/ended_reason."""
     import uuid as _uuid
+    from datetime import UTC, datetime
     from decimal import Decimal as D
 
     result = await db.execute(select(Discount).where(Discount.id == _uuid.UUID(discount_id)))
@@ -1613,23 +1694,50 @@ async def update_discount(
     if d is None:
         raise NotFoundError(f"Discount '{discount_id}' not found.")
 
-    if body.discount_pct is not None:
-        if not (0 <= body.discount_pct <= 100):
+    now = datetime.now(UTC)
+
+    # Update only the fields provided in the request
+    update_data = body.model_dump(exclude_unset=True)
+
+    # discount_pct and valid_from are immutable once a discount has started
+    if d.valid_from <= now:
+        if "discount_pct" in update_data:
+            raise HTTPException(
+                status_code=422,
+                detail="discount_pct cannot be changed after a discount has started.",
+            )
+        if "valid_from" in update_data:
+            raise HTTPException(
+                status_code=422,
+                detail="valid_from cannot be changed after a discount has started.",
+            )
+
+    if "discount_pct" in update_data:
+        val = update_data["discount_pct"]
+        if not (0 <= val <= 100):
             raise HTTPException(status_code=422, detail="discount_pct must be between 0 and 100")
-        d.discount_pct = D(str(body.discount_pct))
-    if body.valid_from is not None:
-        from datetime import datetime
-        d.valid_from = datetime.fromisoformat(body.valid_from)
-    if body.valid_until is not None:
-        from datetime import datetime
-        d.valid_until = datetime.fromisoformat(body.valid_until)
-    if body.is_active is not None:
-        d.is_active = body.is_active
-    if body.label is not None:
-        d.label = body.label
+        d.discount_pct = D(str(val))
+
+    if "valid_from" in update_data:
+        d.valid_from = update_data["valid_from"]
+
+    if "valid_until" in update_data:
+        d.valid_until = update_data["valid_until"]
+        # If valid_until is set to a past date, stamp audit fields
+        if d.valid_until is not None and d.valid_until <= now:
+            d.ended_at = now
+            d.ended_reason = (body.ended_reason or DiscountEndedReason.DISABLED).value
+
+    # Persist ended_reason whenever supplied, even without retiring the discount
+    if body.ended_reason is not None and d.ended_at is None:
+        d.ended_reason = body.ended_reason.value
+
+    if "label" in update_data:
+        d.label = update_data["label"]
 
     await db.flush()
     await db.refresh(d)
+    bind_contextvars(discount_id=discount_id)
     logger.info("discount_updated", discount_id=discount_id)
     return _to_discount_out(d)
 

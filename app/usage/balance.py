@@ -24,7 +24,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import structlog
-from sqlalchemy import select, text
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -162,62 +162,41 @@ async def deduct_balance(owner: str, cost_usd: Decimal) -> None:
 
 async def get_active_discount(owner: str, model: str, db: AsyncSession) -> Decimal | None:
     """
-    Return the discount_pct for this owner + model, or None if no active discount.
+    Return the highest discount_pct for this owner + model, or None if no active discount.
 
-    Precedence (non-stackable):
-      1. Model-level discount  (user_id=owner, model_id=model)
-      2. Account-level discount (user_id=owner, model_id=NULL)
+    All three scopes are considered simultaneously (non-stackable):
+      - User+Model  (user_id=owner, model_id=model)
+      - User account-level (user_id=owner, model_id=NULL)
+      - Global model (user_id=NULL, model_id=model)
 
-    Expired discounts (valid_until < now) log a warning and are skipped —
-    the caller deducts the full charge with no error raised.
+    The discount with the highest percentage wins.
+    Temporal validity (valid_from/valid_until) is enforced in the query.
     """
     now = datetime.now(UTC)
 
-    for scope, model_filter in [("model", model), ("account", None)]:
-        if model_filter is not None:
-            model_condition = Discount.model_id == model_filter
-        else:
-            model_condition = Discount.model_id.is_(None)
-
-        result = await db.execute(
-            select(Discount)
-            .where(
-                Discount.user_id == owner,
-                Discount.is_active.is_(True),
-                model_condition,
-            )
-            .limit(1)
+    result = await db.execute(
+        select(Discount)
+        .where(
+            Discount.valid_from <= now,
+            or_(Discount.valid_until.is_(None), Discount.valid_until > now),
+            Discount.ended_at.is_(None),
+            or_(
+                and_(Discount.user_id == owner, Discount.model_id == model),
+                and_(Discount.user_id == owner, Discount.model_id.is_(None)),
+                and_(Discount.user_id.is_(None), Discount.model_id == model),
+            ),
         )
-        d = result.scalar_one_or_none()
-        if d is None:
-            continue
+        .order_by(Discount.discount_pct.desc())
+        .limit(1)
+    )
+    d = result.scalar_one_or_none()
+    if d is None:
+        return None
 
-        # Discount exists — check temporal validity
-        if d.valid_from.replace(tzinfo=UTC) > now:
-            continue  # Not yet active
-
-        if d.valid_until is not None and d.valid_until.replace(tzinfo=UTC) < now:
-            logger.warning(
-                "discount_expired",
-                owner=owner,
-                model=model,
-                scope=scope,
-                discount_id=str(d.id),
-                expired_at=d.valid_until.isoformat(),
-                hint="Deducting full charge — update or deactivate the discount",
-            )
-            continue  # Expired — full charge, no error
-
-        logger.debug(
-            "discount_applied",
-            owner=owner,
-            model=model,
-            scope=scope,
-            pct=str(d.discount_pct),
-        )
-        return d.discount_pct
-
-    return None
+    from structlog.contextvars import bind_contextvars
+    bind_contextvars(owner=owner, model=model)
+    logger.debug("discount_applied", owner=owner, model=model, pct=str(d.discount_pct))
+    return d.discount_pct
 
 
 async def credit_balance(user_id: str, amount_usd: Decimal, db: AsyncSession) -> None:

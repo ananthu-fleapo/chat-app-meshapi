@@ -37,9 +37,12 @@ def _make_write_session():
     session = AsyncMock()
     session.add = MagicMock()
     session.commit = AsyncMock()
-    # Return a plain MagicMock so that result methods like scalar_one_or_none()
-    # don't produce unawaited coroutines (Python 3.13 warns on this).
-    session.execute = AsyncMock(return_value=MagicMock())
+    # scalar_one_or_none() must return None so that get_active_discount()
+    # (called inside log_usage_event for the discount-lookup path) returns None
+    # rather than a truthy MagicMock that corrupts cost arithmetic.
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(return_value=result_mock)
     return session
 
 

@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, Numeric, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -606,14 +606,17 @@ class Discount(Base):
 
     Columns
     -------
-    user_id       Matches ApiKey.owner — discount is owner-scoped.
-    model_id      NULL = account-level (all models).
+    user_id       Matches ApiKey.owner — NULL = applies to all users.
+                  Constraint: at least one of user_id or model_id must be set.
+    model_id      NULL = account-level (all models for this user).
                   Set = model-level (this model only).
-                  Model-level takes priority over account-level (non-stackable).
+                  Highest discount_pct wins when multiple scopes match (non-stackable).
     discount_pct  Percentage reduction: 0.00–100.00.
-    valid_from    Discount becomes active at this timestamp.
+    valid_from    Discount becomes active at this timestamp (set to now() on creation).
     valid_until   Discount expires at this timestamp. NULL = no expiry.
-    is_active     False = manually deactivated by admin.
+                  Setting valid_until <= now() is the retirement mechanism.
+    ended_at      Timestamp when the discount was manually retired. NULL = still active.
+    ended_reason  Why it was retired: 'expired', 'disabled', or 'replaced'.
     label         Admin note e.g. "Q2 promo", "partner deal".
     """
 
@@ -624,14 +627,15 @@ class Discount(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    user_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    user_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     model_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     discount_pct: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
     valid_from: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     label: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
