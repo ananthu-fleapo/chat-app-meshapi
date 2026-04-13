@@ -1361,6 +1361,9 @@ class ModelIn(BaseModel):
     context_length: int | None = None
     description: str | None = None
     is_enabled: bool = True
+    supports_thinking: bool = False
+    supports_completions_api: bool = True
+    supports_responses_api: bool = False
 
 
 class ModelUpdateIn(BaseModel):
@@ -1368,6 +1371,9 @@ class ModelUpdateIn(BaseModel):
     context_length: int | None = None
     description: str | None = None
     is_enabled: bool | None = None
+    supports_thinking: bool | None = None
+    supports_completions_api: bool | None = None
+    supports_responses_api: bool | None = None
 
 
 class ModelRegistryOut(BaseModel):
@@ -1377,6 +1383,9 @@ class ModelRegistryOut(BaseModel):
     context_length: int | None
     description: str | None
     is_enabled: bool
+    supports_thinking: bool
+    supports_completions_api: bool
+    supports_responses_api: bool
     created_at: str
     updated_at: str
     prices: list[ModelPriceOut] = []
@@ -1395,6 +1404,9 @@ def _to_model_out(
         context_length=m.context_length,
         description=m.description,
         is_enabled=m.is_enabled,
+        supports_thinking=m.supports_thinking,
+        supports_completions_api=m.supports_completions_api,
+        supports_responses_api=m.supports_responses_api,
         created_at=m.created_at.isoformat(),
         updated_at=m.updated_at.isoformat(),
         prices=[_to_price_out(p) for p in (prices or [])],
@@ -1425,6 +1437,9 @@ async def create_model(
         context_length=body.context_length,
         description=body.description,
         is_enabled=body.is_enabled,
+        supports_thinking=body.supports_thinking,
+        supports_completions_api=body.supports_completions_api,
+        supports_responses_api=body.supports_responses_api,
     )
     db.add(model)
     await db.flush()
@@ -1508,6 +1523,12 @@ async def update_model(
         model.description = body.description
     if body.is_enabled is not None:
         model.is_enabled = body.is_enabled
+    if body.supports_thinking is not None:
+        model.supports_thinking = body.supports_thinking
+    if body.supports_completions_api is not None:
+        model.supports_completions_api = body.supports_completions_api
+    if body.supports_responses_api is not None:
+        model.supports_responses_api = body.supports_responses_api
 
     await db.flush()
     await db.refresh(model)

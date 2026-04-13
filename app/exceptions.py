@@ -85,6 +85,17 @@ class UnsupportedModelError(RouterVError):
         super().__init__(msg)
 
 
+class ModelCapabilityError(RouterVError):
+    status_code = 400
+    error_code = "model_capability_not_supported"
+    message = "This model does not support the requested API."
+
+    def __init__(self, model: str, api: str) -> None:
+        super().__init__(
+            f"Model '{model}' does not support the {api} API."
+        )
+
+
 class UnprocessableEntityError(RouterVError):
     status_code = 422
     error_code = "unprocessable_entity"

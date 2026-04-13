@@ -22,8 +22,9 @@ from app.auth.config_resolver import resolve_config
 from app.auth.dependencies import get_authenticated_key
 from app.cache.rate_limiter import check_free_model_rate_limits, check_rate_limits
 from app.config import settings
-from app.db.models import ApiKey
+from app.db.models import ApiKey, Model
 from app.db.session import get_db_session
+from app.exceptions import ModelCapabilityError
 from app.providers.key_resolver import resolve_upstream_key
 from app.providers.registry import get_adapter, resolve_routing
 from app.schemas.chat import ChatCompletionRequest
@@ -80,6 +81,11 @@ async def chat_completions(
     # ── Phase 2: Resolve model + params ───────────────────────────────────────
     # Must happen before balance check so we have the final resolved model name.
     body = resolve_config(raw_body, key, template, rendered_messages)
+
+    # ── Capability check: model must support chat/completions ─────────────────
+    _model_row = await db.get(Model, body.model)
+    if _model_row is not None and not _model_row.supports_completions_api:
+        raise ModelCapabilityError(body.model, "chat/completions")
 
     # ── Balance check + free-model rate limit ────────────────────────────────
     is_free_model = await check_balance(key.owner, body.model, db)

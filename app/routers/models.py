@@ -74,6 +74,9 @@ class ModelOut(BaseModel):
     is_free: bool
     pricing: ModelPricing
     description: str | None = None
+    supports_thinking: bool
+    supports_completions_api: bool
+    supports_responses_api: bool
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -102,6 +105,9 @@ def _row_to_model_out(m: Model, mp: ModelPrice) -> ModelOut:
         is_free=mp.is_free,
         pricing=pricing,
         description=m.description,
+        supports_thinking=m.supports_thinking,
+        supports_completions_api=m.supports_completions_api,
+        supports_responses_api=m.supports_responses_api,
     )
 
 

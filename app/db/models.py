@@ -351,6 +351,15 @@ class Model(Base):
     is_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true", index=True
     )
+    supports_thinking: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    supports_completions_api: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+    supports_responses_api: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
