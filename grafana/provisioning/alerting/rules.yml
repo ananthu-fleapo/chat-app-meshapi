@@ -26,7 +26,7 @@ groups:
               from: 600
               to: 0
             model:
-              expr: sum by (handler) (rate(http_requests_total{job="routersvc"}[5m]))
+              expr: sum by (handler) (rate(http_requests_total{job="routersvc"}[5m])) > 0
               instant: false
               range: true
           - refId: errors5xx
@@ -181,7 +181,7 @@ groups:
               from: 600
               to: 0
             model:
-              expr: sum(rate(http_requests_total{job="routersvc"}[5m]))
+              expr: sum(rate(http_requests_total{job="routersvc"}[5m])) > 0
               instant: false
               range: true
           - refId: errors4xx
@@ -242,7 +242,7 @@ groups:
               from: 600
               to: 0
             model:
-              expr: sum by (handler) (rate(http_requests_total{job="routersvc",status=~"2..",handler!~"/healthz|/readyz|/metrics"}[5m])) / sum by (handler) (rate(http_requests_total{job="routersvc",handler!~"/healthz|/readyz|/metrics"}[5m])) * 100
+              expr: sum by (handler) (rate(http_requests_total{job="routersvc",status=~"2..",handler!~"/healthz|/readyz|/metrics"}[5m])) / (sum by (handler) (rate(http_requests_total{job="routersvc",handler!~"/healthz|/readyz|/metrics"}[5m])) > 0) * 100
               instant: false
               range: true
           - refId: B
