@@ -14,9 +14,9 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -516,6 +516,7 @@ class PaymentEvent(Base):
     currency: Mapped[str | None] = mapped_column(Text, nullable=True)
     amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
     amount_usd: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    coupon_code: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     payment_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
     ip_address: Mapped[str | None] = mapped_column(Text, nullable=True)
     country: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -531,7 +532,64 @@ class PaymentEvent(Base):
             f"<PaymentEvent id={self.id} user_id={self.user_id!r} "
             f"payment_id={self.payment_id!r} provider={self.provider!r}>"
         )
-    
+
+
+class CheckoutCoupon(Base):
+    __tablename__ = "checkout_coupons"
+    __table_args__ = (
+        Index("ix_checkout_coupons_active_valid_till", "is_active", "valid_till"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    code: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    discount_type: Mapped[str] = mapped_column(Text, nullable=False)
+    discount_value: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    reuse_policy: Mapped[str] = mapped_column(Text, nullable=False, server_default="single_use")
+    max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    used_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    valid_till: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    users: Mapped[list["CouponUser"]] = relationship(back_populates="coupon", cascade="all, delete-orphan")
+
+
+class CouponUser(Base):
+    __tablename__ = "coupon_users"
+    __table_args__ = (
+        UniqueConstraint("coupon_id", "user_id", name="uq_coupon_users_coupon_user"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    coupon_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("checkout_coupons.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    coupon: Mapped["CheckoutCoupon"] = relationship(back_populates="users")
+
+
 class GstinRecord(Base):
     """
     GST record linked to a payment event.

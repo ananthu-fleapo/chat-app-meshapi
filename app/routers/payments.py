@@ -13,21 +13,21 @@ GET   /v1/payments/{user_id}     List all payment events for a given user.
 """
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
-from decimal import Decimal
-
 from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
 from app.auth.dependencies import verify_webhook_key
-from app.db.models import CurrencyConversionRate, GstinRecord, PaymentEvent
+from app.db.models import CheckoutCoupon, CurrencyConversionRate, GstinRecord, PaymentEvent
 from app.db.session import get_db_session
 from app.usage.balance import credit_balance
+from .coupon_utils import _normalize_coupon_code
 
 router = APIRouter(prefix="/v1/payments", tags=["payments"])
 logger = structlog.get_logger()
@@ -40,6 +40,8 @@ class PaymentRequest(BaseModel):
     paymentId: str
     provider: str
     orderId: str | None = None
+    couponCode: str | None = None
+    couponDiscountAmount: int | None = None
     currency: str | None = None
     amount: int | None = None
     # Geographic context — populated by the webhook service from payment metadata.
@@ -60,11 +62,18 @@ class PaymentEventOut(BaseModel):
     currency: str | None
     amount: int | None
     amount_usd: int | None
+    credited_amount_raw: int | None = None
+    credited_amount_display: str | None = None
+    coupon_code: str | None = None
+    coupon_name: str | None = None
+    discount_amount_raw: int | None = None
+    discount_amount_display: str | None = None
     created_at: str
 
 
 class PaymentOut(BaseModel):
     received: bool
+    coupon: dict | None = None
 
 
 class PendingImporterPaymentOut(BaseModel):
@@ -82,6 +91,7 @@ class MetadataUpdateRequest(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _to_out(event: PaymentEvent) -> PaymentEventOut:
+    discount_amount_raw = _extract_discount_amount_raw(event)
     return PaymentEventOut(
         id=str(event.id),
         user_id=event.user_id,
@@ -91,6 +101,12 @@ def _to_out(event: PaymentEvent) -> PaymentEventOut:
         currency=event.currency,
         amount=event.amount,
         amount_usd=event.amount_usd,
+        credited_amount_raw=event.amount_usd,
+        credited_amount_display=_format_minor_amount(event.amount_usd),
+        coupon_code=event.coupon_code,
+        coupon_name=None,
+        discount_amount_raw=discount_amount_raw,
+        discount_amount_display=_format_minor_amount(discount_amount_raw),
         created_at=event.created_at.isoformat(),
     )
 
@@ -103,6 +119,61 @@ def _to_pending_importer_out(event: PaymentEvent) -> PendingImporterPaymentOut:
         order_id=event.order_id,
         created_at=event.created_at.isoformat(),
     )
+
+
+def _convert_amount_to_usd(amount_major: Decimal, effective_rate: Decimal) -> Decimal:
+    if effective_rate <= 0:
+        raise HTTPException(status_code=422, detail="Invalid conversion rate configured")
+    if effective_rate < 1:
+        return amount_major * effective_rate
+    return amount_major / effective_rate
+
+
+
+def _minor_to_major(amount_minor: int | float | None) -> Decimal:
+    if amount_minor is None:
+        return Decimal("0.00")
+    return Decimal(str(amount_minor)) / 100
+
+
+def _format_minor_amount(amount_raw: int | None) -> str | None:
+    if amount_raw is None:
+        return None
+    return f"{Decimal(amount_raw) / Decimal('100'):.2f}"
+
+
+def _extract_discount_amount_raw(event: PaymentEvent) -> int | None:
+    metadata = event.payment_metadata or {}
+    if not isinstance(metadata, dict):
+        return None
+    coupon = metadata.get("coupon")
+    if not isinstance(coupon, dict):
+        return None
+    discount_amount = coupon.get("discount_amount")
+    if discount_amount is None:
+        return None
+    try:
+        return int(discount_amount)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _load_coupon_name_map(
+    db: AsyncSession,
+    coupon_codes: set[str],
+) -> dict[str, str]:
+    if not coupon_codes:
+        return {}
+    result = await db.execute(
+        select(CheckoutCoupon.code, CheckoutCoupon.name).where(
+            func.lower(CheckoutCoupon.code).in_([code.lower() for code in coupon_codes])
+        )
+    )
+    return {
+        _normalize_coupon_code(code): name
+        for code, name in result.all()
+        if _normalize_coupon_code(code)
+    }
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -125,14 +196,30 @@ async def create_payment(
         payment_id=body.paymentId,
         provider=body.provider,
     )
+    normalized_coupon_code = _normalize_coupon_code(body.couponCode)
+
+    existing_payment = await db.execute(
+        select(PaymentEvent).where(PaymentEvent.payment_id == body.paymentId).limit(1)
+    )
+    if existing_payment.scalar_one_or_none() is not None:
+        logger.info(
+            "payment_duplicate_ignored",
+            user_id=body.userId,
+            payment_id=body.paymentId,
+            provider=body.provider,
+        )
+        return {"received": True, "coupon": None}
 
     # Resolve conversion rate and compute USD amount before persisting.
     amount_usd: Decimal | None = None
     if body.amount and body.amount > 0:
         currency = (body.currency or "USD").upper()
+        charged_amount_major = _minor_to_major(body.amount)
+        gst_amount_major = _minor_to_major(body.gstAmount)
+        coupon_discount_major = _minor_to_major(body.couponDiscountAmount)
+        credited_amount_major = charged_amount_major - gst_amount_major + coupon_discount_major
         if currency == "USD":
-            # Amount is in cents; normalize to dollars.
-            amount_usd = Decimal(body.amount) / 100
+            amount_usd = credited_amount_major
         else:
             rate_result = await db.execute(
                 select(CurrencyConversionRate)
@@ -152,28 +239,47 @@ async def create_payment(
                     status_code=422,
                     detail=f"No conversion rate found for currency '{currency}'",
                 )
-            # Amount is in the smallest unit (e.g. paise for INR).
-            # Divide by 100 to get major units, then divide by total_rate
-            # (INR-per-USD with markup) to get USD.
-            #
-            # GST is a tax collected on behalf of the government — exclude it
-            # from the balance credit so users are only credited for the base
-            # amount they actually paid for.
+            # Amount is in the smallest unit (e.g. paise for INR). Convert to
+            # major units, restore any coupon discount to the credited portion,
+            # subtract GST, then convert to USD. Some local environments have
+            # historical FX rows stored as INR-per-USD (>1) while others have
+            # USD-per-INR (<1), so handle both directions defensively.
             effective_rate = rate_row.total_rate or rate_row.rate
-            amount_major = Decimal(body.amount) / 100
-            if body.gstAmount is not None and body.gstAmount > 0:
-                amount_major = amount_major - Decimal(str(body.gstAmount)) / 100
-            amount_usd = amount_major / effective_rate
+            amount_usd = _convert_amount_to_usd(credited_amount_major, effective_rate)
             logger.info(
                 "payment_currency_converted",
                 currency=currency,
                 total_rate=str(effective_rate),
-                amount_original=body.amount,
+                charged_amount_minor=body.amount,
+                charged_amount_major=str(charged_amount_major),
                 gst_amount=str(body.gstAmount),
-                amount_after_gst_deduction=str(amount_major),
+                gst_amount_major=str(gst_amount_major),
+                coupon_discount_amount=str(body.couponDiscountAmount),
+                coupon_discount_major=str(coupon_discount_major),
+                credited_amount_major=str(credited_amount_major),
+                amount_usd=str(amount_usd),
+                conversion_mode=("multiply_rate" if effective_rate < 1 else "divide_rate"),
+                user_id=body.userId,
+            )
+        if currency == "USD":
+            logger.info(
+                "payment_amount_resolved",
+                currency=currency,
+                charged_amount_minor=body.amount,
+                charged_amount_major=str(charged_amount_major),
+                gst_amount=str(body.gstAmount),
+                gst_amount_major=str(gst_amount_major),
+                coupon_discount_amount=str(body.couponDiscountAmount),
+                coupon_discount_major=str(coupon_discount_major),
+                credited_amount_major=str(credited_amount_major),
                 amount_usd=str(amount_usd),
                 user_id=body.userId,
             )
+
+    metadata: dict | None = None
+    if body.couponDiscountAmount is not None:
+        metadata = {}
+        metadata["coupon"] = {"discount_amount": body.couponDiscountAmount}
 
     event = PaymentEvent(
         user_id=body.userId,
@@ -185,6 +291,8 @@ async def create_payment(
         amount_usd=int(amount_usd * 100) if amount_usd is not None else None,
         ip_address=body.ipAddress,
         country=body.country,
+        coupon_code=normalized_coupon_code,
+        payment_metadata=metadata,
     )
     db.add(event)
     await db.flush()
@@ -204,10 +312,80 @@ async def create_payment(
             gst_amount=str(body.gstAmount),
         )
 
+    coupon_payload: dict | None = None
+    if normalized_coupon_code:
+        coupon_results = await db.execute(
+            select(CheckoutCoupon)
+            .where(func.lower(CheckoutCoupon.code) == normalized_coupon_code.lower())
+        )
+
+        coupons = coupon_results.scalars().all()
+        coupon_payload = None
+
+        for coupon in coupons:
+            prior_usage = None
+
+            if coupon.reuse_policy == "single_use":
+                prior_usage_result = await db.execute(
+                    select(PaymentEvent)
+                    .where(PaymentEvent.user_id == body.userId)
+                    .where(func.lower(PaymentEvent.coupon_code) == coupon.code.lower())
+                    .where(PaymentEvent.payment_id != body.paymentId)
+                    .limit(1)
+                )
+                prior_usage = prior_usage_result.scalar_one_or_none()
+
+            if coupon.max_uses is None or coupon.used_count < coupon.max_uses:
+                if coupon.reuse_policy != "single_use" or prior_usage is None:
+                    coupon.used_count += 1
+
+                    logger.info(
+                        "coupon_consumed",
+                        coupon_code=coupon.code,
+                        user_id=body.userId,
+                        payment_id=body.paymentId,
+                        provider=body.provider,
+                    )
+
+                    # pick one payload (or last valid one)
+                    coupon_payload = {
+                        "code": coupon.code,
+                        "name": coupon.name,
+                        "description": coupon.description,
+                        "discount_type": coupon.discount_type,
+                        "discount_value": format(coupon.discount_value, "f"),
+                    }
+                else:
+                    logger.warning(
+                        "coupon_applied_by_gateway_but_rejected_locally",
+                        reason="single_use_already_consumed",
+                        coupon_code=coupon.code,
+                        user_id=body.userId,
+                        payment_id=body.paymentId,
+                        provider=body.provider,
+                    )
+            else:
+                logger.warning(
+                    "coupon_applied_by_gateway_but_rejected_locally",
+                    reason="usage_limit_reached",
+                    coupon_code=coupon.code,
+                    user_id=body.userId,
+                    payment_id=body.paymentId,
+                    provider=body.provider,
+                )
+
     if amount_usd is not None and amount_usd > 0:
+        logger.info(
+            "payment_crediting_balance",
+            user_id=body.userId,
+            payment_id=body.paymentId,
+            provider=body.provider,
+            amount_usd=str(amount_usd),
+            amount_usd_minor=int(amount_usd * 100),
+        )
         await credit_balance(body.userId, amount_usd, db)
 
-    return {"received": True}
+    return {"received": True, "coupon": coupon_payload}
 
 
 @router.get("", response_model=list[PaymentEventOut])
@@ -229,9 +407,18 @@ async def list_payments(
         .order_by(PaymentEvent.created_at.desc())
     )
     events = result.scalars().all()
+    coupon_name_map = await _load_coupon_name_map(
+        db,
+        {event.coupon_code for event in events if event.coupon_code},
+    )
 
     logger.info("payments_listed", user_id=identity.sub, count=len(events))
-    return [_to_out(e) for e in events]
+    output = []
+    for event in events:
+        row = _to_out(event)
+        row.coupon_name = coupon_name_map.get(_normalize_coupon_code(event.coupon_code))
+        output.append(row)
+    return output
 
 
 @router.get("/pending-importer", response_model=list[PendingImporterPaymentOut])

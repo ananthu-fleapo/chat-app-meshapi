@@ -137,6 +137,13 @@ class Settings(BaseSettings):
     # Leave empty in dev to disable the check.
     webhook_api_key: str = ""
 
+    # ── Internal service auth / routing ─────────────────────────────────────
+    # service-main -> routersvc internal order status updates
+    routersvc_service_key: str = ""
+    # routersvc -> service-main payment session creation
+    service_api_base_url: str = ""
+    service_internal_api_key: str = ""
+
 
     # ── CORS ─────────────────────────────────────────────────────────────────
     # Comma-separated list of allowed origins for browser requests.

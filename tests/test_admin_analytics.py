@@ -449,6 +449,73 @@ class TestPaymentTopUsers:
             }
         ]
 
+class TestPaymentTransactions:
+
+    def test_user_transactions_include_coupon_code_and_discount(self, client, mock_db):
+        event = MagicMock()
+        event.id = "pay-event-1"
+        event.user_id = "user-123"
+        event.payment_id = "pay_123"
+        event.provider = "cashfree"
+        event.order_id = "order_123"
+        event.currency = "INR"
+        event.amount = 59000
+        event.amount_usd = 600
+        event.coupon_code = "COUPON123"
+        event.payment_metadata = {"coupon": {"discount_amount": 5900}}
+        event.created_at = datetime(2026, 4, 9, tzinfo=timezone.utc)
+
+        count_result = MagicMock()
+        count_result.scalar_one.return_value = 1
+        events_result = MagicMock()
+        events_result.scalars.return_value.all.return_value = [event]
+
+        mock_db.execute.side_effect = [
+            count_result,
+            events_result,
+            make_execute_result(rows=[("COUPON123",)]),
+        ]
+
+        resp = client.get("/admin/users/user-123/payments", headers=ADMIN_HEADERS)
+
+        assert resp.status_code == 200
+        tx = resp.json()["transactions"][0]
+        assert tx["coupon_code"] == "COUPON123"
+        assert tx["discount_amount_raw"] == 5900
+        assert tx["discount_amount_display"] == "59.00"
+
+    def test_all_transactions_return_discount_fields(self, client, mock_db):
+        event = MagicMock()
+        event.id = "pay-event-2"
+        event.user_id = "user-456"
+        event.payment_id = "pay_456"
+        event.provider = "stripe"
+        event.order_id = None
+        event.currency = "USD"
+        event.amount = 1000
+        event.amount_usd = 1000
+        event.coupon_code = None
+        event.payment_metadata = None
+        event.created_at = datetime(2026, 4, 9, tzinfo=timezone.utc)
+
+        count_result = MagicMock()
+        count_result.scalar_one.return_value = 1
+        events_result = MagicMock()
+        events_result.scalars.return_value.all.return_value = [event]
+
+        mock_db.execute.side_effect = [
+            count_result,
+            events_result,
+        ]
+
+        resp = client.get("/admin/payments/transactions", headers=ADMIN_HEADERS)
+
+        assert resp.status_code == 200
+        tx = resp.json()["transactions"][0]
+        assert tx["coupon_code"] is None
+        assert tx["discount_amount_raw"] is None
+        assert tx["discount_amount_display"] is None
+
 
 # ── Analytics cache ───────────────────────────────────────────────────────────
 

@@ -47,7 +47,7 @@ from app.auth.control_plane import get_admin_user
 from app.cache.key_cache import invalidate_cached_key
 from app.cache.redis_client import get_redis
 from app.config import settings
-from app.db.models import ApiKey, CurrencyConversionRate, Discount, Model, ModelPrice, PaymentEvent, ProviderKey, Template, UsageEvent, UserBalance, User
+from app.db.models import ApiKey, CheckoutCoupon, CurrencyConversionRate, Discount, Model, ModelPrice, PaymentEvent, ProviderKey, Template, UsageEvent, UserBalance, User
 from app.cache.analytics_cache import get_analytics_cached, set_analytics_cached
 from app.routers.usage import UsageEventOut, UsageEventsPage, _parse_dt, _split_model, _tokens_per_second
 from app.db.session import get_db_session
@@ -2655,6 +2655,9 @@ class PaymentTransactionOut(BaseModel):
     amount_raw: int | None
     amount_display: str | None
     amount_usd_display: str | None   # pre-computed USD at payment time; None for older records
+    coupon_code: str | None = None
+    discount_amount_raw: int | None = None
+    discount_amount_display: str | None = None
     created_at: str
 
 
@@ -2970,7 +2973,45 @@ async def get_payment_by_currency(
     return result
 
 
-def _payment_to_out(e: PaymentEvent) -> PaymentTransactionOut:
+def _format_minor_amount(amount_raw: int | None) -> str | None:
+    if amount_raw is None:
+        return None
+    return f"{Decimal(amount_raw) / Decimal('100'):.2f}"
+
+
+def _extract_discount_amount_raw(event: PaymentEvent) -> int | None:
+    metadata = event.payment_metadata or {}
+    if not isinstance(metadata, dict):
+        return None
+    coupon = metadata.get("coupon")
+    if not isinstance(coupon, dict):
+        return None
+    discount_amount = coupon.get("discount_amount")
+    if discount_amount is None:
+        return None
+    try:
+        return int(discount_amount)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _load_coupon_code_map(
+    db: AsyncSession,
+    coupon_codes: set[str],
+) -> dict[str, str]:
+    if not coupon_codes:
+        return {}
+    result = await db.execute(
+        select(CheckoutCoupon.code).where(
+            func.lower(CheckoutCoupon.code).in_([code.lower() for code in coupon_codes])
+        )
+    )
+    return {str(code).strip().upper(): str(code).strip().upper() for (code,) in result.all() if code}
+
+
+def _payment_to_out(e: PaymentEvent, coupon_code_map: dict[str, str] | None = None) -> PaymentTransactionOut:
+    normalized_coupon_code = str(e.coupon_code).strip().upper() if e.coupon_code else None
+    discount_amount_raw = _extract_discount_amount_raw(e)
     return PaymentTransactionOut(
         id=str(e.id),
         user_id=e.user_id,
@@ -2981,6 +3022,9 @@ def _payment_to_out(e: PaymentEvent) -> PaymentTransactionOut:
         amount_raw=e.amount,
         amount_display=f"{e.amount / 100:.2f}" if e.amount is not None else None,
         amount_usd_display=f"{e.amount_usd / 100:.2f}" if e.amount_usd is not None else None,
+        coupon_code=(coupon_code_map or {}).get(normalized_coupon_code, normalized_coupon_code),
+        discount_amount_raw=discount_amount_raw,
+        discount_amount_display=_format_minor_amount(discount_amount_raw),
         created_at=e.created_at.isoformat(),
     )
 
@@ -3005,8 +3049,13 @@ async def get_user_payments(
         .offset(offset)
         .limit(limit)
     )
+    events = rows.scalars().all()
+    coupon_code_map = await _load_coupon_code_map(
+        db,
+        {event.coupon_code for event in events if event.coupon_code},
+    )
     return PaymentTransactionsPage(
-        transactions=[_payment_to_out(e) for e in rows.scalars().all()],
+        transactions=[_payment_to_out(e, coupon_code_map) for e in events],
         total=total,
         limit=limit,
         offset=offset,
@@ -3017,20 +3066,28 @@ async def get_user_payments(
 async def get_payment_transactions(
     limit: int = 50,
     offset: int = 0,
+    coupon_code: str | None = None,
     db: AsyncSession = Depends(get_db_session),
 ):
     """Paginated list of all payment transactions across all users, newest first."""
-    total_result = await db.execute(select(func.count(PaymentEvent.id)))
-    total = total_result.scalar_one() or 0
+    base_q = select(PaymentEvent)
+    count_q = select(func.count(PaymentEvent.id))
+    if coupon_code:
+        normalized = coupon_code.strip().upper()
+        filt = func.upper(PaymentEvent.coupon_code) == normalized
+        base_q = base_q.where(filt)
+        count_q = count_q.where(filt)
 
-    rows = await db.execute(
-        select(PaymentEvent)
-        .order_by(PaymentEvent.created_at.desc())
-        .offset(offset)
-        .limit(limit)
+    total = (await db.execute(count_q)).scalar_one() or 0
+    events = (
+        await db.execute(base_q.order_by(PaymentEvent.created_at.desc()).offset(offset).limit(limit))
+    ).scalars().all()
+    coupon_code_map = await _load_coupon_code_map(
+        db,
+        {event.coupon_code for event in events if event.coupon_code},
     )
     return PaymentTransactionsPage(
-        transactions=[_payment_to_out(e) for e in rows.scalars().all()],
+        transactions=[_payment_to_out(e, coupon_code_map) for e in events],
         total=total,
         limit=limit,
         offset=offset,

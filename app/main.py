@@ -18,23 +18,7 @@ from app.providers.registry import register_adapter
 from prometheus_fastapi_instrumentator import Instrumentator
 import asyncio
 
-from app.routers import (
-    admin,
-    admin_test_responses,
-    auth,
-    balance,
-    batch,
-    embeddings,
-    error_logs,
-    fx_rates,
-    gstin,
-    inference,
-    keys,
-    models,
-    payments,
-    responses,
-    usage,
-)
+from app.routers import admin, admin_test_responses, auth, balance, batch, coupons, embeddings, error_logs, fx_rates, gstin, inference, keys, models, payments, responses, usage
 
 from fastapi.middleware.cors import CORSMiddleware 
 
@@ -361,6 +345,8 @@ def create_app() -> FastAPI:
     app.include_router(balance.router)
     app.include_router(usage.router)
     app.include_router(payments.router)
+    app.include_router(coupons.router)
+    app.include_router(coupons.admin_router)
 
     # Template management: production endpoint, auth-gated, owner-scoped.
     from app.routers import templates
