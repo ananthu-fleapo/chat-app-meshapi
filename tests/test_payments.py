@@ -283,7 +283,8 @@ class TestListPayments:
         event.amount = 59000
         event.amount_usd = 600
         event.coupon_code = "COUPON123"
-        event.payment_metadata = {"coupon": {"discount_amount": 5900}}
+        event.payment_metadata = None
+        event.discount_amount = 5900
         event.created_at = datetime(2026, 4, 9, tzinfo=timezone.utc)
 
         mock_db_session.execute.side_effect = [
@@ -325,7 +326,8 @@ class TestListPayments:
         event.amount = 1000
         event.amount_usd = 1000
         event.coupon_code = "MISSING"
-        event.payment_metadata = {"coupon": {"discount_amount": 200}}
+        event.payment_metadata = None
+        event.discount_amount = 200
         event.created_at = datetime(2026, 4, 9, tzinfo=timezone.utc)
 
         mock_db_session.execute.side_effect = [

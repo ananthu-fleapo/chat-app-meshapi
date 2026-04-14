@@ -143,19 +143,10 @@ def _format_minor_amount(amount_raw: int | None) -> str | None:
 
 
 def _extract_discount_amount_raw(event: PaymentEvent) -> int | None:
-    metadata = event.payment_metadata or {}
-    if not isinstance(metadata, dict):
-        return None
-    coupon = metadata.get("coupon")
-    if not isinstance(coupon, dict):
-        return None
-    discount_amount = coupon.get("discount_amount")
-    if discount_amount is None:
-        return None
-    try:
-        return int(discount_amount)
-    except (TypeError, ValueError):
-        return None
+    # Use the dedicated column if available (0034 migration)
+    if event.discount_amount is not None:
+        return event.discount_amount
+    return None
 
 
 async def _load_coupon_name_map(
@@ -218,6 +209,8 @@ async def create_payment(
         gst_amount_major = _minor_to_major(body.gstAmount)
         coupon_discount_major = _minor_to_major(body.couponDiscountAmount)
         credited_amount_major = charged_amount_major - gst_amount_major + coupon_discount_major
+        amount_before_discount_major = charged_amount_major + coupon_discount_major # this includes gst (amount user agreed to pay before discount)
+
         if currency == "USD":
             amount_usd = credited_amount_major
         else:
@@ -260,6 +253,7 @@ async def create_payment(
                 amount_usd=str(amount_usd),
                 conversion_mode=("multiply_rate" if effective_rate < 1 else "divide_rate"),
                 user_id=body.userId,
+                amount_before_discount_major=str(amount_before_discount_major),
             )
         if currency == "USD":
             logger.info(
@@ -274,12 +268,8 @@ async def create_payment(
                 credited_amount_major=str(credited_amount_major),
                 amount_usd=str(amount_usd),
                 user_id=body.userId,
+                amount_before_discount_major=str(amount_before_discount_major),
             )
-
-    metadata: dict | None = None
-    if body.couponDiscountAmount is not None:
-        metadata = {}
-        metadata["coupon"] = {"discount_amount": body.couponDiscountAmount}
 
     event = PaymentEvent(
         user_id=body.userId,
@@ -287,12 +277,12 @@ async def create_payment(
         provider=body.provider,
         order_id=body.orderId,
         currency=body.currency,
-        amount=body.amount,
+        amount=amount_before_discount_major,
         amount_usd=int(amount_usd * 100) if amount_usd is not None else None,
         ip_address=body.ipAddress,
         country=body.country,
         coupon_code=normalized_coupon_code,
-        payment_metadata=metadata,
+        discount_amount=body.couponDiscountAmount,
     )
     db.add(event)
     await db.flush()

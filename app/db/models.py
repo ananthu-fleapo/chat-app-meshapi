@@ -515,6 +515,7 @@ class PaymentEvent(Base):
     order_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     currency: Mapped[str | None] = mapped_column(Text, nullable=True)
     amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    discount_amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
     amount_usd: Mapped[int | None] = mapped_column(Integer, nullable=True)
     coupon_code: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     payment_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
