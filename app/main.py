@@ -380,22 +380,6 @@ def create_app() -> FastAPI:
     app.include_router(admin_test_responses.router)
     app.include_router(admin_test_embeddings.router)
 
-    # ── Catch-all: gives unmatched requests a named handler in Prometheus ────
-    # Without this, any request to a non-existent path gets handler="none" in
-    # metrics. By matching every path here, Prometheus sees handler="/{full_path:path}"
-    # instead, preserving the count without losing data.
-    # Must be registered last so it doesn't shadow any real route.
-    @app.api_route(
-        "/{full_path:path}",
-        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
-        include_in_schema=False,
-    )
-    async def _catch_all(full_path: str, request: Request) -> JSONResponse:
-        return JSONResponse(
-            status_code=404,
-            content={"error": {"code": "not_found", "message": "The requested endpoint does not exist."}, "request_id": getattr(request.state, "request_id", "")},
-        )
-
     # ── Prometheus metrics ────────────────────────────────────────────────────
     # Instruments HTTP metrics. Endpoint is registered manually below so we
     # can gate it behind a bearer token for Grafana Cloud scraping.
