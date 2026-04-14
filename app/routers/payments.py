@@ -208,8 +208,7 @@ async def create_payment(
         charged_amount_major = _minor_to_major(body.amount)
         gst_amount_major = _minor_to_major(body.gstAmount)
         coupon_discount_major = _minor_to_major(body.couponDiscountAmount)
-        credited_amount_major = charged_amount_major - gst_amount_major + coupon_discount_major
-        amount_before_discount_minor = body.amount + (body.couponDiscountAmount or 0) # this includes gst (amount user agreed to pay before discount)
+        credited_amount_major = charged_amount_major - gst_amount_major
 
         if currency == "USD":
             amount_usd = credited_amount_major
@@ -253,7 +252,7 @@ async def create_payment(
                 amount_usd=str(amount_usd),
                 conversion_mode=("multiply_rate" if effective_rate < 1 else "divide_rate"),
                 user_id=body.userId,
-                amount_before_discount_major=str(amount_before_discount_minor),
+                amount_before_discount_major=str(body.amount),
             )
         if currency == "USD":
             logger.info(
@@ -268,7 +267,7 @@ async def create_payment(
                 credited_amount_major=str(credited_amount_major),
                 amount_usd=str(amount_usd),
                 user_id=body.userId,
-                amount_before_discount_major=str(amount_before_discount_minor),
+                amount_before_discount_major=str(body.amount),
             )
 
     event = PaymentEvent(
@@ -277,7 +276,7 @@ async def create_payment(
         provider=body.provider,
         order_id=body.orderId,
         currency=body.currency,
-        amount=amount_before_discount_minor,
+        amount=body.amount,
         amount_usd=int(amount_usd * 100) if amount_usd is not None else None,
         ip_address=body.ipAddress,
         country=body.country,

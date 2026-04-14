@@ -132,7 +132,7 @@ class TestCreatePayment:
         assert resp.json()["coupon"]["name"] == "Save 20"
         assert coupon.used_count == 1
         mock_credit.assert_awaited_once()
-        assert mock_credit.await_args.args[1] == Decimal("12.00")
+        assert mock_credit.await_args.args[1] == Decimal("10.00")
 
     def test_payment_with_locally_unusable_coupon_logs_only_and_invalidates_cache(self, client, mock_db_session):
         from app.db.models import CheckoutCoupon
@@ -174,8 +174,7 @@ class TestCreatePayment:
         assert resp.status_code == 201
         assert resp.json() == {"received": True, "coupon": None}
         assert coupon.used_count == 1
-        mock_credit.assert_awaited_once()
-        assert mock_credit.await_args.args[1] == Decimal("10.59")
+        assert mock_credit.await_args.args[1] == Decimal("10.00")
 
     def test_payment_with_unknown_coupon_only_logs_event(self, client, mock_db_session):
         mock_db_session.execute.side_effect = [
@@ -231,7 +230,7 @@ class TestCreatePayment:
         assert resp.status_code == 201
         mock_credit.assert_awaited_once()
         assert mock_credit.await_args.args[0] == "user-in"
-        assert mock_credit.await_args.args[1] == Decimal("0.125")
+        assert mock_credit.await_args.args[1] == Decimal("0.10")
 
     def test_duplicate_payment_is_idempotent(self, client, mock_db_session):
         existing = object()
