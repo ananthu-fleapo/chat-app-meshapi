@@ -419,6 +419,7 @@ class ModelPrice(Base):
     supports_thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     supports_completions_api: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     supports_responses_api: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    supports_embeddings_api: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
