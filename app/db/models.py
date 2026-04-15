@@ -183,7 +183,7 @@ class UsageEvent(Base):
                       upstream omits the field.
     cached_tokens     Prompt tokens served from provider cache. NULL if not reported.
     latency_ms        Wall-clock ms from request start to last byte.
-    status            "success" | "error"
+    status            "success" | "error" | "pending"
     error_code        RouterV error_code if status == "error".
     """
 
