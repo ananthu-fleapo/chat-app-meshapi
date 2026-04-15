@@ -346,9 +346,11 @@ def _print_sql(results: list[ModelResult]) -> None:
         name  = _model_display_name(r.model_id).replace("'", "''")
         mid   = r.model_id.replace("'", "''")
         pmid  = r.vertex_model_id.replace("'", "''")
+        # Gemini models accept text + image input; Gemma/Claude are text-only
+        input_mods = "'{text,image}'" if r.model_id.startswith("google/gemini") else "'{text}'"
         print(f"-- {r.model_id}  →  {r.vertex_model_id}")
-        print(f"INSERT INTO models (model_id, name, context_length, description, is_enabled)")
-        print(f"VALUES ('{mid}', '{name}', {ctx}, NULL, true);")
+        print(f"INSERT INTO models (model_id, name, context_length, description, is_enabled, model_type, input_modalities, output_modalities)")
+        print(f"VALUES ('{mid}', '{name}', {ctx}, NULL, true, 'text', {input_mods}, '{{text}}');")
         print(f"INSERT INTO model_prices (model_id, provider, provider_model_id, is_default, prompt_usd_per_1k, completion_usd_per_1k, is_free)")
         print(f"VALUES ('{mid}', 'vertex', '{pmid}', true, 0, 0, false);")
         print()

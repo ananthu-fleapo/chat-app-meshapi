@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import ARRAY, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -350,6 +350,13 @@ class Model(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true", index=True
+    )
+    model_type: Mapped[str] = mapped_column(Text, nullable=False, server_default="text")
+    input_modalities: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default="{text}"
+    )
+    output_modalities: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default="{text}"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

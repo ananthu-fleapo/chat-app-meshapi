@@ -348,6 +348,9 @@ def _make_model_orm(model_id="openai/gpt-4o", name="GPT-4o", context_length=128_
     m.name = name
     m.context_length = context_length
     m.description = None
+    m.model_type = "text"
+    m.input_modalities = ["text"]
+    m.output_modalities = ["text"]
     return m
 
 
@@ -360,6 +363,9 @@ def _make_model_price_orm(
     mp.prompt_usd_per_1k = prompt
     mp.completion_usd_per_1k = completion
     mp.is_free = is_free
+    mp.supports_thinking = False
+    mp.supports_completions_api = True
+    mp.supports_responses_api = True
     return mp
 
 

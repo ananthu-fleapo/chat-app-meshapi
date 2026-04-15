@@ -77,6 +77,9 @@ class ModelOut(BaseModel):
     supports_thinking: bool
     supports_completions_api: bool
     supports_responses_api: bool
+    model_type: str
+    input_modalities: list[str]
+    output_modalities: list[str]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -108,6 +111,9 @@ def _row_to_model_out(m: Model, mp: ModelPrice) -> ModelOut:
         supports_thinking=mp.supports_thinking,
         supports_completions_api=mp.supports_completions_api,
         supports_responses_api=mp.supports_responses_api,
+        model_type=m.model_type,
+        input_modalities=m.input_modalities,
+        output_modalities=m.output_modalities,
     )
 
 
@@ -241,6 +247,10 @@ async def list_models(
         default=None,
         description="Filter: true = free models only, false = paid only, omit = all",
     ),
+    type: str | None = Query(
+        default=None,
+        description="Filter by model_type: text, embedding, image, audio, video",
+    ),
     owner: str = Depends(get_any_auth_owner),
     db: AsyncSession = Depends(get_db_session),
 ):
@@ -259,6 +269,9 @@ async def list_models(
         models = [m for m in models if m.is_free]
     elif free is False:
         models = [m for m in models if not m.is_free]
+
+    if type is not None:
+        models = [m for m in models if m.model_type == type]
 
     return await _apply_discounts(models, owner, db)
 

@@ -33,6 +33,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 
+from typing import Literal
 import structlog
 from structlog.contextvars import bind_contextvars
 from fastapi import APIRouter, Depends, HTTPException
@@ -1378,6 +1379,12 @@ async def seed_model_prices(
 
 # ── Admin: model registry ─────────────────────────────────────────────────────
 
+class Modality(str, Enum):
+    TEXT = "text"
+    IMAGE = "image"
+    AUDIO = "audio"
+    VIDEO = "video"
+
 class ModelIn(BaseModel):
     model_id: str
     name: str
@@ -1385,6 +1392,9 @@ class ModelIn(BaseModel):
     context_length: int | None = None
     description: str | None = None
     is_enabled: bool = True
+    model_type: Literal["text", "embedding", "image", "audio", "video"] = "text"
+    input_modalities: list[Modality] = ["text"]
+    output_modalities: list[Modality] = ["text"]
 
 
 class ModelUpdateIn(BaseModel):
@@ -1392,6 +1402,9 @@ class ModelUpdateIn(BaseModel):
     context_length: int | None = None
     description: str | None = None
     is_enabled: bool | None = None
+    model_type: Literal["text", "embedding", "image", "audio", "video"] | None = None
+    input_modalities: list[Modality] | None = None
+    output_modalities: list[Modality] | None = None
 
 
 class ModelRegistryOut(BaseModel):
@@ -1401,6 +1414,9 @@ class ModelRegistryOut(BaseModel):
     context_length: int | None
     description: str | None
     is_enabled: bool
+    model_type: str
+    input_modalities: list[str]
+    output_modalities: list[str]
     created_at: str
     updated_at: str
     prices: list[ModelPriceOut] = []
@@ -1419,6 +1435,9 @@ def _to_model_out(
         context_length=m.context_length,
         description=m.description,
         is_enabled=m.is_enabled,
+        model_type=m.model_type,
+        input_modalities=m.input_modalities,
+        output_modalities=m.output_modalities,
         created_at=m.created_at.isoformat(),
         updated_at=m.updated_at.isoformat(),
         prices=[_to_price_out(p) for p in (prices or [])],
@@ -1449,6 +1468,9 @@ async def create_model(
         context_length=body.context_length,
         description=body.description,
         is_enabled=body.is_enabled,
+        model_type=body.model_type,
+        input_modalities=body.input_modalities,
+        output_modalities=body.output_modalities,
     )
     db.add(model)
     await db.flush()
@@ -1532,6 +1554,12 @@ async def update_model(
         model.description = body.description
     if body.is_enabled is not None:
         model.is_enabled = body.is_enabled
+    if body.model_type is not None:
+        model.model_type = body.model_type
+    if body.input_modalities is not None:
+        model.input_modalities = body.input_modalities
+    if body.output_modalities is not None:
+        model.output_modalities = body.output_modalities
 
     await db.flush()
     await db.refresh(model)
