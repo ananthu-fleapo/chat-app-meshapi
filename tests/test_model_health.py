@@ -258,7 +258,7 @@ class TestTestModel:
 
         with _mock_get_models(["model-a"]), patch(
             "app.routers.model_health.resolve_routing",
-            AsyncMock(return_value=("openrouter", "openrouter/model-a")),
+            AsyncMock(return_value=("openrouter", "openrouter/model-a", None)),
         ), patch(
             "app.routers.model_health.resolve_upstream_key",
             AsyncMock(return_value="test-key"),
@@ -279,7 +279,7 @@ class TestTestModel:
 
         with _mock_get_models(["model-a"]), patch(
             "app.routers.model_health.resolve_routing",
-            AsyncMock(return_value=("openrouter", "openrouter/model-a")),
+            AsyncMock(return_value=("openrouter", "openrouter/model-a", None)),
         ), patch(
             "app.routers.model_health.resolve_upstream_key",
             AsyncMock(return_value="test-key"),
@@ -299,7 +299,7 @@ class TestTestModel:
 
         with _mock_get_models(["model-a"]), patch(
             "app.routers.model_health.resolve_routing",
-            AsyncMock(return_value=("openrouter", "openrouter/model-a")),
+            AsyncMock(return_value=("openrouter", "openrouter/model-a", None)),
         ), patch(
             "app.routers.model_health.resolve_upstream_key",
             AsyncMock(return_value="test-key"),
@@ -319,7 +319,7 @@ class TestTestModel:
 
         with _mock_get_models(["model-a"]), patch(
             "app.routers.model_health.resolve_routing",
-            AsyncMock(return_value=("openrouter", "openrouter/model-a")),
+            AsyncMock(return_value=("openrouter", "openrouter/model-a", None)),
         ), patch(
             "app.routers.model_health.resolve_upstream_key",
             AsyncMock(return_value="test-key"),

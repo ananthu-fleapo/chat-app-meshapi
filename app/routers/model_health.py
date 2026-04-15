@@ -85,7 +85,7 @@ async def _test_model(model_id: str) -> ModelHealthResult:
     request: ChatCompletionRequest | None = None
     try:
         async with get_session_factory()() as session:
-            provider, provider_model_id = await resolve_routing(model_id, session)
+            provider, provider_model_id, _ = await resolve_routing(model_id, session)
             # Resolve the system-default upstream key (db=None skips per-owner lookup)
             api_key = await resolve_upstream_key(owner="health-check", provider=provider, db=None)
         structlog.contextvars.bind_contextvars(provider=provider, provider_model_id=provider_model_id)
