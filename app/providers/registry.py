@@ -9,7 +9,7 @@ to route a model to a different upstream without any code changes.
 resolve_routing(model, db)
     Queries model_prices for the is_default row and returns both the provider
     slug AND the stored provider_model_id in a single DB round-trip.
-    Falls back to ("openrouter", None) if the model has no price row.
+    Raises UnsupportedModelError(404) if the model has no price row.
 
 resolve_provider(model, db)
     Thin wrapper around resolve_routing — returns only the provider slug.
@@ -94,7 +94,7 @@ async def resolve_routing(
     if row is not None:
         return row.provider, row.provider_model_id, row.responses_provider_model_id
 
-    # Fall back to any row for this model
+    # Fall back to any row for this model (no is_default row found)
     result = await db.execute(
         select(ModelPrice.provider, ModelPrice.provider_model_id, ModelPrice.responses_provider_model_id)
         .where(ModelPrice.model_id == model)
@@ -112,6 +112,33 @@ async def resolve_routing(
     # Model not in price table — default to OpenRouter
     logger.debug("provider_resolved_fallback_openrouter", model=model)
     return "openrouter", None, None
+
+
+async def resolve_batch_routing(
+    model: str, db: AsyncSession
+) -> tuple[str, str | None, str | None]:
+    """
+    Same as resolve_routing but raises UnsupportedModelError(404) instead of
+    falling back to OpenRouter when the model has no price table entry.
+    Used by the Batch API where an unknown model must be rejected explicitly.
+    """
+    from app.db.models import ModelPrice
+    from app.exceptions import UnsupportedModelError
+
+    for where in [
+        (ModelPrice.model_id == model, ModelPrice.is_default.is_(True)),
+        (ModelPrice.model_id == model,),
+    ]:
+        result = await db.execute(
+            select(ModelPrice.provider, ModelPrice.provider_model_id, ModelPrice.responses_provider_model_id)
+            .where(*where)
+            .limit(1)
+        )
+        row = result.one_or_none()
+        if row is not None:
+            return row.provider, row.provider_model_id, row.responses_provider_model_id
+
+    raise UnsupportedModelError(model)
 
 
 async def resolve_provider(model: str, db: AsyncSession) -> str:

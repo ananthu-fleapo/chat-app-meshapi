@@ -427,6 +427,7 @@ class ModelPrice(Base):
     supports_completions_api: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     supports_responses_api: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     supports_embeddings_api: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    supports_batching: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -758,6 +759,12 @@ class BatchJob(Base):
     batch_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
     owner: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     key_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # Model name as supplied by the customer (e.g. "openai/gpt-4o-mini").
+    # Resolved via model_prices at creation time.
+    model: Mapped[str] = mapped_column(Text, nullable=False, server_default="unknown")
+    # Upstream provider slug resolved from model_prices at creation time.
+    # Used by the background poller and file endpoints to route to the right adapter.
+    provider: Mapped[str] = mapped_column(Text, nullable=False, server_default="openai", index=True)
     input_file_id: Mapped[str] = mapped_column(Text, nullable=False)
     output_file_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="validating")
@@ -776,3 +783,37 @@ class BatchJob(Base):
             f"<BatchJob batch_id={self.batch_id!r} owner={self.owner!r} "
             f"status={self.status!r} synced={self.usage_synced}>"
         )
+
+
+class BatchFile(Base):
+    """
+    Tracks files uploaded via POST /v1/files.
+
+    Stores the canonical model_id and resolved provider so that
+    POST /v1/batches can derive routing from the input_file_id without
+    the customer repeating the model name.
+
+    Columns
+    -------
+    file_id         Upstream provider file ID (e.g. OpenAI "file-xxx").
+    owner           Owner label from the API key used to upload.
+    key_id          The RouterV API key that performed the upload.
+    model           Canonical model_id resolved from the JSONL body.model
+                    at upload time (e.g. "openai/gpt-4o-mini").
+    provider        Upstream provider slug derived from model_prices
+                    (e.g. "openai").
+    """
+
+    __tablename__ = "batch_files"
+
+    file_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    key_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<BatchFile file_id={self.file_id!r} model={self.model!r} provider={self.provider!r}>"

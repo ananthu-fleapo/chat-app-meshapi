@@ -1,29 +1,44 @@
 #!/usr/bin/env python3
 """
-Run the full OpenAI Batch API lifecycle through MeshAPI.
+Run the full Batch API lifecycle through MeshAPI.
 
 Steps
 -----
-  1. Upload a JSONL input file (or generate a sample one)
+  1. Submit requests (JSON array) to POST /v1/files
   2. Create a batch job
   3. Poll until completed / failed / cancelled
   4. Download and save the output JSONL
-  5. Optionally delete input + output files from OpenAI
+  5. Optionally delete input + output files from the provider
 
 Usage
 -----
   python scripts/run_batch.py \\
       --api-key   rsk_your_meshapi_key \\
       [--base-url http://localhost:8000] \\
-      [--input    path/to/requests.jsonl]   # omit to use built-in sample \\
-      [--model    openai/gpt-4o] \\
+      [--input    path/to/requests.json]   # JSON array; omit to use built-in sample \\
+      [--model    openai/gpt-4o-mini] \\
       [--poll-interval 10] \\
       [--timeout  3600] \\
       [--no-cleanup]
 
+Input file format (JSON array, not JSONL)
+-----------------------------------------
+  [
+    {
+      "custom_id": "req-1",
+      "body": {
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_tokens": 100
+      }
+    }
+  ]
+
+  `method` and `url` default to "POST" / "/v1/chat/completions" if omitted.
+
 Output
 ------
-  scripts/outputs/batch_results_YYYYMMDD_HHMMSS.jsonl   raw output from OpenAI
+  scripts/outputs/batch_results_YYYYMMDD_HHMMSS.jsonl   raw output from provider
   scripts/outputs/batch_summary_YYYYMMDD_HHMMSS.json    run metadata
 
 Exit code: 0 = batch completed, 1 = failed / cancelled / timeout.
@@ -60,14 +75,12 @@ def bold(t: str)    -> str: return _c("1",  t)
 def dim(t: str)     -> str: return _c("2",  t)
 
 
-# ── Sample JSONL ──────────────────────────────────────────────────────────────
+# ── Sample requests ───────────────────────────────────────────────────────────
 
 def _sample_requests(model: str) -> list[dict]:
     return [
         {
             "custom_id": "req-1",
-            "method": "POST",
-            "url": "/v1/chat/completions",
             "body": {
                 "model": model,
                 "messages": [{"role": "user", "content": "Summarize the French Revolution in 2 sentences."}],
@@ -76,8 +89,6 @@ def _sample_requests(model: str) -> list[dict]:
         },
         {
             "custom_id": "req-2",
-            "method": "POST",
-            "url": "/v1/chat/completions",
             "body": {
                 "model": model,
                 "messages": [{"role": "user", "content": "What is the capital of Japan?"}],
@@ -86,8 +97,6 @@ def _sample_requests(model: str) -> list[dict]:
         },
         {
             "custom_id": "req-3",
-            "method": "POST",
-            "url": "/v1/chat/completions",
             "body": {
                 "model": model,
                 "messages": [{"role": "user", "content": "Write a haiku about rain."}],
@@ -114,14 +123,12 @@ def _die(msg: str) -> None:
 
 # ── API calls ─────────────────────────────────────────────────────────────────
 
-def upload_file(client: httpx.Client, path: Path) -> str:
-    _print_step(1, f"Uploading {cyan(path.name)} …")
-    with path.open("rb") as f:
-        resp = client.post(
-            "/v1/files",
-            files={"file": (path.name, f, "application/octet-stream")},
-            data={"purpose": "batch"},
-        )
+def upload_file(client: httpx.Client, requests: list[dict]) -> str:
+    _print_step(1, f"Uploading {len(requests)} request(s) …")
+    resp = client.post(
+        "/v1/files",
+        json={"purpose": "batch", "requests": requests},
+    )
     if resp.status_code >= 400:
         _die(f"File upload failed ({resp.status_code}): {resp.text[:300]}")
     file_obj = resp.json()
@@ -241,11 +248,11 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run MeshAPI Batch API end-to-end")
     p.add_argument("--api-key",       required=True,                   help="MeshAPI key (rsk_...)")
     p.add_argument("--base-url",      default="http://localhost:8000",  help="MeshAPI base URL")
-    p.add_argument("--input",         default=None,                    help="Path to input JSONL (omit to use sample)")
-    p.add_argument("--model",         default="openai/gpt-4o",    help="Model for sample requests")
+    p.add_argument("--input",         default=None,                    help="Path to JSON array of requests (omit to use sample)")
+    p.add_argument("--model",         default="openai/gpt-4o-mini",    help="Model for sample requests (ignored when --input is set)")
     p.add_argument("--poll-interval", type=int, default=10,            help="Seconds between status polls (default: 10)")
     p.add_argument("--timeout",       type=int, default=3600,          help="Max seconds to wait for completion (default: 3600)")
-    p.add_argument("--no-cleanup",    action="store_true",             help="Keep input/output files on OpenAI after completion")
+    p.add_argument("--no-cleanup",    action="store_true",             help="Keep input/output files on provider after completion")
     return p.parse_args()
 
 
@@ -253,16 +260,21 @@ def main() -> None:
     args = parse_args()
     ts = _ts()
 
-    # ── Resolve input file ────────────────────────────────────────────────────
+    # ── Resolve requests ──────────────────────────────────────────────────────
     if args.input:
         input_path = Path(args.input)
         if not input_path.exists():
             _die(f"Input file not found: {input_path}")
+        try:
+            requests = json.loads(input_path.read_text())
+            if not isinstance(requests, list):
+                _die("Input file must be a JSON array.")
+        except json.JSONDecodeError as e:
+            _die(f"Invalid JSON in input file: {e}")
+        print(f"{dim('Loaded input:')} {cyan(str(input_path))}  ({len(requests)} requests)")
     else:
-        input_path = _OUTPUTS_DIR / f"batch_input_{ts}.jsonl"
-        rows = _sample_requests("gpt-4o")
-        input_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-        print(f"{dim('Generated sample input:')} {cyan(str(input_path))}  ({len(rows)} requests)")
+        requests = _sample_requests(args.model)
+        print(f"{dim('Using built-in sample:')} {len(requests)} requests  model={cyan(args.model)}")
 
     # ── HTTP client ───────────────────────────────────────────────────────────
     client = httpx.Client(
@@ -278,7 +290,7 @@ def main() -> None:
 
     try:
         # Step 1 — upload
-        input_file_id = upload_file(client, input_path)
+        input_file_id = upload_file(client, requests)
 
         # Step 2 — create batch
         batch_id = create_batch(client, input_file_id)
@@ -300,7 +312,7 @@ def main() -> None:
                 print(yellow("  No output_file_id on completed batch (all requests may have failed)"))
                 exit_code = 1
 
-            # Step 5 — preview (usage sync happens server-side on the poll above)
+            # Step 5 — preview
             if results_path:
                 print_results(results_path)
 
@@ -331,6 +343,8 @@ def main() -> None:
     print()
     if exit_code == 0:
         print(green(bold("✓ Batch completed successfully.")))
+        if results_path:
+            print(f"  Output: {cyan(str(results_path))}")
     else:
         print(red(bold("✗ Batch did not complete successfully.")))
 

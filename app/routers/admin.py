@@ -880,6 +880,7 @@ class ModelPriceIn(BaseModel):
     supports_thinking: bool = False
     supports_completions_api: bool = True
     supports_responses_api: bool = False
+    supports_batching: bool = False
 
     @model_validator(mode="after")
     def _validate_pricing_consistency(self) -> "ModelPriceIn":
@@ -941,6 +942,7 @@ class ModelPriceUpdateIn(BaseModel):
     supports_thinking: bool | None = None
     supports_completions_api: bool | None = None
     supports_responses_api: bool | None = None
+    supports_batching: bool | None = None
 
     @model_validator(mode="after")
     def _validate_dual_units(self) -> "ModelPriceUpdateIn":
@@ -997,6 +999,7 @@ class ModelPriceOut(BaseModel):
     supports_thinking: bool
     supports_completions_api: bool
     supports_responses_api: bool
+    supports_batching: bool
     updated_at: str
 
 
@@ -1012,6 +1015,7 @@ def _to_price_out(p: ModelPrice) -> ModelPriceOut:
         supports_thinking=p.supports_thinking,
         supports_completions_api=p.supports_completions_api,
         supports_responses_api=p.supports_responses_api,
+        supports_batching=p.supports_batching,
         is_free=p.is_free,
         upstream_prompt_usd_per_1k=str(p.upstream_prompt_usd_per_1k) if p.upstream_prompt_usd_per_1k is not None else None,
         upstream_completion_usd_per_1k=str(p.upstream_completion_usd_per_1k) if p.upstream_completion_usd_per_1k is not None else None,
@@ -1096,6 +1100,7 @@ async def create_model_price(
             supports_thinking=body.supports_thinking,
             supports_completions_api=body.supports_completions_api,
             supports_responses_api=body.supports_responses_api,
+            supports_batching=body.supports_batching,
         )
         db.add(price)
     else:
@@ -1108,6 +1113,7 @@ async def create_model_price(
         price.supports_thinking = body.supports_thinking
         price.supports_completions_api = body.supports_completions_api
         price.supports_responses_api = body.supports_responses_api
+        price.supports_batching = body.supports_batching
 
     await db.flush()
     await db.refresh(price)
@@ -1229,6 +1235,8 @@ async def update_model_price(
         price.supports_completions_api = body.supports_completions_api
     if body.supports_responses_api is not None:
         price.supports_responses_api = body.supports_responses_api
+    if body.supports_batching is not None:
+        price.supports_batching = body.supports_batching
 
     await db.flush()
     await db.refresh(price)

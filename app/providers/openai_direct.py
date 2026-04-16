@@ -329,6 +329,59 @@ class OpenAIDirectAdapter(ProviderAdapter):
         except httpx.TimeoutException as exc:
             raise GatewayTimeoutError() from exc
 
+    def parse_batch_results(self, content: bytes) -> list[dict]:
+        """
+        Parse OpenAI batch output JSONL.
+
+        Each line is: {"response": {"status_code": int, "body": {...}}, ...}
+        Successful lines have status_code=200 and a body with usage + model.
+
+        Model names are normalized: bare names like "gpt-4o-mini-2024-07-18"
+        get the "openai/" prefix so they match the model_prices table key.
+        """
+        import json
+        results = []
+        for raw_line in content.decode(errors="replace").strip().splitlines():
+            if not raw_line.strip():
+                continue
+            try:
+                obj = json.loads(raw_line)
+                response = obj.get("response") or {}
+                status_code = response.get("status_code")
+                success = status_code == 200
+
+                body = response.get("body") or {}
+                usage = body.get("usage") or {}
+                prompt_tokens: int = usage.get("prompt_tokens") or 0
+                completion_tokens: int = usage.get("completion_tokens") or 0
+                cached_tokens: int = (
+                    (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+                )
+
+                raw_model: str = body.get("model", "")
+                model = (
+                    f"openai/{raw_model}"
+                    if raw_model and "/" not in raw_model
+                    else raw_model
+                )
+
+                results.append({
+                    "success": success,
+                    "model": model,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "cached_tokens": cached_tokens,
+                })
+            except Exception:
+                results.append({
+                    "success": False,
+                    "model": "",
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cached_tokens": 0,
+                })
+        return results
+
     # ── Responses API ─────────────────────────────────────────────────────────
 
     async def responses_create(
