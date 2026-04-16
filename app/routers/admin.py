@@ -36,7 +36,7 @@ from enum import Enum
 from typing import Literal
 import structlog
 from structlog.contextvars import bind_contextvars
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, func, or_, select, text, update
 from pydantic import BaseModel, field_validator, model_validator
@@ -1490,14 +1490,27 @@ async def create_model(
 
 @router.get("/models", response_model=list[ModelRegistryOut])
 async def list_models_admin(
+    is_enabled: bool | None = Query(
+        default=None,
+        description="Filter by enabled status: true = enabled only, false = disabled only, omit = all",
+    ),
+    type: Literal["text", "embedding", "image", "audio", "video"] | None = Query(
+        default=None,
+        description="Filter by model_type: text, embedding, image, audio, video",
+    ),
     db: AsyncSession = Depends(get_db_session),
 ):
     """List all models (including disabled) with their pricing rows. For the public listing use GET /v1/models."""
-    result = await db.execute(
+    query = (
         select(Model, ModelPrice)
         .outerjoin(ModelPrice, ModelPrice.model_id == Model.model_id)
-        .order_by(Model.model_id, ModelPrice.provider)
     )
+    if is_enabled is not None:
+        query = query.where(Model.is_enabled.is_(is_enabled))
+    if type is not None:
+        query = query.where(Model.model_type == type)
+
+    result = await db.execute(query.order_by(Model.model_id, ModelPrice.provider))
     models_map: dict[str, tuple[Model, list[ModelPrice]]] = {}
     for m, mp in result.all():
         if m.model_id not in models_map:

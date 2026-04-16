@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from typing import Literal
 
 import structlog
 from fastapi import APIRouter, Depends, Query
@@ -247,7 +248,7 @@ async def list_models(
         default=None,
         description="Filter: true = free models only, false = paid only, omit = all",
     ),
-    type: str | None = Query(
+    type: Literal["text", "embedding", "image", "audio", "video"] | None = Query(
         default=None,
         description="Filter by model_type: text, embedding, image, audio, video",
     ),
