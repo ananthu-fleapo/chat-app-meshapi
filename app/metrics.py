@@ -27,7 +27,7 @@ UPSTREAM_REQUESTS = Counter(
 UPSTREAM_LATENCY = Histogram(
     "routerv_upstream_latency_seconds",
     "Latency of upstream inference calls in seconds.",
-    ["model"],
+    ["model", "status"],   # status: success | error — allows filtering timeouts from percentiles
     buckets=[0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0],
 )
 
@@ -137,7 +137,7 @@ def record_inference(
 ) -> None:
     """Record all inference-related metrics in one call. Safe to call from background tasks."""
     UPSTREAM_REQUESTS.labels(model=model, status=status).inc()
-    UPSTREAM_LATENCY.labels(model=model).observe(latency_ms / 1000)
+    UPSTREAM_LATENCY.labels(model=model, status=status).observe(latency_ms / 1000)
 
     if prompt_tokens:
         TOKENS_TOTAL.labels(model=model, token_type="prompt").inc(prompt_tokens)

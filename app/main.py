@@ -272,6 +272,10 @@ def create_app() -> FastAPI:
     # Models listing: unauthenticated, public info.
     app.include_router(models.router)
 
+    # Public status page endpoint — no auth, Prometheus-backed.
+    from app.routers import status as status_router
+    app.include_router(status_router.router)
+
     # FX rate refresh: internal scheduler endpoint, guarded by WEBHOOK_API_KEY.
     app.include_router(fx_rates.router)
 

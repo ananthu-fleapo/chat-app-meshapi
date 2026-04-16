@@ -172,6 +172,12 @@ class Settings(BaseSettings):
     # Disable to reduce storage costs or when messages contain sensitive data.
     log_request_bodies: bool = True
 
+    # ── Prometheus ────────────────────────────────────────────────────────────
+    # Internal URL of the Prometheus instance for status page metric queries.
+    # Dev: http://localhost:9090  Prod: http://<host>:9090
+    # Leave empty to omit metrics from /status (health checks still work).
+    prometheus_url: str = ""
+
     # ── Metrics scrape auth ───────────────────────────────────────────────────
     # Bearer token required to scrape GET /metrics.
     # Set in Grafana Cloud scrape job as: Authorization: Bearer <token>
