@@ -50,19 +50,19 @@ async def lifespan(app: FastAPI):
 
     # ── Vertex AI adapter (optional) ──────────────────────────────────────────
     # Enabled only when project_id + service account JSON are both configured.
-    if settings.vertex_ai_project_id and settings.vertex_ai_service_account_json:
+    if settings.google_project_id and settings.google_service_account_json:
         from app.providers.vertex_ai import VertexAIAdapter
         VertexAIAdapter.init(
-            project_id=settings.vertex_ai_project_id,
+            project_id=settings.google_project_id,
             location=settings.vertex_ai_location,
-            service_account_json=settings.vertex_ai_service_account_json,
+            service_account_json=settings.google_service_account_json,
             timeout=settings.vertex_ai_timeout_s,
         )
         register_adapter("vertex", VertexAIAdapter)
     else:
         logger.info(
             "vertex_ai_adapter_skipped",
-            hint="Set VERTEX_AI_PROJECT_ID and VERTEX_AI_SERVICE_ACCOUNT_JSON to enable",
+            hint="Set GOOGLE_PROJECT_ID and GOOGLE_SERVICE_ACCOUNT_JSON to enable",
         )
 
     # ── AWS Bedrock adapter (optional) ────────────────────────────────────────

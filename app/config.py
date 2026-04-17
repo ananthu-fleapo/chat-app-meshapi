@@ -61,12 +61,11 @@ class Settings(BaseSettings):
 
     # ── Vertex AI ─────────────────────────────────────────────────────────────
     # Set these to route models to Vertex AI.
-    # vertex_ai_service_account_json: full JSON string of a service account key,
+    # google_service_account_json: full JSON string of a service account key,
     #   typically injected from a GCP Secret or environment variable.
     # Leave all empty to disable Vertex AI routing.
-    vertex_ai_project_id: str = ""
+
     vertex_ai_location: str = "us-central1"
-    vertex_ai_service_account_json: str = ""  # full JSON string
     vertex_ai_timeout_s: float = 120.0
 
     # ── AWS Bedrock ───────────────────────────────────────────────────────────
@@ -101,12 +100,8 @@ class Settings(BaseSettings):
 
     # ── GCP (Phase 7+) ────────────────────────────────────────────────────────
     gcp_project_id: str = ""
-    # Full JSON string of a GCP service account key used for GCS uploads and
-    # other non-Vertex GCP APIs. On Cloud Run this can be left empty — the
-    # service account attached to the revision provides ADC automatically.
-    # Locally: paste the service account key JSON as a single-line string.
-    #   GCP_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
-    gcp_service_account_json: str = ""
+    google_project_id: str = ""
+    google_service_account_json: str = ""  # full JSON string
     # GCS bucket for health-check CSV uploads. Requires google-cloud-storage
     # installed (pip install -e ".[gcp]") and the service account to have
     # roles/storage.objectCreator on the bucket.

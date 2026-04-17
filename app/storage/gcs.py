@@ -6,7 +6,7 @@ google-cloud-storage client via asyncio.to_thread so it does not block
 the event loop.
 
 Auth (in priority order):
-  1. GCP_SERVICE_ACCOUNT_JSON env var — full service-account JSON string.
+  1. google_service_account_json env var — full service-account JSON string.
      Use locally or when explicit credentials are required.
 
      ⚠️  dotenv NOTE: service-account JSON contains newlines in the private
@@ -14,12 +14,12 @@ Auth (in priority order):
      string by minifying the JSON (remove all whitespace/newlines), then wrap
      it in single quotes in your .env file:
 
-         GCP_SERVICE_ACCOUNT_JSON='{"type":"service_account","private_key":"-----BEGIN RSA PRIVATE KEY-----\\nMIIE...\\n-----END RSA PRIVATE KEY-----\\n",...}'
+         google_service_account_json='{"type":"service_account","private_key":"-----BEGIN RSA PRIVATE KEY-----\\nMIIE...\\n-----END RSA PRIVATE KEY-----\\n",...}'
 
      Alternatively, set it as a shell environment variable before starting the
      server so dotenv parsing is bypassed entirely:
 
-         export GCP_SERVICE_ACCOUNT_JSON="$(cat path/to/key.json | tr -d '\\n')"
+         export google_service_account_json="$(cat path/to/key.json | tr -d '\\n')"
 
   2. Application Default Credentials (ADC) — automatic on Cloud Run via the
      service account attached to the revision. No config needed in prod.
@@ -107,17 +107,17 @@ def _read_sa_json() -> str:
     # Lazy import to avoid circular imports at module load time.
     from app.config import settings  # noqa: PLC0415
 
-    value = settings.gcp_service_account_json
+    value = settings.google_service_account_json
     if not value:
         # Fallback: read directly from the process environment in case dotenv
         # failed to parse the multi-line JSON (e.g. newlines in private_key).
-        value = os.environ.get("GCP_SERVICE_ACCOUNT_JSON", "")
+        value = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
     if not value:
         logger.warning(
             "gcs_no_credentials",
             reason=(
-                "GCP_SERVICE_ACCOUNT_JSON is not set; falling back to ADC. "
+                "GOOGLE_SERVICE_ACCOUNT_JSON is not set; falling back to ADC. "
                 "If running locally, set it in .env as a minified single-line JSON string."
             ),
         )
@@ -126,4 +126,4 @@ def _read_sa_json() -> str:
 
 def _read_project_id() -> str:
     from app.config import settings  # noqa: PLC0415
-    return settings.gcp_project_id or os.environ.get("GCP_PROJECT_ID", "")
+    return settings.google_project_id or os.environ.get("GOOGLE_PROJECT_ID", "")

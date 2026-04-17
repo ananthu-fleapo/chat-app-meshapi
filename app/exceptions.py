@@ -123,7 +123,7 @@ class RateLimitError(RouterVError):
 class ProviderNotAvailableError(RouterVError):
     """
     A provider slug is configured in model_prices but its adapter is not
-    registered — meaning the required credentials (e.g. VERTEX_AI_PROJECT_ID)
+    registered — meaning the required credentials (e.g. GOOGLE_PROJECT_ID)
     are missing from the server environment.  This is a server-side config
     error, not a user error, so it returns 503.
     """
