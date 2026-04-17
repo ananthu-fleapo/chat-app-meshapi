@@ -60,26 +60,59 @@ logger = structlog.get_logger()
 # Canonical model name → AWS Bedrock cross-region inference profile ID.
 # Fallback used when provider_model_id is not set in the DB.
 # All active models use the us. geo cross-region prefix (routes across us-east-1/us-west-2).
-# Confirmed live as of 2026-04 via test_bedrock_models.py.
+# Embedding-only models (titan-embed-*, cohere/embed-*) are NOT listed here —
+# they require InvokeModel, not Converse, and cannot be used with this adapter.
 _MODEL_MAP: dict[str, str] = {
-    # ── Claude 4.x ────────────────────────────────────────────────────────────
-    "anthropic/claude-sonnet-4-5":        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "anthropic/claude-opus-4-5":          "us.anthropic.claude-opus-4-5-20251101-v1:0",
-    "anthropic/claude-sonnet-4":          "us.anthropic.claude-sonnet-4-20250514-v1:0",
-    "anthropic/claude-opus-4-1":          "us.anthropic.claude-opus-4-1-20250805-v1:0",
-    "anthropic/claude-haiku-4-5":         "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    # ── Claude 3.x (only haiku still active; 3-5 sonnet/haiku and 3-7 are legacy) ──
-    "anthropic/claude-3-haiku":           "us.anthropic.claude-3-haiku-20240307-v1:0",
-    # ── Amazon Nova ───────────────────────────────────────────────────────────
-    "amazon/nova-lite-v1":                "us.amazon.nova-lite-v1:0",
-    "amazon/nova-micro-v1":               "us.amazon.nova-micro-v1:0",
-    "amazon/nova-pro-v1":                 "us.amazon.nova-pro-v1:0",
-    # ── Amazon Titan Embed ────────────────────────────────────────────────────
-    "amazon/titan-embed-text-v2":          "amazon.titan-embed-text-v2:0",
-    "amazon/titan-embed-text-v1":          "amazon.titan-embed-text-v1:2",
-    # ── Cohere Embed ──────────────────────────────────────────────────────────
-    "cohere/embed-english-v3":             "cohere.embed-english-v3",
-    "cohere/embed-multilingual-v3":        "cohere.embed-multilingual-v3",
+    # ── Anthropic Claude 4.x ──────────────────────────────────────────────────
+    "anthropic/claude-sonnet-4-5":              "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "anthropic/claude-opus-4-5":                "us.anthropic.claude-opus-4-5-20251101-v1:0",
+    "anthropic/claude-sonnet-4":                "us.anthropic.claude-sonnet-4-20250514-v1:0",
+    "anthropic/claude-opus-4-1":                "us.anthropic.claude-opus-4-1-20250805-v1:0",
+    "anthropic/claude-haiku-4-5":               "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    # ── Anthropic Claude 3.x ──────────────────────────────────────────────────
+    "anthropic/claude-3-haiku":                 "us.anthropic.claude-3-haiku-20240307-v1:0",
+    "anthropic/claude-3-5-haiku-20241022-v1":   "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+    # ── Amazon Nova / Titan ───────────────────────────────────────────────────
+    "amazon/nova-premier-v1":                   "us.amazon.nova-premier-v1:0",
+    "amazon/nova-pro-v1":                       "us.amazon.nova-pro-v1:0",
+    "amazon/nova-lite-v1":                      "us.amazon.nova-lite-v1:0",
+    "amazon/nova-micro-v1":                     "us.amazon.nova-micro-v1:0",
+    "amazon/titan-tg1-large":                   "us.amazon.titan-tg1-large",
+    # ── AI21 ──────────────────────────────────────────────────────────────────
+    "ai21/jamba-instruct-v1":                   "us.ai21.jamba-instruct-v1:0",
+    "ai21/j2-mid-v1":                           "us.ai21.j2-mid-v1",
+    "ai21/j2-ultra-v1":                         "us.ai21.j2-ultra-v1",
+    # ── Cohere Command ────────────────────────────────────────────────────────
+    "cohere/command-r-v1":                      "us.cohere.command-r-v1:0",
+    "cohere/command-r-plus-v1":                 "us.cohere.command-r-plus-v1:0",
+    # ── DeepSeek ──────────────────────────────────────────────────────────────
+    "deepseek/v3-v1":                           "us.deepseek.v3-v1:0",
+    # ── Google ────────────────────────────────────────────────────────────────
+    "google/gemma-3-27b-it":                    "us.google.gemma-3-27b-it",
+    # ── Meta Llama 2 ──────────────────────────────────────────────────────────
+    "meta/llama2-13b-v1":                       "us.meta.llama2-13b-v1",
+    "meta/llama2-70b-v1":                       "us.meta.llama2-70b-v1",
+    "meta/llama2-13b-chat-v1":                  "us.meta.llama2-13b-chat-v1",
+    "meta/llama2-70b-chat-v1":                  "us.meta.llama2-70b-chat-v1",
+    # ── Meta Llama 3.x ────────────────────────────────────────────────────────
+    "meta/llama3-1-405b-instruct-v1":           "us.meta.llama3-1-405b-instruct-v1:0",
+    "meta/llama3-2-1b-instruct-v1":             "us.meta.llama3-2-1b-instruct-v1:0",
+    "meta/llama3-2-3b-instruct-v1":             "us.meta.llama3-2-3b-instruct-v1:0",
+    "meta/llama3-2-11b-instruct-v1":            "us.meta.llama3-2-11b-instruct-v1:0",
+    "meta/llama3-2-90b-instruct-v1":            "us.meta.llama3-2-90b-instruct-v1:0",
+    # ── Mistral ───────────────────────────────────────────────────────────────
+    "mistral/mistral-large-2407-v1":            "us.mistral.mistral-large-2407-v1:0",
+    # ── NVIDIA ────────────────────────────────────────────────────────────────
+    "nvidia/nemotron-nano-9b-v2":               "us.nvidia.nemotron-nano-9b-v2",
+    "nvidia/nemotron-nano-12b-v2":              "us.nvidia.nemotron-nano-12b-v2",
+    # ── OpenAI Safeguard ──────────────────────────────────────────────────────
+    "openai/gpt-oss-safeguard-20b":             "us.openai.gpt-oss-safeguard-20b",
+    "openai/gpt-oss-safeguard-120b":            "us.openai.gpt-oss-safeguard-120b",
+    # ── Qwen ──────────────────────────────────────────────────────────────────
+    "qwen/qwen3-235b-a22b-2507-v1":             "us.qwen.qwen3-235b-a22b-2507-v1:0",
+    "qwen/qwen3-coder-480b-a35b-v1":            "us.qwen.qwen3-coder-480b-a35b-v1:0",
+    "qwen/qwen3-coder-next":                    "us.qwen.qwen3-coder-next",
+    "qwen/qwen3-vl-235b-a22b":                  "us.qwen.qwen3-vl-235b-a22b",
 }
 
 

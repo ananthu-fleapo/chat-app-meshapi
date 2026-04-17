@@ -56,6 +56,12 @@ _REQUEST_LOG_SKIP = {"/healthz", "/readyz", "/metrics"}
 # Headers stripped before persisting to MongoDB — never store credentials
 _SENSITIVE_HEADERS = {"authorization", "x-origin-secret", "cookie", "x-api-key"}
 
+# Paths excluded from MongoDB request logging
+_REQUEST_LOG_SKIP = {"/healthz", "/readyz", "/metrics"}
+
+# Headers stripped before persisting to MongoDB — never store credentials
+_SENSITIVE_HEADERS = {"authorization", "x-origin-secret", "cookie", "x-api-key"}
+
 
 def _parse_trace_header(header: str) -> tuple[str | None, str | None, bool]:
     """
@@ -328,6 +334,13 @@ class RequestLoggingMiddleware:
                 chunk = message.get("body", b"")
                 if chunk:
                     response_chunks.append(chunk)
+
+                if not message.get("more_body", False):
+                    # Last byte sent — schedule MongoDB write in background
+                    latency_ms = int((time.monotonic() - start_time) * 1000)
+                    state = scope.get("state")
+                    request_id = getattr(state, "request_id", None) or f"req_{ULID()}"
+                    owner = getattr(state, "owner", None)
 
                 more_body = message.get("more_body", False)
                 logger.debug(

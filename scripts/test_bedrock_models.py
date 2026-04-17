@@ -48,7 +48,60 @@ _OUTPUTS_DIR.mkdir(exist_ok=True)
 #
 # Run with --region us-east-1 (default) for US geo cross-region profiles.
 
+# MODELS: canonical_id → (bedrock_model_id, context_length_tokens)
+# Embedding-only models (titan-embed-*, cohere/embed-*) are excluded — they require
+# InvokeModel, not Converse, and cannot be tested with this script.
 MODELS: dict[str, tuple[str, int]] = {
+    # ── Anthropic Claude 4.x ──────────────────────────────────────────────────
+    "anthropic/claude-sonnet-4-5":              ("us.anthropic.claude-sonnet-4-5-20250929-v1:0",   200_000),
+    "anthropic/claude-opus-4-5":                ("us.anthropic.claude-opus-4-5-20251101-v1:0",     200_000),
+    "anthropic/claude-sonnet-4":                ("us.anthropic.claude-sonnet-4-20250514-v1:0",     200_000),
+    "anthropic/claude-opus-4-1":                ("us.anthropic.claude-opus-4-1-20250805-v1:0",     200_000),
+    "anthropic/claude-haiku-4-5":               ("us.anthropic.claude-haiku-4-5-20251001-v1:0",    200_000),
+    # ── Anthropic Claude 3.x ──────────────────────────────────────────────────
+    "anthropic/claude-3-haiku":                 ("us.anthropic.claude-3-haiku-20240307-v1:0",      200_000),
+    "anthropic/claude-3-5-haiku-20241022-v1":   ("us.anthropic.claude-3-5-haiku-20241022-v1:0",   200_000),
+    # ── Amazon Nova / Titan ───────────────────────────────────────────────────
+    "amazon/nova-premier-v1":                   ("us.amazon.nova-premier-v1:0",                    300_000),
+    "amazon/nova-pro-v1":                       ("us.amazon.nova-pro-v1:0",                        300_000),
+    "amazon/nova-lite-v1":                      ("us.amazon.nova-lite-v1:0",                       300_000),
+    "amazon/nova-micro-v1":                     ("us.amazon.nova-micro-v1:0",                      128_000),
+    "amazon/titan-tg1-large":                   ("us.amazon.titan-tg1-large",                        8_192),
+    # ── AI21 ──────────────────────────────────────────────────────────────────
+    "ai21/jamba-instruct-v1":                   ("us.ai21.jamba-instruct-v1:0",                   256_000),
+    "ai21/j2-mid-v1":                           ("us.ai21.j2-mid-v1",                               8_192),
+    "ai21/j2-ultra-v1":                         ("us.ai21.j2-ultra-v1",                             8_192),
+    # ── Cohere Command ────────────────────────────────────────────────────────
+    "cohere/command-r-v1":                      ("us.cohere.command-r-v1:0",                      128_000),
+    "cohere/command-r-plus-v1":                 ("us.cohere.command-r-plus-v1:0",                 128_000),
+    # ── DeepSeek ──────────────────────────────────────────────────────────────
+    "deepseek/v3-v1":                           ("us.deepseek.v3-v1:0",                           128_000),
+    # ── Google ────────────────────────────────────────────────────────────────
+    "google/gemma-3-27b-it":                    ("us.google.gemma-3-27b-it",                      128_000),
+    # ── Meta Llama 2 ──────────────────────────────────────────────────────────
+    "meta/llama2-13b-v1":                       ("us.meta.llama2-13b-v1",                           4_096),
+    "meta/llama2-70b-v1":                       ("us.meta.llama2-70b-v1",                           4_096),
+    "meta/llama2-13b-chat-v1":                  ("us.meta.llama2-13b-chat-v1",                      4_096),
+    "meta/llama2-70b-chat-v1":                  ("us.meta.llama2-70b-chat-v1",                      4_096),
+    # ── Meta Llama 3.x ────────────────────────────────────────────────────────
+    "meta/llama3-1-405b-instruct-v1":           ("us.meta.llama3-1-405b-instruct-v1:0",           128_000),
+    "meta/llama3-2-1b-instruct-v1":             ("us.meta.llama3-2-1b-instruct-v1:0",             128_000),
+    "meta/llama3-2-3b-instruct-v1":             ("us.meta.llama3-2-3b-instruct-v1:0",             128_000),
+    "meta/llama3-2-11b-instruct-v1":            ("us.meta.llama3-2-11b-instruct-v1:0",            128_000),
+    "meta/llama3-2-90b-instruct-v1":            ("us.meta.llama3-2-90b-instruct-v1:0",            128_000),
+    # ── Mistral ───────────────────────────────────────────────────────────────
+    "mistral/mistral-large-2407-v1":            ("us.mistral.mistral-large-2407-v1:0",             32_000),
+    # ── NVIDIA ────────────────────────────────────────────────────────────────
+    "nvidia/nemotron-nano-9b-v2":               ("us.nvidia.nemotron-nano-9b-v2",                 128_000),
+    "nvidia/nemotron-nano-12b-v2":              ("us.nvidia.nemotron-nano-12b-v2",                128_000),
+    # ── OpenAI Safeguard ──────────────────────────────────────────────────────
+    "openai/gpt-oss-safeguard-20b":             ("us.openai.gpt-oss-safeguard-20b",                    0),
+    "openai/gpt-oss-safeguard-120b":            ("us.openai.gpt-oss-safeguard-120b",                   0),
+    # ── Qwen ──────────────────────────────────────────────────────────────────
+    "qwen/qwen3-235b-a22b-2507-v1":             ("us.qwen.qwen3-235b-a22b-2507-v1:0",            128_000),
+    "qwen/qwen3-coder-480b-a35b-v1":            ("us.qwen.qwen3-coder-480b-a35b-v1:0",           128_000),
+    "qwen/qwen3-coder-next":                    ("us.qwen.qwen3-coder-next",                           0),
+    "qwen/qwen3-vl-235b-a22b":                  ("us.qwen.qwen3-vl-235b-a22b",                        0),
     # ── Claude 4.x (geo cross-region inference profiles) ─────────────────────
     "anthropic/claude-sonnet-4-5":        ("us.anthropic.claude-sonnet-4-5-20250929-v1:0",   200_000),
     "anthropic/claude-opus-4-5":          ("us.anthropic.claude-opus-4-5-20251101-v1:0",     200_000),
@@ -73,6 +126,58 @@ MODELS: dict[str, tuple[str, int]] = {
     # ── Not yet on Bedrock ────────────────────────────────────────────────────
     # "anthropic/claude-sonnet-4-6":      ValidationException (20260101 date not live yet)
     # "anthropic/claude-opus-4-6":        ValidationException (20260101 date not live yet)
+}
+
+# Upstream pricing from AWS Bedrock (USD per 1 000 tokens).
+# Used when generating SQL INSERT statements for the model_prices table.
+# Retail prices (prompt_usd_per_1k / completion_usd_per_1k) are set equal to
+# upstream here — apply a markup in the DB after validating the models work.
+PRICING: dict[str, tuple[float, float]] = {
+    # canonical_id: (input_per_1k, output_per_1k)
+    "ai21/jamba-instruct-v1":                   (0.0005,   0.0007),
+    "ai21/j2-mid-v1":                           (0.0125,   0.0125),
+    "ai21/j2-ultra-v1":                         (0.0188,   0.0188),
+    "amazon/nova-premier-v1":                   (0.0025,   0.0125),
+    "amazon/titan-tg1-large":                   (0.0003,   0.0004),
+    "amazon/titan-embed-text-v1":               (0.0001,   0.0),
+    "amazon/titan-embed-text-v2":               (0.00002,  0.0),
+    "amazon/titan-embed-image-v1":              (0.00008,  0.0),
+    "anthropic/claude-3-5-haiku-20241022-v1":   (0.0008,   0.004),
+    "cohere/command-r-v1":                      (0.0005,   0.0015),
+    "cohere/command-r-plus-v1":                 (0.003,    0.015),
+    "cohere/embed-english-v3":                  (0.0001,   0.0),
+    "cohere/embed-multilingual-v3":             (0.0001,   0.0),
+    "cohere/embed-v4":                          (0.0001,   0.0),
+    "deepseek/v3-v1":                           (0.00062,  0.00185),
+    "google/gemma-3-27b-it":                    (0.00023,  0.00038),
+    "meta/llama2-13b-v1":                       (0.00075,  0.001),
+    "meta/llama2-70b-v1":                       (0.00195,  0.00256),
+    "meta/llama2-13b-chat-v1":                  (0.00075,  0.001),
+    "meta/llama2-70b-chat-v1":                  (0.00195,  0.00256),
+    "meta/llama3-1-405b-instruct-v1":           (0.00532,  0.016),
+    "meta/llama3-2-1b-instruct-v1":             (0.0001,   0.0001),
+    "meta/llama3-2-3b-instruct-v1":             (0.00015,  0.00015),
+    "meta/llama3-2-11b-instruct-v1":            (0.00035,  0.00035),
+    "meta/llama3-2-90b-instruct-v1":            (0.002,    0.002),
+    "mistral/mistral-large-2407-v1":            (0.003,    0.009),
+    "nvidia/nemotron-nano-9b-v2":               (0.00006,  0.00023),
+    "nvidia/nemotron-nano-12b-v2":              (0.0002,   0.0006),
+    "openai/gpt-oss-safeguard-20b":             (0.00007,  0.0002),
+    "openai/gpt-oss-safeguard-120b":            (0.00015,  0.0006),
+    "qwen/qwen3-235b-a22b-2507-v1":             (0.00023,  0.00091),
+    "qwen/qwen3-coder-480b-a35b-v1":            (0.0005,   0.00216),
+    "qwen/qwen3-coder-next":                    (0.0005,   0.0012),
+    "qwen/qwen3-vl-235b-a22b":                  (0.00053,  0.00266),
+    # Existing models (already in DB — included for completeness)
+    "amazon/nova-pro-v1":                       (0.0008,   0.0032),
+    "amazon/nova-lite-v1":                      (0.00006,  0.00024),
+    "amazon/nova-micro-v1":                     (0.000035, 0.00014),
+    "anthropic/claude-sonnet-4-5":              (0.003,    0.015),
+    "anthropic/claude-opus-4-5":                (0.015,    0.075),
+    "anthropic/claude-sonnet-4":                (0.003,    0.015),
+    "anthropic/claude-opus-4-1":                (0.015,    0.075),
+    "anthropic/claude-haiku-4-5":               (0.0008,   0.004),
+    "anthropic/claude-3-haiku":                 (0.00025,  0.00125),
 }
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
@@ -298,18 +403,32 @@ def _print_sql(results: list[ModelResult]) -> None:
     print("\n" + "─" * 78)
     print(bold("SQL INSERT statements for passed models (provider=bedrock)"))
     print("─" * 78)
+    print("-- Retail prices are set equal to upstream costs. Apply markup via PATCH /admin/model-prices.")
     print("\nBEGIN;\n")
 
     for r in sorted(passed, key=lambda r: r.model_id):
-        ctx   = MODELS[r.model_id][1]
-        name  = _model_display_name(r.model_id).replace("'", "''")
-        mid   = r.model_id.replace("'", "''")
-        pmid  = r.bedrock_model_id.replace("'", "''")
-        print(f"-- {r.model_id}  →  {r.bedrock_model_id}")
-        print(f"INSERT INTO models (model_id, name, context_length, description, is_enabled, model_type, input_modalities, output_modalities)")
-        print(f"VALUES ('{mid}', '{name}', {ctx}, NULL, true, 'text', '{{text}}', '{{text}}');")
-        print(f"INSERT INTO model_prices (model_id, provider, provider_model_id, is_default, prompt_usd_per_1k, completion_usd_per_1k, is_free)")
-        print(f"VALUES ('{mid}', 'bedrock', '{pmid}', true, 0, 0, false);")
+        ctx  = MODELS[r.model_id][1]
+        name = _model_display_name(r.model_id).replace("'", "''")
+        mid  = r.model_id.replace("'", "''")
+        pmid = r.bedrock_model_id.replace("'", "''")
+        brand = r.model_id.split("/")[0].replace("'", "''")
+        inp, out = PRICING.get(r.model_id, (0.0, 0.0))
+        ctx_val  = ctx if ctx else "NULL"
+
+        print(f"-- {r.model_id}  →  {r.bedrock_model_id}  ({inp}/1k in, {out}/1k out)")
+        print(f"INSERT INTO models (model_id, name, brand, context_length, description, is_enabled)")
+        print(f"  VALUES ('{mid}', '{name}', '{brand}', {ctx_val}, NULL, true)")
+        print(f"  ON CONFLICT (model_id) DO NOTHING;")
+        print(f"INSERT INTO model_prices")
+        print(f"  (model_id, provider, provider_model_id, is_default,")
+        print(f"   prompt_usd_per_1k, completion_usd_per_1k, is_free,")
+        print(f"   upstream_prompt_usd_per_1k, upstream_completion_usd_per_1k)")
+        print(f"  VALUES ('{mid}', 'bedrock', '{pmid}', true,")
+        print(f"          {inp}, {out}, false, {inp}, {out})")
+        print(f"  ON CONFLICT (model_id, provider) DO UPDATE SET")
+        print(f"    provider_model_id = EXCLUDED.provider_model_id,")
+        print(f"    upstream_prompt_usd_per_1k = EXCLUDED.upstream_prompt_usd_per_1k,")
+        print(f"    upstream_completion_usd_per_1k = EXCLUDED.upstream_completion_usd_per_1k;")
         print()
 
     print("COMMIT;")
