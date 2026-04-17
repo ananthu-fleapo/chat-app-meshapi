@@ -1,0 +1,6 @@
+basic_auth_users:
+  admin: $2y$12$1FtbyKDh3wNKOJwDgMRbeuG8vteQCS.aohqs5otmdRD7U5HXNjypG
+
+# generate: htpasswd -nBC 12 admin
+# password: 5e160925b3ca66f9ae430130f7c78411e791286e0ed564717faad288e8ec826a
+

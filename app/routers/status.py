@@ -12,6 +12,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import structlog
@@ -174,7 +175,14 @@ async def _fetch_metrics() -> dict[str, Any]:
     now = int(datetime.now(UTC).timestamp())
     start = now - 86400  # 24h ago
 
-    async with httpx.AsyncClient(base_url=settings.prometheus_url) as client:
+    parsed = urlparse(settings.prometheus_url)
+    base_url = settings.prometheus_url
+    auth = None
+    if parsed.username and parsed.password:
+        auth = (parsed.username, parsed.password)
+        base_url = settings.prometheus_url.replace(f"{parsed.username}:{parsed.password}@", "")
+
+    async with httpx.AsyncClient(base_url=base_url, auth=auth) as client:
         (
             success_rate,
             p50,
