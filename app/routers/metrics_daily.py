@@ -45,6 +45,7 @@ class DailySummaryMetrics(BaseModel):
     revenue_usd: float
     payments_received_usd: float
     timestamp: datetime
+    start_ist: datetime        # Start of the 22:00-22:00 IST window
 
 
 # ── Internals ─────────────────────────────────────────────────────────────────
@@ -154,6 +155,7 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
         revenue_usd=revenue_usd,
         payments_received_usd=payments_received_usd,
         timestamp=now_utc,
+        start_ist=start_ist,
     )
 
 
@@ -202,7 +204,7 @@ async def run_daily_metrics(
             pass
 
     await send_slack_alert(
-        title=f"Daily Metrics — {start_ist.strftime('%Y-%m-%d')} (10PM–10PM IST)",
+        title=f"Daily Metrics — {metrics.start_ist.strftime('%Y-%m-%d')} (10PM–10PM IST)",
         fields=fields,
         message=message,
         notify_here=False,  # informational, not actionable
