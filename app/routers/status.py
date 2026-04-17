@@ -70,6 +70,18 @@ _Q_RANGE_P99 = (
     f" sum(rate(routerv_upstream_latency_seconds_bucket{{{_SUCCESS_LATENCY}}}[6h])) by (le)) * 1000"
 )
 
+# Hourly success rate history (range query, 1h step, 24h window)
+_Q_RANGE_SUCCESS_RATE = (
+    f'sum(rate(routerv_upstream_requests_total{{status="success",{_EXCLUDE_MODELS}}}[1h]))'
+    f' / sum(rate(routerv_upstream_requests_total{{{_EXCLUDE_MODELS}}}[1h])) * 100'
+)
+
+# Per-model error rate — returns only models where error rate > 5% in last 1h
+_Q_FAILING_MODELS = (
+    f'(sum by (model) (rate(routerv_upstream_requests_total{{status="error",{_EXCLUDE_MODELS}}}[1h]))'
+    f' / sum by (model) (rate(routerv_upstream_requests_total{{{_EXCLUDE_MODELS}}}[1h])) * 100) > 5'
+)
+
 
 def _prom_value(result: dict[str, Any]) -> float | None:
     """Extract a scalar float from a Prometheus instant query result."""
@@ -85,6 +97,27 @@ def _prom_value(result: dict[str, Any]) -> float | None:
         return val
     except Exception:  # noqa: BLE001
         return None
+
+
+async def _prom_vector(client: httpx.AsyncClient, query: str) -> list[dict[str, Any]]:
+    """Return all series from a Prometheus instant vector query as [{labels, value}]."""
+    try:
+        resp = await client.get(
+            "/api/v1/query",
+            params={"query": query},
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+        rows = resp.json()["data"]["result"]
+        out = []
+        for row in rows:
+            val = float(row["value"][1])
+            if val != val or val == float("inf"):
+                continue
+            out.append({"labels": row["metric"], "value": val})
+        return out
+    except Exception:  # noqa: BLE001
+        return []
 
 
 async def _prom_instant(client: httpx.AsyncClient, query: str) -> float | None:
@@ -133,12 +166,13 @@ async def _fetch_metrics() -> dict[str, Any]:
         return {
             "metrics": None,
             "latency_history": None,
+            "success_rate_history": None,
+            "failing_models": None,
             "uptime_seconds": None,
         }
 
     now = int(datetime.now(UTC).timestamp())
     start = now - 86400  # 24h ago
-    step = 1800  # 30-min buckets
 
     async with httpx.AsyncClient(base_url=settings.prometheus_url) as client:
         (
@@ -148,16 +182,20 @@ async def _fetch_metrics() -> dict[str, Any]:
             uptime,
             range_p50_raw,
             range_p99_raw,
+            range_sr_raw,
+            failing_raw,
         ) = await asyncio.gather(
             _prom_instant(client, _Q_SUCCESS_RATE),
             _prom_instant(client, _Q_P50),
             _prom_instant(client, _Q_P99),
             _prom_instant(client, _Q_UPTIME),
-            _prom_range(client, _Q_RANGE_P50, start, now, step),
-            _prom_range(client, _Q_RANGE_P99, start, now, step),
+            _prom_range(client, _Q_RANGE_P50, start, now, step=1800),
+            _prom_range(client, _Q_RANGE_P99, start, now, step=1800),
+            _prom_range(client, _Q_RANGE_SUCCESS_RATE, start, now, step=3600),
+            _prom_vector(client, _Q_FAILING_MODELS),
         )
 
-    # Merge range results: align by timestamp
+    # Latency history — merge p50/p99 by timestamp
     p99_by_ts = {row["ts"]: row["value"] for row in range_p99_raw}
     latency_history = [
         {
@@ -168,6 +206,26 @@ async def _fetch_metrics() -> dict[str, Any]:
         for row in range_p50_raw
     ]
 
+    # Success rate history — hourly buckets
+    success_rate_history = [
+        {"ts": row["ts"], "success_rate_pct": round(row["value"], 2)}
+        for row in range_sr_raw
+        if row["value"] is not None
+    ]
+
+    # Failing models — sort by error rate descending
+    failing_models = sorted(
+        [
+            {
+                "model": row["labels"].get("model", "unknown"),
+                "error_rate_pct": round(row["value"], 1),
+            }
+            for row in failing_raw
+        ],
+        key=lambda x: x["error_rate_pct"],
+        reverse=True,
+    )
+
     metrics: dict[str, Any] = {
         "success_rate_pct": round(success_rate, 2) if success_rate is not None else None,
         "p50_ms": round(p50) if p50 is not None else None,
@@ -177,6 +235,8 @@ async def _fetch_metrics() -> dict[str, Any]:
     return {
         "metrics": metrics,
         "latency_history": latency_history,
+        "success_rate_history": success_rate_history,
+        "failing_models": failing_models,
         "uptime_seconds": round(uptime) if uptime is not None else None,
     }
 
@@ -232,8 +292,7 @@ def _overall_status(
         return "down"
     if metrics:
         sr = metrics.get("success_rate_pct")
-        p99 = metrics.get("p99_ms")
-        if (sr is not None and sr < 99) or (p99 is not None and p99 > 10_000):
+        if sr is not None and sr < 80:
             return "degraded"
     return "operational"
 
@@ -269,9 +328,10 @@ async def get_status() -> JSONResponse:
         return JSONResponse(
             content={
                 "status": "down",
-                "services": {"api": {"status": "ok"}, "postgres": {"status": "unknown"}, "redis": {"status": "unknown"}},
                 "metrics": None,
                 "latency_history": None,
+                "success_rate_history": None,
+                "failing_models": None,
                 "uptime_seconds": None,
                 "checked_at": datetime.now(UTC).isoformat(),
             }
@@ -279,9 +339,10 @@ async def get_status() -> JSONResponse:
 
     payload: dict[str, Any] = {
         "status": _overall_status(all_healthy, prom.get("metrics")),
-        "services": services,
         "metrics": prom.get("metrics"),
         "latency_history": prom.get("latency_history"),
+        "success_rate_history": prom.get("success_rate_history"),
+        "failing_models": prom.get("failing_models"),
         "uptime_seconds": prom.get("uptime_seconds"),
         "checked_at": datetime.now(UTC).isoformat(),
     }
