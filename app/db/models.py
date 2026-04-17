@@ -47,13 +47,17 @@ class ApiKey(Base):
     """
 
     __tablename__ = "api_keys"
+    __table_args__ = (
+        UniqueConstraint("key_hash", name="uq_api_keys_key_hash"),
+        Index("ix_api_keys_key_hash", "key_hash", unique=True),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    key_hash: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
+    key_hash: Mapped[str] = mapped_column(Text, nullable=False)
     owner: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active", index=True)
     default_model: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -118,6 +122,7 @@ class Template(Base):
     __tablename__ = "templates"
     __table_args__ = (
         UniqueConstraint("owner", "name", name="uq_templates_owner_name"),
+        Index("uq_templates_global_name", "name", unique=True, postgresql_where="owner IS NULL"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -189,7 +194,6 @@ class UsageEvent(Base):
 
     __tablename__ = "usage_events"
     __table_args__ = (
-        # Composite index: per-key time-range queries (most common access pattern)
         Index("ix_usage_events_key_created", "key_id", "created_at"),
         Index("ix_usage_events_provider", "provider"),
     )
@@ -199,9 +203,9 @@ class UsageEvent(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    key_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    key_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     request_id: Mapped[str] = mapped_column(Text, nullable=False)
-    model: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     template_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     stream: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -219,7 +223,7 @@ class UsageEvent(Base):
         Text, nullable=False, server_default="openrouter"
     )
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    status: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -259,6 +263,9 @@ class ProviderKey(Base):
     """
 
     __tablename__ = "provider_keys"
+    __table_args__ = (
+        Index("ix_provider_keys_owner_provider", "owner", "provider"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -342,6 +349,11 @@ class Model(Base):
     """
 
     __tablename__ = "models"
+    __table_args__ = (
+        Index("ix_models_model_type", "model_type"),
+        Index("ix_models_input_modalities", "input_modalities", postgresql_using="gin"),
+        Index("ix_models_output_modalities", "output_modalities", postgresql_using="gin"),
+    )
 
     model_id: Mapped[str] = mapped_column(Text, primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
@@ -405,6 +417,9 @@ class ModelPrice(Base):
     """
 
     __tablename__ = "model_prices"
+    __table_args__ = (
+        Index("ix_model_prices_one_default", "model_id", unique=True, postgresql_where="is_default = true"),
+    )
 
     model_id: Mapped[str] = mapped_column(Text, primary_key=True)
     provider: Mapped[str] = mapped_column(
@@ -512,6 +527,9 @@ class PaymentEvent(Base):
     """
 
     __tablename__ = "payment_events"
+    __table_args__ = (
+        Index("ix_payment_events_user_created", "user_id", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -520,7 +538,7 @@ class PaymentEvent(Base):
     )
     user_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     payment_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     order_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     currency: Mapped[str | None] = mapped_column(Text, nullable=True)
     amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -529,7 +547,7 @@ class PaymentEvent(Base):
     coupon_code: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     payment_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
     ip_address: Mapped[str | None] = mapped_column(Text, nullable=True)
-    country: Mapped[str | None] = mapped_column(Text, nullable=True)
+    country: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -623,7 +641,10 @@ class GstinRecord(Base):
         server_default=func.gen_random_uuid(),
     )
     payment_event_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("payment_events.id", ondelete="CASCADE", name="gstin_records_payment_event_id_fkey"),
+        nullable=False,
+        index=True,
     )
     gstin: Mapped[str | None] = mapped_column(Text, nullable=True)
     gst_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
@@ -657,9 +678,13 @@ class User(Base):
     """
 
     __tablename__ = "users"
+    __table_args__ = (
+        Index("ix_users_email", "email", unique=True),
+        UniqueConstraint("email", name="uq_users_email"),
+    )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
-    email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
     display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -1,42 +1,10 @@
-# RouterSVC — Claude Context
+# MeshAPI — Backend (`backend/`)
 
-## Project Overview
-
-**RouterSVC** is an OpenAI-compatible AI model gateway built on FastAPI, proxying requests to [OpenRouter](https://openrouter.ai). It provides:
-
-- Multi-tenant API key management (`rsk_<ULID>` keys, SHA-256 hash stored)
-- Per-owner rate limiting (RPM/RPD via Redis fixed-window counters)
-- Per-key spend caps and credit balance enforcement
-- Usage tracking and billing (per-request token/cost logging)
-- Prompt template system (`{{variable}}` substitution)
-- Per-owner upstream provider key provisioning (via OpenRouter management API + GCP Secret Manager)
-- GCP-native deployment: Cloud Run, Cloud SQL (PostgreSQL), Memorystore (Redis), Secret Manager, Cloud Build
-
----
-
-## Tech Stack
-
-| Layer | Tech |
-|---|---|
-| Language | Python 3.12+ |
-| Framework | FastAPI 0.115+ |
-| Database | PostgreSQL 16 (asyncpg + SQLAlchemy async) |
-| Migrations | Alembic 1.13+ |
-| Cache / Rate Limiting | Redis 7 (asyncio) |
-| HTTP Client | httpx 0.27+ |
-| Validation | Pydantic 2.7+ / pydantic-settings 2.3+ |
-| Logging | structlog 24.2+ (GCP Cloud Logging JSON in prod) |
-| Metrics | Prometheus + prometheus-fastapi-instrumentator 7.0+ |
-| Auth | PyJWT 2.9+ (HS256 Supabase tokens) |
-| IDs | python-ulid 2.7+ |
-| Secrets | GCP Secret Manager (`[gcp]` extras) |
-| Testing | pytest 8.2+ + pytest-asyncio 0.23+ |
-
----
-
-## Local Dev Commands
+**MeshAPI** is a multi-tenant, OpenAI-compatible AI model gateway built on FastAPI. It proxies inference requests to upstream providers (OpenRouter, Vertex AI, Bedrock, OpenAI, Qwen) while enforcing per-key rate limits, spend caps, credit balances, and prompt templates — giving teams a single API surface with full usage tracking and billing.
 
 ```bash
+cd backend
+
 # Setup
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"           # add [gcp] for Secret Manager support
@@ -46,27 +14,84 @@ docker-compose up -d
 
 # DB migrations
 alembic upgrade head
+alembic revision --autogenerate -m "description"
+alembic downgrade -1
 
 # Run server
 uvicorn app.main:app --reload --port 8000
+
+# Tests
+pytest
+pytest tests/test_rate_limiter.py         # single file
+pytest tests/test_balance.py::test_fn -v  # single test
+pytest -k "rate_limit" -v                 # filter by name
 
 # With monitoring (Prometheus :9090, Grafana :3000 admin/admin)
 docker-compose --profile monitoring up -d
 ```
 
-### Tests
+---
 
-```bash
-pytest                              # all tests
-pytest tests/test_rate_limiter.py   # single file
-pytest -k "rate_limit" -v           # filter by name
+## Architecture
+
+Multi-tenant API gateway with three auth planes:
+
+- **Data plane** — `Authorization: Bearer rsk_<ULID>` (SHA-256 hash stored in DB)
+- **Control plane** — Supabase JWT tokens (dashboard/management routes)
+- **Admin plane** — `/admin/*` (no auth when `SUPABASE_JWT_SECRET` unset)
+
+**Inference request flow:**
 ```
+POST /v1/chat/completions
+  → CloudflareOriginGuard      (X-Origin-Secret, prod only)
+  → RequestIdMiddleware         (req_<ULID>, structlog context)
+  → get_authenticated_key()     (SHA-256 lookup, Redis cache → DB)
+  → check_rate_limits()         (Redis fixed-window RPM/RPD)
+  → check_spend_cap()           (402 if over limit)
+  → resolve_template()          (DB + {{var}} render)
+  → resolve_config()            (merge request → key defaults → template defaults)
+  → check_balance()             (owner credit check)
+  → resolve_upstream_key()      (system key or per-owner from GCP Secret Manager)
+  → provider adapter            (OpenRouter / Vertex / Bedrock / OpenAI / Qwen)
+  → fire_usage_log()            (async DB write: tokens, cost, latency)
+```
+
+**Key modules:**
+
+| Module | Purpose |
+|---|---|
+| `app/routers/inference.py` | Core LLM proxy |
+| `app/providers/openrouter.py` | `OpenRouterAdapter` — singleton httpx client, SSE parsing |
+| `app/auth/config_resolver.py` | Merges request params with per-key and template defaults |
+| `app/cache/rate_limiter.py` | Fixed-window RPM/RPD counters in Redis |
+| `app/usage/spend_cap.py` | Per-key USD spend cap enforcement (402) |
+| `app/middleware.py` | Cloudflare origin guard + ULID request ID |
+| `app/config.py` | All config via Pydantic Settings from `.env` |
+
+**Provider routing** — DB-driven via `model_prices.provider`:
+
+| Provider | Slug | Auth |
+|---|---|---|
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` (default) |
+| Vertex AI | `vertex` | Service account JSON |
+| AWS Bedrock | `bedrock` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
+| OpenAI Direct | `openai` | `OPENAI_API_KEY` |
+| Qwen / DashScope | `qwen` | `QWEN_API_KEY` |
+
+**Dev bypasses** (when env vars are unset): No `DATABASE_URL` → DB skipped; No `REDIS_URL` → rate limiting skipped; No `SUPABASE_JWT_SECRET` → any token accepted as owner ID; No `CF_SECRET` → origin guard disabled.
+
+**Known pitfalls:**
+- `openrouter_api_key` must default to `= ""` in `config.py` — Pydantic validates at import time; migration jobs don't have this key set
+- Test env vars must be set BEFORE importing app modules (`conftest.py` handles this)
+- structlog context: bind per-request via `structlog.contextvars.bind_contextvars()`; don't use module-level loggers directly
+- Streaming usage logging fires after stream completes (SSE final chunk), not before
+- `GET /v1/models` is DB-only (no upstream calls); Redis cache 5-min TTL, invalidated on any admin write
 
 ---
 
 ## Environment Variables
 
-Copy `.env.example` to `.env`. Key vars:
+Copy `.env.example` to `.env`:
 
 | Var | Required | Notes |
 |---|---|---|
@@ -82,28 +107,7 @@ Copy `.env.example` to `.env`. Key vars:
 
 ---
 
-## Architecture Map
-
-```
-app/
-  routers/          FastAPI endpoints (inference, keys, balance, usage, templates, payments, models, admin)
-  auth/             JWT verification, API key lookup, dependency injection
-  providers/        OpenRouter client, per-owner key resolver, provisioner, Secret Manager
-  cache/            Redis key cache, fixed-window RPM/RPD rate limiter
-  db/               SQLAlchemy async models, engine, session factory
-  usage/            Usage logging, balance checks, pricing rules, spend caps
-  templates/        {{variable}} prompt template renderer and resolver
-  config.py         Pydantic settings (all env vars)
-  main.py           FastAPI app factory + lifespan
-  middleware.py     RequestIdMiddleware, CloudflareOriginGuard
-  exceptions.py     Custom error hierarchy + FastAPI handlers
-  metrics.py        Prometheus helpers
-
-alembic/versions/   10 migrations (0001 api_keys → 0010 model_prices/user_balances)
-tests/              pytest unit tests (mock DB via AsyncMock, env vars set before import)
-```
-
-### Database Tables
+## Database Tables
 
 | Table | Purpose |
 |---|---|
@@ -118,104 +122,26 @@ tests/              pytest unit tests (mock DB via AsyncMock, env vars set befor
 | `discounts` | Per-user/per-model discount percentages |
 | `currency_conversion_rates` | FX rates to USD with markup |
 
-### Model Listing Design
-
-`GET /v1/models` is **DB-only** — no upstream provider calls:
-
-- **`models` table** — whitelist + metadata (name, context_length, description, is_enabled)
-- **`model_prices` table** — pricing and provider routing (composite PK: model_id + provider)
-- Query joins both tables on `is_default=true` and `is_enabled=true`
-- Redis cache: 5-minute TTL (invalidated immediately on any admin write)
-- Discounts applied per-request from `discounts` table — never cached
-
-**Admin flow to add a model:**
-1. `POST /admin/models` — register metadata
-2. `POST /admin/model-prices` — add pricing (model_id must exist in `models`)
-3. Alternatively: `POST /admin/model-prices/seed` — bulk import from OpenRouter (seeds both tables)
-
-### Providers
-
-Five upstream providers, routing is DB-driven via `model_prices.provider`:
-
-| Provider | Slug | Auth |
-|---|---|---|
-| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
-| Vertex AI | `vertex` | Service account JSON |
-| AWS Bedrock | `bedrock` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
-| OpenAI Direct | `openai` | `OPENAI_API_KEY` |
-| Qwen / DashScope | `qwen` | `QWEN_API_KEY` |
+`GET /v1/models` is **DB-only** — joins `models` + `model_prices` (is_default=true, is_enabled=true); Redis cache 5-min TTL, invalidated on any admin write.
 
 ---
 
-## Request Lifecycle (Inference)
+## CI/CD (`cloudbuild.yaml`)
 
-```
-POST /v1/chat/completions
-  → CloudflareOriginGuard      validates X-Origin-Secret (prod)
-  → RequestIdMiddleware         assigns req_<ULID>, binds trace context
-  → get_authenticated_key()     SHA-256 lookup, status check
-  → check_rate_limits()         Redis RPM/RPD fixed-window
-  → check_spend_cap()           402 if over limit
-  → resolve_template()          DB lookup + {{var}} render (if template= set)
-  → resolve_config()            merge request params with key.default_params
-  → check_balance()             owner credit check
-  → resolve_upstream_key()      system key or per-owner from Secret Manager
-  → OpenRouterAdapter           proxy to OpenRouter (streaming or JSON)
-  → fire_usage_log()            async DB write (tokens, cost, latency)
-  → return response
-```
+Cloud Build triggered on push to `main`:
+
+1. **Build** — multi-stage Docker image (non-root UID 1001) → Artifact Registry (`:SHORT_SHA` + `:latest`)
+2. **Migrate** — recreate Cloud Run job → `alembic upgrade head`
+3. **Deploy** — `gcloud run services update --no-traffic` then shift traffic to latest
+
+**Constraints:**
+- `_DATABASE_URL` must be set in Cloud Build trigger substitutions (not the yaml default)
+- Migration job must pass `--service-account=api-routersvc-sa@...` (default compute SA lacks Cloud SQL access)
+- `DATABASE_URL` passed as env var (not secret) for Cloud Run jobs
 
 ---
 
-## CI/CD Pipeline (`cloudbuild.yaml`)
-
-5-step Cloud Build triggered on push to `main`:
-
-1. **Build** — multi-stage Docker image (non-root UID 1001), layer-cached via `:latest`
-2. **Push** — to Artifact Registry (`:SHORT_SHA` + `:latest` tags)
-3. **Create migration job** — `gcloud run jobs create` (delete-then-recreate pattern)
-4. **Run migration** — `gcloud run jobs execute --wait` (Alembic `upgrade head`)
-5. **Deploy + shift traffic** — `gcloud run services update --no-traffic` then `update-traffic --to-latest`
-
-### Key CI constraints
-
-- `_DATABASE_URL` must be set in the Cloud Build **trigger** substitutions (not the yaml default)
-- `_SERVICE_ACCOUNT` = `api-routersvc-sa@fair-myth-471110-j2.iam.gserviceaccount.com`
-- Migration job must pass `--service-account=_SERVICE_ACCOUNT` (default compute SA lacks Cloud SQL access)
-- `openrouter_api_key` has `= ""` default in `config.py` — pydantic validates all settings on import; migration job has no OpenRouter key set
-
----
-
-## Database Migrations
-
-```bash
-# Create a new migration
-alembic revision --autogenerate -m "short_description"
-
-# Apply
-alembic upgrade head
-
-# Rollback one step
-alembic downgrade -1
-```
-
-Alembic env (`alembic/env.py`) reads `DATABASE_URL` from the environment and uses the async engine.
-
----
-
-## Known Pitfalls
-
-- **`openrouter_api_key` default** — must be `= ""` not required. Pydantic validates settings at import time; migration Cloud Run jobs don't have the key in env, causing startup failure.
-- **Migration job service account** — must explicitly pass `--service-account=api-routersvc-sa@...`; the default compute SA doesn't have Cloud SQL Client or Secret Manager roles.
-- **`DATABASE_URL` as env var, not secret** — Cloud Run jobs don't support `--update-secrets` inline refs the same way services do; pass as `--set-env-vars`.
-- **structlog context** — bind per-request via `structlog.contextvars.bind_contextvars()`; don't use module-level loggers directly or context won't propagate.
-- **Test env vars** — must be set BEFORE importing app modules. `conftest.py` sets them at module load time; pydantic-settings reads env at class definition.
-- **Rate limiter expiry** — Redis keys auto-expire; no manual cleanup needed.
-- **Streaming usage logging** — `fire_usage_log()` fires after the stream completes (SSE parsing detects final chunk); don't log before stream is done.
-
----
-
-## Monitoring & Health
+## Monitoring
 
 | Endpoint | Purpose |
 |---|---|
@@ -223,6 +149,4 @@ Alembic env (`alembic/env.py`) reads `DATABASE_URL` from the environment and use
 | `GET /readyz` | Readiness — Postgres `SELECT 1` + Redis `PING`; 503 if either fails |
 | `GET /metrics` | Prometheus metrics (requires `METRICS_TOKEN` bearer) |
 
-Local monitoring stack: `docker-compose --profile monitoring up -d`
-- Prometheus: `http://localhost:9090`
-- Grafana: `http://localhost:3000` (admin / admin)
+Local stack: `docker-compose --profile monitoring up -d` → Prometheus `:9090`, Grafana `:3000` (admin/admin)
