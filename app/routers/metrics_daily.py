@@ -3,12 +3,12 @@ Daily Metrics Summary — POST /v1/metrics/daily-summary
 
 Aggregates daily business metrics (users onboarded, requests processed,
 success/failure rates, revenue, and payments received) and sends to Slack.
-Intended to be triggered by Cloud Scheduler daily at 8 AM UTC.
+Intended to be triggered by Cloud Scheduler daily at 10 AM IST.
 
 Auth: WEBHOOK_API_KEY bearer token (same as /v1/model-health/run).
 
 Cloud Scheduler config:
-    Schedule:  0 8 * * *
+    Schedule:  0 10 * * *
     URL:       POST https://<routersvc-url>/v1/metrics/daily-summary
     Header:    Authorization: Bearer <WEBHOOK_API_KEY>
 """
@@ -44,8 +44,9 @@ class DailySummaryMetrics(BaseModel):
     pending_rate: str
     revenue_usd: float
     payments_received_usd: float
+    error_code_counts: dict[str, int]  # error_code → count, sorted by count desc
     timestamp: datetime
-    start_ist: datetime        # Start of the 22:00-22:00 IST window
+    start_ist: datetime        # Start of the 10AM–10AM IST window
 
 
 # ── Internals ─────────────────────────────────────────────────────────────────
@@ -59,11 +60,11 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
     now_utc = datetime.now(UTC)
     now_ist = now_utc + IST_OFFSET
 
-    # Set boundary at 22:00 (10 PM IST)
-    if now_ist >= now_ist.replace(hour=22, minute=0, second=0, microsecond=0):
-        start_ist = now_ist.replace(hour=22, minute=0, second=0, microsecond=0)
+    # Set boundary at 10:00 (10 AM IST)
+    if now_ist >= now_ist.replace(hour=10, minute=0, second=0, microsecond=0):
+        start_ist = now_ist.replace(hour=10, minute=0, second=0, microsecond=0)
     else:
-        start_ist = (now_ist - timedelta(days=1)).replace(hour=22, minute=0, second=0, microsecond=0)
+        start_ist = (now_ist - timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
 
     end_ist = start_ist + timedelta(days=1)
 
@@ -109,7 +110,25 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
             failure_rate = "0.0%"
             pending_rate = "0.0%"
 
-        # Query 3: Revenue (all requests)
+        # Query 3: Error code breakdown (only rows where error_code is set)
+        error_code_result = await session.execute(
+            select(
+                UsageEvent.error_code,
+                func.count(UsageEvent.id).label("cnt"),
+            )
+            .where(
+                UsageEvent.created_at >= today_start,
+                UsageEvent.created_at < today_end,
+                UsageEvent.error_code.isnot(None),
+            )
+            .group_by(UsageEvent.error_code)
+            .order_by(func.count(UsageEvent.id).desc())
+        )
+        error_code_counts: dict[str, int] = {
+            row.error_code: row.cnt for row in error_code_result.all()
+        }
+
+        # Query 4: Revenue (all requests)
         revenue_result = await session.execute(
             select(func.sum(UsageEvent.cost_usd)).where(
                 UsageEvent.created_at >= today_start,
@@ -118,7 +137,7 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
         )
         revenue_usd = float(revenue_result.scalar() or 0)
 
-        # Query 4: Payments received
+        # Query 5: Payments received
         # Get latest INR rate for conversion
         inr_rate_result = await session.execute(
             select(CurrencyConversionRate.total_rate)
@@ -154,6 +173,7 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
         pending_rate=pending_rate,
         revenue_usd=revenue_usd,
         payments_received_usd=payments_received_usd,
+        error_code_counts=error_code_counts,
         timestamp=now_utc,
         start_ist=start_ist,
     )
@@ -167,7 +187,7 @@ async def run_daily_metrics(
 ) -> DailySummaryMetrics:
     """
     Fetch daily metrics and send to Slack.
-    Triggered by Cloud Scheduler daily at 8 AM UTC.
+    Triggered by Cloud Scheduler daily at 10 AM UTC.
     """
     logger.info("daily_metrics_started")
 
@@ -193,18 +213,27 @@ async def run_daily_metrics(
         {"label": "Payments Received (USD)", "value": f"${metrics.payments_received_usd:.4f}"},
     ]
 
-    # Optional warning if success rate is low
-    message = None
+    # Optional message: low success rate warning + error code breakdown
+    message_parts: list[str] = []
+
     if metrics.requests_processed > 0 and metrics.success_rate:
         try:
             success_pct = float(metrics.success_rate.rstrip("%"))
             if success_pct < 95:
-                message = f"⚠️ Success rate is {metrics.success_rate} — lower than expected"
+                message_parts.append(f"⚠️ Success rate is {metrics.success_rate} — lower than expected")
         except (ValueError, AttributeError):
             pass
 
+    if metrics.error_code_counts:
+        lines = ["*Error codes:*"]
+        for code, count in metrics.error_code_counts.items():
+            lines.append(f"• `{code}` — {count}×")
+        message_parts.append("\n".join(lines))
+
+    message = "\n\n".join(message_parts) if message_parts else None
+
     await send_slack_alert(
-        title=f"Daily Metrics — {metrics.start_ist.strftime('%Y-%m-%d')} (10PM–10PM IST)",
+        title=f"Daily Metrics — {metrics.start_ist.strftime('%Y-%m-%d')} (10AM–10AM IST)",
         fields=fields,
         message=message,
         notify_here=False,  # informational, not actionable
