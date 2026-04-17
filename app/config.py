@@ -101,6 +101,16 @@ class Settings(BaseSettings):
 
     # ── GCP (Phase 7+) ────────────────────────────────────────────────────────
     gcp_project_id: str = ""
+    # Full JSON string of a GCP service account key used for GCS uploads and
+    # other non-Vertex GCP APIs. On Cloud Run this can be left empty — the
+    # service account attached to the revision provides ADC automatically.
+    # Locally: paste the service account key JSON as a single-line string.
+    #   GCP_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
+    gcp_service_account_json: str = ""
+    # GCS bucket for health-check CSV uploads. Requires google-cloud-storage
+    # installed (pip install -e ".[gcp]") and the service account to have
+    # roles/storage.objectCreator on the bucket.
+    gcs_health_check_bucket: str = "routersvc_health_check_results"
 
     # ── Supabase / Control plane auth ────────────────────────────────────────
     # The JWT secret from Supabase → Settings → API → JWT Secret.
