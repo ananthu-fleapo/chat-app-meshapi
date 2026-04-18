@@ -16,6 +16,7 @@ Cloud Scheduler config:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import APIRouter, Depends
@@ -25,11 +26,14 @@ from sqlalchemy import func, select, case
 from app.auth.dependencies import verify_webhook_key
 from app.db.engine import get_session_factory
 from app.db.models import PaymentEvent, User, UsageEvent, CurrencyConversionRate
+from app.db.models import PaymentEvent, User, UsageEvent, CurrencyConversionRate
 from app.notifications.slack import send_slack_alert
+
+IST = ZoneInfo("Asia/Kolkata")
 
 logger = structlog.get_logger()
 router = APIRouter(tags=["metrics"])
-IST_OFFSET = timedelta(hours=5, minutes=30)
+
 
 # ── Response schema ───────────────────────────────────────────────────────────
 
@@ -57,20 +61,22 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
     Returns aggregated counts and rates for the current UTC day.
     Never raises; returns zeros if no data found.
     """
-    now_utc = datetime.now(UTC)
-    now_ist = now_utc + IST_OFFSET
+    now_ist = datetime.now(IST)
+
+    today_10am = now_ist.replace(hour=10, minute=0, second=0, microsecond=0)
 
     # Set boundary at 10:00 (10 AM IST)
-    if now_ist >= now_ist.replace(hour=10, minute=0, second=0, microsecond=0):
-        start_ist = now_ist.replace(hour=10, minute=0, second=0, microsecond=0)
+    # Always pick LAST COMPLETED window
+    if now_ist >= today_10am:
+        end_ist = today_10am
     else:
-        start_ist = (now_ist - timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+        end_ist = today_10am - timedelta(days=1)
 
-    end_ist = start_ist + timedelta(days=1)
+    start_ist = end_ist - timedelta(days=1)
 
     # Convert back to UTC for DB queries
-    today_start = start_ist - IST_OFFSET
-    today_end = end_ist - IST_OFFSET
+    today_start = start_ist.astimezone(UTC)
+    today_end = end_ist.astimezone(UTC)
 
     async with get_session_factory()() as session:
         # Query 1: Users onboarded today
@@ -147,20 +153,26 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
         )
         inr_rate = float(inr_rate_result.scalar() or 83.0)
 
-        payments_result = await session.execute(
-            select(
-                func.sum(
-                    case(
-                        (PaymentEvent.currency == "INR", (PaymentEvent.amount - func.coalesce(PaymentEvent.discount_amount, 0)) / inr_rate),
-                        else_=PaymentEvent.amount - func.coalesce(PaymentEvent.discount_amount, 0)
-                    )
+        net_amount = PaymentEvent.amount - func.coalesce(PaymentEvent.discount_amount, 0)
+        amount_in_major = net_amount / 100
+
+        payments_query = select(
+            func.sum(
+                case(
+                    (
+                        PaymentEvent.currency == "INR",
+                        amount_in_major / inr_rate
+                    ),
+                    else_=amount_in_major
                 )
-            ).where(
-                PaymentEvent.created_at >= today_start,
-                PaymentEvent.created_at < today_end
             )
+        ).where(
+            PaymentEvent.created_at >= today_start,
+            PaymentEvent.created_at < today_end
         )
-        payments_received_usd = float(payments_result.scalar() or 0)/100
+
+        payments_result = await session.execute(payments_query)
+        payments_received_usd = float(payments_result.scalar() or 0)
 
     return DailySummaryMetrics(
         users_onboarded=users_onboarded,
@@ -174,7 +186,7 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
         revenue_usd=revenue_usd,
         payments_received_usd=payments_received_usd,
         error_code_counts=error_code_counts,
-        timestamp=now_utc,
+        timestamp=datetime.now(UTC),
         start_ist=start_ist,
     )
 
