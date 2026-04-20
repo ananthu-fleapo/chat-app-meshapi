@@ -311,10 +311,15 @@ class VertexAIAdapter(ProviderAdapter):
     ) -> AsyncGenerator[bytes, None]:
         payload = _build_payload(request, stream=True, owner=owner)
         payload["model"] = _vertex_model_id(provider_model_id or payload["model"])
+        # Vertex AI does not support stream_options (OpenRouter/OpenAI extension)
+        payload.pop("stream_options", None)
         log = logger.bind(model=request.model, vertex_model=payload["model"])
 
         try:
             headers = await self._auth_headers()
+            # Disable gzip compression — Vertex returns compressed SSE by default,
+            # and aiter_raw() proxies raw bytes without decompressing.
+            headers["Accept-Encoding"] = "identity"
             async with self._client.stream(
                 "POST",
                 "/chat/completions",

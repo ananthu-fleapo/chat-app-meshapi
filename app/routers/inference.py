@@ -38,6 +38,33 @@ router = APIRouter()
 logger = structlog.get_logger()
 
 
+def _scan_sse_buf(buf: bytes, current_usage: dict | None) -> tuple[dict | None, bytes]:
+    """
+    Process all complete SSE frames (\n\n-delimited) in buf.
+
+    Returns (updated_usage, remaining_buf).  Regular streaming chunks carry
+    "usage": null which is falsy, so only a real usage object updates the
+    return value.  The caller should not filter on choices — some providers
+    (e.g. Claude via OpenRouter) bundle usage with a non-empty choices array
+    in the final content chunk.
+    """
+    while b"\n\n" in buf:
+        frame, buf = buf.split(b"\n\n", 1)
+        for line in frame.split(b"\n"):
+            if not line.startswith(b"data: "):
+                continue
+            payload = line[6:].strip()
+            if payload == b"[DONE]":
+                continue
+            try:
+                obj = json.loads(payload)
+                if obj.get("usage"):
+                    current_usage = obj["usage"]
+            except (json.JSONDecodeError, KeyError):
+                pass
+    return current_usage, buf
+
+
 @router.post(
     "/v1/chat/completions",
     responses={
@@ -259,24 +286,8 @@ async def chat_completions(
                     byte_count += len(chunk)
                     buf += chunk
 
-                    # Phase 5: scan complete SSE frames for the usage metadata
-                    # chunk. OpenRouter sends it as the last data frame before
-                    # [DONE], with choices=[] and a usage={...} object.
-                    while b"\n\n" in buf:
-                        frame, buf = buf.split(b"\n\n", 1)
-                        for line in frame.split(b"\n"):
-                            if not line.startswith(b"data: "):
-                                continue
-                            payload = line[6:].strip()
-                            if payload == b"[DONE]":
-                                continue
-                            try:
-                                obj = json.loads(payload)
-                                # Usage chunk: choices is empty, usage is present
-                                if obj.get("usage") and not obj.get("choices"):
-                                    usage_data = obj["usage"]
-                            except (json.JSONDecodeError, KeyError):
-                                pass
+                    # Phase 5: scan complete SSE frames for usage metadata.
+                    usage_data, buf = _scan_sse_buf(buf, usage_data)
 
                     yield chunk
 
