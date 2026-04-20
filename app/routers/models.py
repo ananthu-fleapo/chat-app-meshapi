@@ -242,7 +242,23 @@ async def _apply_discounts(
     return result
 
 
-@router.get("/v1/models", response_model=list[ModelOut])
+@router.get(
+    "/v1/models",
+    response_model=list[ModelOut],
+    responses={
+        401: {
+            "description": "Missing or invalid credentials (Supabase JWT or API key)",
+            "content": {"application/json": {"example": {
+                "error": {"code": "unauthorized", "message": "Invalid or missing API key."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        500: {
+            "description": "Internal error while resolving per-user discount rules",
+            "content": {"application/json": {"example": {"detail": "Internal Server Error"}}},
+        },
+    },
+)
 async def list_models(
     free: bool | None = Query(
         default=None,
@@ -277,7 +293,23 @@ async def list_models(
     return await _apply_discounts(models, owner, db)
 
 
-@router.get("/v1/models/free", response_model=list[ModelOut])
+@router.get(
+    "/v1/models/free",
+    response_model=list[ModelOut],
+    responses={
+        401: {
+            "description": "Missing or invalid credentials (Supabase JWT or API key)",
+            "content": {"application/json": {"example": {
+                "error": {"code": "unauthorized", "message": "Invalid or missing API key."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        500: {
+            "description": "Internal error while resolving per-user discount rules",
+            "content": {"application/json": {"example": {"detail": "Internal Server Error"}}},
+        },
+    },
+)
 async def list_free_models(
     owner: str = Depends(get_any_auth_owner),
     db: AsyncSession = Depends(get_db_session),
@@ -287,7 +319,23 @@ async def list_free_models(
     return await _apply_discounts(models, owner, db)
 
 
-@router.get("/v1/models/paid", response_model=list[ModelOut])
+@router.get(
+    "/v1/models/paid",
+    response_model=list[ModelOut],
+    responses={
+        401: {
+            "description": "Missing or invalid credentials (Supabase JWT or API key)",
+            "content": {"application/json": {"example": {
+                "error": {"code": "unauthorized", "message": "Invalid or missing API key."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        500: {
+            "description": "Internal error while resolving per-user discount rules",
+            "content": {"application/json": {"example": {"detail": "Internal Server Error"}}},
+        },
+    },
+)
 async def list_paid_models(
     owner: str = Depends(get_any_auth_owner),
     db: AsyncSession = Depends(get_db_session),

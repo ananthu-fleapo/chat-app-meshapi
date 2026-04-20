@@ -49,13 +49,15 @@ from collections.abc import AsyncGenerator
 import httpx
 import structlog
 
-from app.exceptions import GatewayTimeoutError, UpstreamError
+from app.exceptions import GatewayTimeoutError, UnprocessableEntityError, UpstreamError
 from app.providers.base import ProviderAdapter
+from app.exceptions import _classify_bedrock_http_error, _raise_bedrock_exc
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.responses import RESPONSES_ONLY_FIELDS, ResponsesRequest
 from app.schemas.embeddings import EmbeddingsRequest
 
 logger = structlog.get_logger()
+
 
 # Canonical model name → AWS Bedrock cross-region inference profile ID.
 # Fallback used when provider_model_id is not set in the DB.
@@ -64,55 +66,55 @@ logger = structlog.get_logger()
 # they require InvokeModel, not Converse, and cannot be used with this adapter.
 _MODEL_MAP: dict[str, str] = {
     # ── Anthropic Claude 4.x ──────────────────────────────────────────────────
-    "anthropic/claude-sonnet-4-5":              "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "anthropic/claude-opus-4-5":                "us.anthropic.claude-opus-4-5-20251101-v1:0",
-    "anthropic/claude-sonnet-4":                "us.anthropic.claude-sonnet-4-20250514-v1:0",
-    "anthropic/claude-opus-4-1":                "us.anthropic.claude-opus-4-1-20250805-v1:0",
-    "anthropic/claude-haiku-4-5":               "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "anthropic/claude-sonnet-4-5": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "anthropic/claude-opus-4-5": "us.anthropic.claude-opus-4-5-20251101-v1:0",
+    "anthropic/claude-sonnet-4": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+    "anthropic/claude-opus-4-1": "us.anthropic.claude-opus-4-1-20250805-v1:0",
+    "anthropic/claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     # ── Anthropic Claude 3.x ──────────────────────────────────────────────────
-    "anthropic/claude-3-haiku":                 "us.anthropic.claude-3-haiku-20240307-v1:0",
-    "anthropic/claude-3-5-haiku-20241022-v1":   "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+    "anthropic/claude-3-haiku": "us.anthropic.claude-3-haiku-20240307-v1:0",
+    "anthropic/claude-3-5-haiku-20241022-v1": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
     # ── Amazon Nova / Titan ───────────────────────────────────────────────────
-    "amazon/nova-premier-v1":                   "us.amazon.nova-premier-v1:0",
-    "amazon/nova-pro-v1":                       "us.amazon.nova-pro-v1:0",
-    "amazon/nova-lite-v1":                      "us.amazon.nova-lite-v1:0",
-    "amazon/nova-micro-v1":                     "us.amazon.nova-micro-v1:0",
-    "amazon/titan-tg1-large":                   "us.amazon.titan-tg1-large",
+    "amazon/nova-premier-v1": "us.amazon.nova-premier-v1:0",
+    "amazon/nova-pro-v1": "us.amazon.nova-pro-v1:0",
+    "amazon/nova-lite-v1": "us.amazon.nova-lite-v1:0",
+    "amazon/nova-micro-v1": "us.amazon.nova-micro-v1:0",
+    "amazon/titan-tg1-large": "us.amazon.titan-tg1-large",
     # ── AI21 ──────────────────────────────────────────────────────────────────
-    "ai21/jamba-instruct-v1":                   "us.ai21.jamba-instruct-v1:0",
-    "ai21/j2-mid-v1":                           "us.ai21.j2-mid-v1",
-    "ai21/j2-ultra-v1":                         "us.ai21.j2-ultra-v1",
+    "ai21/jamba-instruct-v1": "us.ai21.jamba-instruct-v1:0",
+    "ai21/j2-mid-v1": "us.ai21.j2-mid-v1",
+    "ai21/j2-ultra-v1": "us.ai21.j2-ultra-v1",
     # ── Cohere Command ────────────────────────────────────────────────────────
-    "cohere/command-r-v1":                      "us.cohere.command-r-v1:0",
-    "cohere/command-r-plus-v1":                 "us.cohere.command-r-plus-v1:0",
+    "cohere/command-r-v1": "us.cohere.command-r-v1:0",
+    "cohere/command-r-plus-v1": "us.cohere.command-r-plus-v1:0",
     # ── DeepSeek ──────────────────────────────────────────────────────────────
-    "deepseek/v3-v1":                           "us.deepseek.v3-v1:0",
+    "deepseek/v3-v1": "us.deepseek.v3-v1:0",
     # ── Google ────────────────────────────────────────────────────────────────
-    "google/gemma-3-27b-it":                    "us.google.gemma-3-27b-it",
+    "google/gemma-3-27b-it": "us.google.gemma-3-27b-it",
     # ── Meta Llama 2 ──────────────────────────────────────────────────────────
-    "meta/llama2-13b-v1":                       "us.meta.llama2-13b-v1",
-    "meta/llama2-70b-v1":                       "us.meta.llama2-70b-v1",
-    "meta/llama2-13b-chat-v1":                  "us.meta.llama2-13b-chat-v1",
-    "meta/llama2-70b-chat-v1":                  "us.meta.llama2-70b-chat-v1",
+    "meta/llama2-13b-v1": "us.meta.llama2-13b-v1",
+    "meta/llama2-70b-v1": "us.meta.llama2-70b-v1",
+    "meta/llama2-13b-chat-v1": "us.meta.llama2-13b-chat-v1",
+    "meta/llama2-70b-chat-v1": "us.meta.llama2-70b-chat-v1",
     # ── Meta Llama 3.x ────────────────────────────────────────────────────────
-    "meta/llama3-1-405b-instruct-v1":           "us.meta.llama3-1-405b-instruct-v1:0",
-    "meta/llama3-2-1b-instruct-v1":             "us.meta.llama3-2-1b-instruct-v1:0",
-    "meta/llama3-2-3b-instruct-v1":             "us.meta.llama3-2-3b-instruct-v1:0",
-    "meta/llama3-2-11b-instruct-v1":            "us.meta.llama3-2-11b-instruct-v1:0",
-    "meta/llama3-2-90b-instruct-v1":            "us.meta.llama3-2-90b-instruct-v1:0",
+    "meta/llama3-1-405b-instruct-v1": "us.meta.llama3-1-405b-instruct-v1:0",
+    "meta/llama3-2-1b-instruct-v1": "us.meta.llama3-2-1b-instruct-v1:0",
+    "meta/llama3-2-3b-instruct-v1": "us.meta.llama3-2-3b-instruct-v1:0",
+    "meta/llama3-2-11b-instruct-v1": "us.meta.llama3-2-11b-instruct-v1:0",
+    "meta/llama3-2-90b-instruct-v1": "us.meta.llama3-2-90b-instruct-v1:0",
     # ── Mistral ───────────────────────────────────────────────────────────────
-    "mistral/mistral-large-2407-v1":            "us.mistral.mistral-large-2407-v1:0",
+    "mistral/mistral-large-2407-v1": "us.mistral.mistral-large-2407-v1:0",
     # ── NVIDIA ────────────────────────────────────────────────────────────────
-    "nvidia/nemotron-nano-9b-v2":               "us.nvidia.nemotron-nano-9b-v2",
-    "nvidia/nemotron-nano-12b-v2":              "us.nvidia.nemotron-nano-12b-v2",
+    "nvidia/nemotron-nano-9b-v2": "us.nvidia.nemotron-nano-9b-v2",
+    "nvidia/nemotron-nano-12b-v2": "us.nvidia.nemotron-nano-12b-v2",
     # ── OpenAI Safeguard ──────────────────────────────────────────────────────
-    "openai/gpt-oss-safeguard-20b":             "us.openai.gpt-oss-safeguard-20b",
-    "openai/gpt-oss-safeguard-120b":            "us.openai.gpt-oss-safeguard-120b",
+    "openai/gpt-oss-safeguard-20b": "us.openai.gpt-oss-safeguard-20b",
+    "openai/gpt-oss-safeguard-120b": "us.openai.gpt-oss-safeguard-120b",
     # ── Qwen ──────────────────────────────────────────────────────────────────
-    "qwen/qwen3-235b-a22b-2507-v1":             "us.qwen.qwen3-235b-a22b-2507-v1:0",
-    "qwen/qwen3-coder-480b-a35b-v1":            "us.qwen.qwen3-coder-480b-a35b-v1:0",
-    "qwen/qwen3-coder-next":                    "us.qwen.qwen3-coder-next",
-    "qwen/qwen3-vl-235b-a22b":                  "us.qwen.qwen3-vl-235b-a22b",
+    "qwen/qwen3-235b-a22b-2507-v1": "us.qwen.qwen3-235b-a22b-2507-v1:0",
+    "qwen/qwen3-coder-480b-a35b-v1": "us.qwen.qwen3-coder-480b-a35b-v1:0",
+    "qwen/qwen3-coder-next": "us.qwen.qwen3-coder-next",
+    "qwen/qwen3-vl-235b-a22b": "us.qwen.qwen3-vl-235b-a22b",
 }
 
 
@@ -122,6 +124,7 @@ def _bedrock_model_id(canonical: str) -> str:
 
 
 # ── Message format conversion ─────────────────────────────────────────────────
+
 
 def _content_to_bedrock(content: str | list) -> list[dict]:
     """
@@ -177,10 +180,12 @@ def _messages_to_bedrock(
         else:
             # Bedrock uses "user" and "assistant" — no other roles supported
             bedrock_role = "assistant" if role == "assistant" else "user"
-            bedrock_msgs.append({
-                "role": bedrock_role,
-                "content": _content_to_bedrock(content),
-            })
+            bedrock_msgs.append(
+                {
+                    "role": bedrock_role,
+                    "content": _content_to_bedrock(content),
+                }
+            )
 
     system_blocks = [{"text": "\n".join(system_parts)}] if system_parts else []
     return bedrock_msgs, system_blocks
@@ -240,6 +245,7 @@ def _build_responses_payload(
 
 # ── AWS EventStream binary parser ─────────────────────────────────────────────
 
+
 def _parse_eventstream_frames(buf: bytes) -> tuple[list[dict], bytes]:
     """
     Parse complete AWS EventStream frames from a byte buffer.
@@ -276,12 +282,17 @@ def _parse_eventstream_frames(buf: bytes) -> tuple[list[dict], bytes]:
         headers_end = 12 + headers_len
         event_type = ""
         while pos < headers_end:
-            name_len = frame[pos]; pos += 1
-            name = frame[pos:pos + name_len].decode(); pos += name_len
-            vtype = frame[pos]; pos += 1
+            name_len = frame[pos]
+            pos += 1
+            name = frame[pos : pos + name_len].decode()
+            pos += name_len
+            vtype = frame[pos]
+            pos += 1
             if vtype == 7:  # string
-                vlen = struct.unpack(">H", frame[pos:pos + 2])[0]; pos += 2
-                val = frame[pos:pos + vlen].decode(); pos += vlen
+                vlen = struct.unpack(">H", frame[pos : pos + 2])[0]
+                pos += 2
+                val = frame[pos : pos + vlen].decode()
+                pos += vlen
                 if name == ":event-type":
                     event_type = val
             # Non-string types don't appear in Bedrock stream headers — skip
@@ -289,7 +300,7 @@ def _parse_eventstream_frames(buf: bytes) -> tuple[list[dict], bytes]:
         if not event_type:
             continue
 
-        payload_bytes = frame[headers_end:total_len - 4]  # -4 = message CRC
+        payload_bytes = frame[headers_end : total_len - 4]  # -4 = message CRC
         try:
             payload = json.loads(payload_bytes) if payload_bytes else {}
         except json.JSONDecodeError:
@@ -301,6 +312,7 @@ def _parse_eventstream_frames(buf: bytes) -> tuple[list[dict], bytes]:
 
 
 # ── Response format conversion ────────────────────────────────────────────────
+
 
 def _normalize_responses_usage(body: dict) -> None:
     """
@@ -445,19 +457,27 @@ def _build_bedrock_embed_body(request: "EmbeddingsRequest", model_id: str) -> di
     """
     raw_input = request.input
 
-    # Reject token arrays
+    # Reject token arrays — user passed pre-tokenized integers instead of strings
     if isinstance(raw_input, list) and raw_input and isinstance(raw_input[0], int):
-        raise UpstreamError(upstream_detail="Bedrock embedding models do not accept pre-tokenised (integer) inputs.")
+        raise UnprocessableEntityError(
+            "Bedrock embedding models do not accept pre-tokenised (integer) inputs."
+        )
     if isinstance(raw_input, list) and raw_input and isinstance(raw_input[0], list):
-        raise UpstreamError(upstream_detail="Bedrock embedding models do not accept pre-tokenised (integer) inputs.")
+        raise UnprocessableEntityError(
+            "Bedrock embedding models do not accept pre-tokenised (integer) inputs."
+        )
 
     # ── Titan Text ────────────────────────────────────────────────────────────
     if model_id.startswith("amazon.titan-embed"):
         if isinstance(raw_input, list) and len(raw_input) > 1:
-            raise UpstreamError(
-                upstream_detail="Amazon Titan Embed does not support batched inputs. Send one string at a time."
+            raise UnprocessableEntityError(
+                "Amazon Titan Embed does not support batched inputs. Send one string at a time."
             )
-        text = raw_input if isinstance(raw_input, str) else (raw_input[0] if raw_input else "")
+        text = (
+            raw_input
+            if isinstance(raw_input, str)
+            else (raw_input[0] if raw_input else "")
+        )
         body = {"inputText": text}
         if request.dimensions is not None:
             body["dimensions"] = request.dimensions
@@ -472,16 +492,20 @@ def _build_bedrock_embed_body(request: "EmbeddingsRequest", model_id: str) -> di
             "classification": "classification",
             "clustering": "clustering",
         }
-        cohere_input_type = _input_type_map.get(request.input_type or "", "search_document")
+        cohere_input_type = _input_type_map.get(
+            request.input_type or "", "search_document"
+        )
         body = {"texts": texts, "input_type": cohere_input_type}
         if request.encoding_format == "float":
             body["embedding_types"] = ["float"]
         return body
 
-    raise UpstreamError(upstream_detail=f"Unsupported Bedrock embedding model: {model_id}")
+    raise UpstreamError()  # DB has a model mapped to Bedrock that we don't support — platform config issue
 
 
-def _bedrock_embed_response_to_openai(response_body: dict, model_id: str, canonical_model: str) -> dict:
+def _bedrock_embed_response_to_openai(
+    response_body: dict, model_id: str, canonical_model: str
+) -> dict:
     """Convert a Bedrock InvokeModel embedding response to OpenAI list format."""
     if model_id.startswith("amazon.titan-embed"):
         embeddings = [response_body["embedding"]]
@@ -507,6 +531,7 @@ def _bedrock_embed_response_to_openai(response_body: dict, model_id: str, canoni
 
 
 # ── Adapter ───────────────────────────────────────────────────────────────────
+
 
 class BedrockAdapter(ProviderAdapter):
     """
@@ -615,7 +640,9 @@ class BedrockAdapter(ProviderAdapter):
     def _mantle_url(self, path: str) -> str:
         return f"https://bedrock-mantle.{self._region}.api.aws/v1{path}"
 
-    def _sign_sigv4_headers(self, method: str, url: str, body_bytes: bytes) -> dict[str, str]:
+    def _sign_sigv4_headers(
+        self, method: str, url: str, body_bytes: bytes
+    ) -> dict[str, str]:
         """Sign an arbitrary HTTP request with SigV4 for the bedrock service."""
         from botocore.auth import SigV4Auth  # type: ignore[import]
         from botocore.awsrequest import AWSRequest  # type: ignore[import]
@@ -645,15 +672,10 @@ class BedrockAdapter(ProviderAdapter):
                 return await self._converse_http(request, bedrock_model, api_key, log)
             else:
                 return await self._converse_sigv4(request, bedrock_model, log)
-        except (GatewayTimeoutError, UpstreamError):
+        except (GatewayTimeoutError, UpstreamError, UnprocessableEntityError):
             raise
         except Exception as exc:
-            err_name = type(exc).__name__
-            if "Timeout" in err_name or "timeout" in str(exc).lower():
-                log.warning("bedrock_timeout")
-                raise GatewayTimeoutError() from exc
-            log.warning("bedrock_error", error=str(exc))
-            raise UpstreamError() from exc
+            _raise_bedrock_exc(exc, log, "chat_completion")
 
     async def stream_chat_completion(
         self,
@@ -671,7 +693,9 @@ class BedrockAdapter(ProviderAdapter):
             "id": completion_id,
             "object": "chat.completion.chunk",
             "model": request.model,
-            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            "choices": [
+                {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+            ],
         }
         yield f"data: {json.dumps(role_payload)}\n\n".encode()
 
@@ -686,15 +710,10 @@ class BedrockAdapter(ProviderAdapter):
                     request, bedrock_model, log, completion_id
                 ):
                     yield chunk
-        except (GatewayTimeoutError, UpstreamError):
+        except (GatewayTimeoutError, UpstreamError, UnprocessableEntityError):
             raise
         except Exception as exc:
-            err_name = type(exc).__name__
-            if "Timeout" in err_name or "timeout" in str(exc).lower():
-                log.warning("bedrock_stream_timeout")
-                raise GatewayTimeoutError() from exc
-            log.warning("bedrock_stream_error", error=str(exc))
-            raise UpstreamError(upstream_detail=str(exc)) from exc
+            _raise_bedrock_exc(exc, log, "stream_chat_completion")
 
         yield b"data: [DONE]\n\n"
 
@@ -712,7 +731,9 @@ class BedrockAdapter(ProviderAdapter):
         try:
             body = _build_bedrock_embed_body(request, bedrock_model)
             if self._use_bearer(api_key):
-                return await self._embed_http(request.model, bedrock_model, body, api_key, log)
+                return await self._embed_http(
+                    request.model, bedrock_model, body, api_key, log
+                )
             else:
                 return await self._embed_sigv4(request.model, bedrock_model, body, log)
         except (GatewayTimeoutError, UpstreamError):
@@ -723,10 +744,15 @@ class BedrockAdapter(ProviderAdapter):
                 log.warning("bedrock_embed_timeout")
                 raise GatewayTimeoutError() from exc
             log.warning("bedrock_embed_error", error=str(exc))
-            raise UpstreamError(upstream_detail=str(exc)) from exc
+            raise UpstreamError() from exc
 
     async def _embed_http(
-        self, canonical_model: str, bedrock_model: str, body: dict, api_key: str | None, log
+        self,
+        canonical_model: str,
+        bedrock_model: str,
+        body: dict,
+        api_key: str | None,
+        log,
     ) -> dict:
         key = self._bearer_key(api_key)
         url = self._runtime_url(f"/model/{bedrock_model}/invoke")
@@ -736,9 +762,14 @@ class BedrockAdapter(ProviderAdapter):
             headers={**self._bearer_headers(key), "Accept": "application/json"},
         )
         if resp.status_code != 200:
-            log.warning("bedrock_embed_http_error", status=resp.status_code, body=resp.text[:200])
-            raise UpstreamError(upstream_detail=resp.text)
-        return _bedrock_embed_response_to_openai(resp.json(), bedrock_model, canonical_model)
+            body_text = resp.text[:500]
+            log.warning(
+                "bedrock_embed_http_error", status=resp.status_code, body=body_text
+            )
+            _classify_bedrock_http_error(resp.status_code, body_text)
+        return _bedrock_embed_response_to_openai(
+            resp.json(), bedrock_model, canonical_model
+        )
 
     async def _embed_sigv4(
         self, canonical_model: str, bedrock_model: str, body: dict, log
@@ -751,7 +782,9 @@ class BedrockAdapter(ProviderAdapter):
                 accept="application/json",
             )
             response_body = json.loads(await response["body"].read())
-        return _bedrock_embed_response_to_openai(response_body, bedrock_model, canonical_model)
+        return _bedrock_embed_response_to_openai(
+            response_body, bedrock_model, canonical_model
+        )
 
     # ── Bearer / httpx path ───────────────────────────────────────────────────
 
@@ -763,8 +796,9 @@ class BedrockAdapter(ProviderAdapter):
             url, json=body, headers=self._bearer_headers(key)
         )
         if resp.status_code != 200:
-            log.warning("bedrock_http_error", status=resp.status_code, body=resp.text[:200])
-            raise UpstreamError()
+            body_text = resp.text[:500]
+            log.warning("bedrock_http_error", status=resp.status_code, body=body_text)
+            _classify_bedrock_http_error(resp.status_code, body_text)
         return _bedrock_response_to_openai(resp.json(), request.model)
 
     async def _converse_stream_http(
@@ -780,15 +814,20 @@ class BedrockAdapter(ProviderAdapter):
         ) as resp:
             if resp.status_code != 200:
                 await resp.aread()
-                log.warning("bedrock_stream_http_error", status=resp.status_code)
-                raise UpstreamError()
+                body_text = resp.text[:500]
+                log.warning(
+                    "bedrock_stream_http_error", status=resp.status_code, body=body_text
+                )
+                _classify_bedrock_http_error(resp.status_code, body_text)
 
             buf = b""
             async for raw_chunk in resp.aiter_raw():
                 buf += raw_chunk
                 events, buf = _parse_eventstream_frames(buf)
                 if events:
-                    sse = _bedrock_stream_events_to_sse(events, completion_id, request.model)
+                    sse = _bedrock_stream_events_to_sse(
+                        events, completion_id, request.model
+                    )
                     if sse:
                         yield sse
 
@@ -811,7 +850,9 @@ class BedrockAdapter(ProviderAdapter):
             if stream is None:
                 raise UpstreamError()
             async for event in stream:
-                sse_bytes = _bedrock_stream_events_to_sse([event], completion_id, request.model)
+                sse_bytes = _bedrock_stream_events_to_sse(
+                    [event], completion_id, request.model
+                )
                 if sse_bytes:
                     yield sse_bytes
 
@@ -822,13 +863,18 @@ class BedrockAdapter(ProviderAdapter):
     ) -> dict:
         key = self._bearer_key(api_key)
         url = self._mantle_url("/responses")
-        payload = _build_responses_payload(request, stream=False, provider_model_id=bedrock_model)
+        payload = _build_responses_payload(
+            request, stream=False, provider_model_id=bedrock_model
+        )
         resp = await self._mantle_client.post(
             url, json=payload, headers=self._bearer_headers(key)
         )
         if resp.status_code != 200:
-            log.warning("bedrock_responses_http_error", status=resp.status_code, body=resp.text[:200])
-            raise UpstreamError()
+            body_text = resp.text[:500]
+            log.warning(
+                "bedrock_responses_http_error", status=resp.status_code, body=body_text
+            )
+            _classify_bedrock_http_error(resp.status_code, body_text)
         body = resp.json()
         _normalize_responses_usage(body)
         return body
@@ -838,15 +884,22 @@ class BedrockAdapter(ProviderAdapter):
     ) -> AsyncGenerator[bytes, None]:
         key = self._bearer_key(api_key)
         url = self._mantle_url("/responses")
-        payload = _build_responses_payload(request, stream=True, provider_model_id=bedrock_model)
+        payload = _build_responses_payload(
+            request, stream=True, provider_model_id=bedrock_model
+        )
         log.debug("bedrock_responses_stream_open", auth="bearer")
         async with self._mantle_client.stream(
             "POST", url, json=payload, headers=self._bearer_headers(key)
         ) as resp:
             if resp.status_code != 200:
                 await resp.aread()
-                log.warning("bedrock_responses_stream_http_error", status=resp.status_code)
-                raise UpstreamError()
+                body_text = resp.text[:500]
+                log.warning(
+                    "bedrock_responses_stream_http_error",
+                    status=resp.status_code,
+                    body=body_text,
+                )
+                _classify_bedrock_http_error(resp.status_code, body_text)
             async for chunk in resp.aiter_raw():
                 yield chunk
 
@@ -856,13 +909,18 @@ class BedrockAdapter(ProviderAdapter):
         self, request: ResponsesRequest, bedrock_model: str, log
     ) -> dict:
         url = self._mantle_url("/responses")
-        payload = _build_responses_payload(request, stream=False, provider_model_id=bedrock_model)
+        payload = _build_responses_payload(
+            request, stream=False, provider_model_id=bedrock_model
+        )
         body_bytes = json.dumps(payload).encode()
         headers = self._sign_sigv4_headers("POST", url, body_bytes)
         resp = await self._mantle_client.post(url, content=body_bytes, headers=headers)
         if resp.status_code != 200:
-            log.warning("bedrock_responses_sigv4_error", status=resp.status_code, body=resp.text[:200])
-            raise UpstreamError()
+            body_text = resp.text[:500]
+            log.warning(
+                "bedrock_responses_sigv4_error", status=resp.status_code, body=body_text
+            )
+            _classify_bedrock_http_error(resp.status_code, body_text)
         body = resp.json()
         _normalize_responses_usage(body)
         return body
@@ -871,7 +929,9 @@ class BedrockAdapter(ProviderAdapter):
         self, request: ResponsesRequest, bedrock_model: str, log
     ) -> AsyncGenerator[bytes, None]:
         url = self._mantle_url("/responses")
-        payload = _build_responses_payload(request, stream=True, provider_model_id=bedrock_model)
+        payload = _build_responses_payload(
+            request, stream=True, provider_model_id=bedrock_model
+        )
         body_bytes = json.dumps(payload).encode()
         headers = self._sign_sigv4_headers("POST", url, body_bytes)
         log.debug("bedrock_responses_stream_open", auth="sigv4")
@@ -880,8 +940,13 @@ class BedrockAdapter(ProviderAdapter):
         ) as resp:
             if resp.status_code != 200:
                 await resp.aread()
-                log.warning("bedrock_responses_stream_sigv4_error", status=resp.status_code)
-                raise UpstreamError()
+                body_text = resp.text[:500]
+                log.warning(
+                    "bedrock_responses_stream_sigv4_error",
+                    status=resp.status_code,
+                    body=body_text,
+                )
+                _classify_bedrock_http_error(resp.status_code, body_text)
             async for chunk in resp.aiter_raw():
                 yield chunk
 
@@ -902,15 +967,10 @@ class BedrockAdapter(ProviderAdapter):
                 return await self._responses_http(request, bedrock_model, api_key, log)
             else:
                 return await self._responses_sigv4(request, bedrock_model, log)
-        except (GatewayTimeoutError, UpstreamError):
+        except (GatewayTimeoutError, UpstreamError, UnprocessableEntityError):
             raise
         except Exception as exc:
-            err_name = type(exc).__name__
-            if "Timeout" in err_name or "timeout" in str(exc).lower():
-                log.warning("bedrock_responses_timeout")
-                raise GatewayTimeoutError() from exc
-            log.warning("bedrock_responses_error", error=str(exc))
-            raise UpstreamError() from exc
+            _raise_bedrock_exc(exc, log, "responses_create")
 
     async def stream_responses_create(
         self,
@@ -933,12 +993,7 @@ class BedrockAdapter(ProviderAdapter):
                     request, bedrock_model, log
                 ):
                     yield chunk
-        except (GatewayTimeoutError, UpstreamError):
+        except (GatewayTimeoutError, UpstreamError, UnprocessableEntityError):
             raise
         except Exception as exc:
-            err_name = type(exc).__name__
-            if "Timeout" in err_name or "timeout" in str(exc).lower():
-                log.warning("bedrock_responses_stream_timeout")
-                raise GatewayTimeoutError() from exc
-            log.warning("bedrock_responses_stream_error", error=str(exc))
-            raise UpstreamError() from exc
+            _raise_bedrock_exc(exc, log, "stream_responses_create")

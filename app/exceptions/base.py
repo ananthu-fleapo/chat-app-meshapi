@@ -18,18 +18,27 @@ Logging policy
   other 4xx       → INFO    (client errors; not actionable by operator)
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import structlog
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+
+if TYPE_CHECKING:
+    from app.exceptions.codes import ProviderErrorCode
 
 logger = structlog.get_logger()
 
 
 # ── Base ─────────────────────────────────────────────────────────────────────
 
+
 class RouterVError(Exception):
     """Base class for all RouterV application errors."""
+
     status_code: int = 500
     error_code: str = "internal_error"
     message: str = "An unexpected error occurred."
@@ -50,6 +59,7 @@ class RouterVError(Exception):
 
 
 # ── 4xx ──────────────────────────────────────────────────────────────────────
+
 
 class UnauthorizedError(RouterVError):
     status_code = 401
@@ -91,15 +101,25 @@ class ModelCapabilityError(RouterVError):
     message = "This model does not support the requested API."
 
     def __init__(self, model: str, api: str) -> None:
-        super().__init__(
-            f"Model '{model}' does not support the {api} API."
-        )
+        super().__init__(f"Model '{model}' does not support the {api} API.")
 
 
 class UnprocessableEntityError(RouterVError):
     status_code = 422
     error_code = "unprocessable_entity"
     message = "Request could not be processed."
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        status_code: int | None = None,
+        upstream_error: dict | None = None,
+        provider_code: "ProviderErrorCode | None" = None,
+    ) -> None:
+        super().__init__(message, status_code=status_code)
+        self.upstream_error = upstream_error
+        self.provider_code = provider_code
 
 
 class RateLimitError(RouterVError):
@@ -120,6 +140,7 @@ class RateLimitError(RouterVError):
 
 # ── 5xx ──────────────────────────────────────────────────────────────────────
 
+
 class ProviderNotAvailableError(RouterVError):
     """
     A provider slug is configured in model_prices but its adapter is not
@@ -127,6 +148,7 @@ class ProviderNotAvailableError(RouterVError):
     are missing from the server environment.  This is a server-side config
     error, not a user error, so it returns 503.
     """
+
     status_code = 503
     error_code = "provider_not_available"
     message = "The upstream provider for this model is not available."
@@ -156,11 +178,14 @@ class GatewayTimeoutError(RouterVError):
 
 # ── Handlers ─────────────────────────────────────────────────────────────────
 
+
 def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "")
 
 
-async def routerv_exception_handler(request: Request, exc: RouterVError) -> JSONResponse:
+async def routerv_exception_handler(
+    request: Request, exc: RouterVError
+) -> JSONResponse:
     rid = _request_id(request)
 
     # ── Structured logging by severity ───────────────────────────────────────
@@ -199,6 +224,11 @@ async def routerv_exception_handler(request: Request, exc: RouterVError) -> JSON
     if isinstance(exc, UpstreamError) and exc.upstream_detail:
         # Truncate to first 500 chars to avoid leaking provider metadata (account IDs, quotas, etc.)
         error_body["upstream_detail"] = exc.upstream_detail[:500]
+    if isinstance(exc, UnprocessableEntityError):
+        if exc.upstream_error:
+            error_body["upstream_error"] = exc.upstream_error
+        if exc.provider_code is not None:
+            error_body["provider_code"] = exc.provider_code.value
 
     return JSONResponse(
         status_code=exc.status_code,

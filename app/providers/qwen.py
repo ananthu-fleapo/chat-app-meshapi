@@ -31,14 +31,16 @@ from collections.abc import AsyncGenerator
 import httpx
 import structlog
 
-from app.exceptions import GatewayTimeoutError, UpstreamError
+from app.exceptions import GatewayTimeoutError, UnprocessableEntityError, UpstreamError
 from app.providers.base import ProviderAdapter
+from app.exceptions import _classify_qwen_error
 from app.providers.openrouter import _build_payload
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.responses import RESPONSES_ONLY_FIELDS, ResponsesRequest
 from app.schemas.embeddings import EmbeddingsRequest
 
 logger = structlog.get_logger()
+
 
 # DashScope OpenAI-compatible endpoint (text embeddings + chat)
 _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -50,7 +52,7 @@ def _qwen_model_id(canonical: str) -> str:
     Strips the "qwen/" namespace prefix.
     """
     if canonical.startswith("qwen/"):
-        return canonical[len("qwen/"):]
+        return canonical[len("qwen/") :]
     return canonical
 
 
@@ -139,7 +141,7 @@ class QwenAdapter(ProviderAdapter):
         except httpx.HTTPStatusError as exc:
             body = exc.response.text[:300]
             log.warning("qwen_http_error", status=exc.response.status_code, body=body)
-            raise UpstreamError() from exc
+            _classify_qwen_error(exc.response.status_code, body)
 
         except httpx.TimeoutException as exc:
             log.warning("qwen_timeout")
@@ -167,8 +169,10 @@ class QwenAdapter(ProviderAdapter):
                 if response.status_code >= 400:
                     await response.aread()
                     body = response.text[:300]
-                    log.warning("qwen_stream_error", status=response.status_code, body=body)
-                    raise UpstreamError()
+                    log.warning(
+                        "qwen_stream_error", status=response.status_code, body=body
+                    )
+                    _classify_qwen_error(response.status_code, body)
 
                 log.debug("qwen_stream_open")
                 async for chunk in response.aiter_raw():
@@ -183,7 +187,7 @@ class QwenAdapter(ProviderAdapter):
     async def responses_create(
         self,
         request: ResponsesRequest,
-         *,
+        *,
         api_key: str | None = None,
         owner: str | None = None,
         provider_model_id: str | None = None,
@@ -209,8 +213,10 @@ class QwenAdapter(ProviderAdapter):
 
         except httpx.HTTPStatusError as exc:
             body = exc.response.text[:300]
-            log.warning("qwen_responses_http_error", status=exc.response.status_code, body=body)
-            raise UpstreamError() from exc
+            log.warning(
+                "qwen_responses_http_error", status=exc.response.status_code, body=body
+            )
+            _classify_qwen_error(exc.response.status_code, body)
 
         except httpx.TimeoutException as exc:
             log.warning("qwen_responses_timeout")
@@ -243,8 +249,12 @@ class QwenAdapter(ProviderAdapter):
                 if response.status_code >= 400:
                     await response.aread()
                     body = response.text[:300]
-                    log.warning("qwen_responses_stream_error", status=response.status_code, body=body)
-                    raise UpstreamError()
+                    log.warning(
+                        "qwen_responses_stream_error",
+                        status=response.status_code,
+                        body=body,
+                    )
+                    _classify_qwen_error(response.status_code, body)
 
                 log.debug("qwen_responses_stream_open")
                 async for chunk in response.aiter_raw():
@@ -253,7 +263,6 @@ class QwenAdapter(ProviderAdapter):
         except httpx.TimeoutException as exc:
             log.warning("qwen_responses_stream_timeout")
             raise GatewayTimeoutError() from exc
-
 
     async def embeddings(
         self,
@@ -269,7 +278,9 @@ class QwenAdapter(ProviderAdapter):
         log = logger.bind(model=request.model, qwen_model=model_id)
 
         try:
-            payload = request.model_dump(exclude_none=True, exclude={"model", "provider", "input_type"})
+            payload = request.model_dump(
+                exclude_none=True, exclude={"model", "provider", "input_type"}
+            )
             payload["model"] = model_id
             if (label := _owner_user_label(owner)) is not None:
                 payload.setdefault("user", label)
@@ -286,8 +297,12 @@ class QwenAdapter(ProviderAdapter):
 
         except httpx.HTTPStatusError as exc:
             body = exc.response.text
-            log.warning("qwen_embed_http_error", status=exc.response.status_code, body=body[:300])
-            raise UpstreamError(upstream_detail=body) from exc
+            log.warning(
+                "qwen_embed_http_error",
+                status=exc.response.status_code,
+                body=body[:300],
+            )
+            _classify_qwen_error(exc.response.status_code, body)
 
         except httpx.TimeoutException as exc:
             log.warning("qwen_embed_timeout")

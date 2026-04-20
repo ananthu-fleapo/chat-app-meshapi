@@ -34,13 +34,15 @@ from collections.abc import AsyncGenerator
 import httpx
 import structlog
 
-from app.exceptions import GatewayTimeoutError, UpstreamError
+from app.exceptions import GatewayTimeoutError, UnprocessableEntityError, UpstreamError
 from app.providers.base import ProviderAdapter
+from app.exceptions import _classify_vertex_error
 from app.providers.openrouter import _build_payload
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.embeddings import EmbeddingsRequest
 
 logger = structlog.get_logger()
+
 
 # Canonical model name → Vertex AI model ID.
 #
@@ -54,29 +56,29 @@ logger = structlog.get_logger()
 # previews that haven't been explicitly mapped yet.
 _MODEL_MAP: dict[str, str] = {
     # ── Anthropic Claude on Vertex ────────────────────────────────────────────
-    "anthropic/claude-3-5-sonnet":          "anthropic/claude-3-5-sonnet@20241022",
+    "anthropic/claude-3-5-sonnet": "anthropic/claude-3-5-sonnet@20241022",
     "anthropic/claude-3-5-sonnet-20241022": "anthropic/claude-3-5-sonnet@20241022",
-    "anthropic/claude-3-5-haiku":           "anthropic/claude-3-5-haiku@20241022",
-    "anthropic/claude-3-5-haiku-20241022":  "anthropic/claude-3-5-haiku@20241022",
-    "anthropic/claude-3-opus":              "anthropic/claude-3-opus@20240229",
-    "anthropic/claude-3-opus-20240229":     "anthropic/claude-3-opus@20240229",
-    "anthropic/claude-3-sonnet":            "anthropic/claude-3-sonnet@20240229",
-    "anthropic/claude-3-haiku":             "anthropic/claude-3-haiku@20240307",
+    "anthropic/claude-3-5-haiku": "anthropic/claude-3-5-haiku@20241022",
+    "anthropic/claude-3-5-haiku-20241022": "anthropic/claude-3-5-haiku@20241022",
+    "anthropic/claude-3-opus": "anthropic/claude-3-opus@20240229",
+    "anthropic/claude-3-opus-20240229": "anthropic/claude-3-opus@20240229",
+    "anthropic/claude-3-sonnet": "anthropic/claude-3-sonnet@20240229",
+    "anthropic/claude-3-haiku": "anthropic/claude-3-haiku@20240307",
     # ── Google Gemini 1.5 ─────────────────────────────────────────────────────
-    "google/gemini-pro-1.5":                "google/gemini-1.5-pro-002",
-    "google/gemini-flash-1.5":              "google/gemini-1.5-flash-002",
+    "google/gemini-pro-1.5": "google/gemini-1.5-pro-002",
+    "google/gemini-flash-1.5": "google/gemini-1.5-flash-002",
     # ── Google Gemini 2.0 ─────────────────────────────────────────────────────
-    "google/gemini-2.0-flash":              "google/gemini-2.0-flash-001",
-    "google/gemini-2.0-flash-exp":          "google/gemini-2.0-flash-exp",
-    "google/gemini-2.0-flash-lite":         "google/gemini-2.0-flash-lite-001",
+    "google/gemini-2.0-flash": "google/gemini-2.0-flash-001",
+    "google/gemini-2.0-flash-exp": "google/gemini-2.0-flash-exp",
+    "google/gemini-2.0-flash-lite": "google/gemini-2.0-flash-lite-001",
     # ── Google Gemini 2.5 ─────────────────────────────────────────────────────
-    "google/gemini-2.5-pro":                "google/gemini-2.5-pro-preview-05-06",
-    "google/gemini-2.5-flash":              "google/gemini-2.5-flash-preview-04-17",
+    "google/gemini-2.5-pro": "google/gemini-2.5-pro-preview-05-06",
+    "google/gemini-2.5-flash": "google/gemini-2.5-flash-preview-04-17",
     # ── Google Gemini 3 ───────────────────────────────────────────────────────
-    "google/gemini-3-flash-preview":        "google/gemini-3-flash-preview",
-    "gemini-3-flash-preview":               "google/gemini-3-flash-preview",
-    "google/gemini-3.1-pro-preview":        "google/gemini-3.1-pro-preview",
-    "gemini-3.1-pro-preview":               "google/gemini-3.1-pro-preview",
+    "google/gemini-3-flash-preview": "google/gemini-3-flash-preview",
+    "gemini-3-flash-preview": "google/gemini-3-flash-preview",
+    "google/gemini-3.1-pro-preview": "google/gemini-3.1-pro-preview",
+    "gemini-3.1-pro-preview": "google/gemini-3.1-pro-preview",
 }
 
 
@@ -111,7 +113,9 @@ _TASK_TYPE_MAP: dict[str, str] = {
 }
 
 
-def _build_vertex_embed_instances(request: EmbeddingsRequest) -> tuple[list[dict], dict]:
+def _build_vertex_embed_instances(
+    request: EmbeddingsRequest,
+) -> tuple[list[dict], dict]:
     """
     Translate EmbeddingsRequest into Vertex AI predict instances + parameters.
 
@@ -122,12 +126,12 @@ def _build_vertex_embed_instances(request: EmbeddingsRequest) -> tuple[list[dict
     parameters: dict = {}
 
     if isinstance(inp, list) and inp and isinstance(inp[0], int):
-        raise UpstreamError(
-            upstream_detail="Vertex AI text embeddings do not support token array inputs."
+        raise UnprocessableEntityError(
+            "Vertex AI text embeddings do not support token array inputs."
         )
     if isinstance(inp, list) and inp and isinstance(inp[0], list):
-        raise UpstreamError(
-            upstream_detail="Vertex AI text embeddings do not support token array inputs."
+        raise UnprocessableEntityError(
+            "Vertex AI text embeddings do not support token array inputs."
         )
 
     if isinstance(inp, str):
@@ -291,7 +295,7 @@ class VertexAIAdapter(ProviderAdapter):
         except httpx.HTTPStatusError as exc:
             body = exc.response.text[:300]
             log.warning("vertex_http_error", status=exc.response.status_code, body=body)
-            raise UpstreamError() from exc
+            _classify_vertex_error(exc.response.status_code, body)
 
         except httpx.TimeoutException as exc:
             log.warning("vertex_timeout")
@@ -320,8 +324,10 @@ class VertexAIAdapter(ProviderAdapter):
                 if response.status_code >= 400:
                     await response.aread()
                     body = response.text[:300]
-                    log.warning("vertex_stream_error", status=response.status_code, body=body)
-                    raise UpstreamError()
+                    log.warning(
+                        "vertex_stream_error", status=response.status_code, body=body
+                    )
+                    _classify_vertex_error(response.status_code, body)
 
                 log.debug("vertex_stream_open")
                 async for chunk in response.aiter_raw():
@@ -366,8 +372,12 @@ class VertexAIAdapter(ProviderAdapter):
 
         except httpx.HTTPStatusError as exc:
             body = exc.response.text
-            log.warning("vertex_embed_http_error", status=exc.response.status_code, body=body[:300])
-            raise UpstreamError(upstream_detail=body) from exc
+            log.warning(
+                "vertex_embed_http_error",
+                status=exc.response.status_code,
+                body=body[:300],
+            )
+            _classify_vertex_error(exc.response.status_code, body)
 
         except httpx.TimeoutException as exc:
             log.warning("vertex_embed_timeout")

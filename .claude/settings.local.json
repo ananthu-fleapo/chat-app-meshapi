@@ -71,7 +71,9 @@
       "Bash(pytest tests/test_per_1m_pricing.py -v)",
       "Bash(pytest --tb=short -q)",
       "Bash(pytest tests/test_auth_dependencies.py -v --tb=short)",
-      "Bash(pytest tests/test_providers.py::TestBedrockModelTranslation -v --tb=short)"
+      "Bash(pytest tests/test_providers.py::TestBedrockModelTranslation -v --tb=short)",
+      "Bash(python -m pytest tests/ -q --tb=short)",
+      "Bash(python -m pytest tests/ -x -q)"
     ]
   }
 }

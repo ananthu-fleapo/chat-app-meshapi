@@ -13,13 +13,15 @@ Key responsibilities:
 - Manage a single shared httpx.AsyncClient (initialized at app startup).
 """
 
+import json
 from collections.abc import AsyncGenerator
 
 import httpx
 import structlog
 
-from app.exceptions import GatewayTimeoutError, UpstreamError
+from app.exceptions import GatewayTimeoutError, UnprocessableEntityError, UpstreamError
 from app.providers.base import ProviderAdapter
+from app.exceptions import _classify_openrouter_error
 from app.schemas.chat import ROUTERV_ONLY_FIELDS, ChatCompletionRequest
 from app.schemas.responses import RESPONSES_ONLY_FIELDS, ResponsesRequest
 from app.schemas.embeddings import EmbeddingsRequest
@@ -131,7 +133,9 @@ class OpenRouterAdapter(ProviderAdapter):
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     @classmethod
-    def init(cls, api_key: str, base_url: str, timeout: float = 120.0) -> "OpenRouterAdapter":
+    def init(
+        cls, api_key: str, base_url: str, timeout: float = 120.0
+    ) -> "OpenRouterAdapter":
         cls._instance = cls(api_key=api_key, base_url=base_url, timeout=timeout)
         logger.info("openrouter_adapter_ready", base_url=base_url)
         return cls._instance
@@ -188,8 +192,10 @@ class OpenRouterAdapter(ProviderAdapter):
 
         except httpx.HTTPStatusError as exc:
             body = exc.response.text
-            log.warning("upstream_http_error", status=exc.response.status_code, body=body[:300])
-            raise UpstreamError(upstream_detail=body) from exc
+            log.warning(
+                "upstream_http_error", status=exc.response.status_code, body=body[:300]
+            )
+            _classify_openrouter_error(exc.response.status_code, body)
 
         except httpx.TimeoutException as exc:
             log.warning("upstream_timeout", model=request.model)
@@ -219,8 +225,10 @@ class OpenRouterAdapter(ProviderAdapter):
 
         except httpx.HTTPStatusError as exc:
             body = exc.response.text
-            log.warning("upstream_http_error", status=exc.response.status_code, body=body[:300])
-            raise UpstreamError(upstream_detail=body) from exc
+            log.warning(
+                "upstream_http_error", status=exc.response.status_code, body=body[:300]
+            )
+            _classify_openrouter_error(exc.response.status_code, body)
 
         except httpx.TimeoutException as exc:
             log.warning("upstream_timeout", model=request.model)
@@ -250,8 +258,10 @@ class OpenRouterAdapter(ProviderAdapter):
                     # Read error body before the context manager closes the connection.
                     await response.aread()
                     body = response.text[:300]
-                    log.warning("upstream_stream_error", status=response.status_code, body=body)
-                    raise UpstreamError()
+                    log.warning(
+                        "upstream_stream_error", status=response.status_code, body=body
+                    )
+                    _classify_openrouter_error(response.status_code, body)
 
                 log.debug("upstream_stream_open")
                 async for chunk in response.aiter_raw():
@@ -287,8 +297,10 @@ class OpenRouterAdapter(ProviderAdapter):
 
         except httpx.HTTPStatusError as exc:
             body = exc.response.text[:300]
-            log.warning("upstream_http_error", status=exc.response.status_code, body=body)
-            raise UpstreamError() from exc
+            log.warning(
+                "upstream_http_error", status=exc.response.status_code, body=body
+            )
+            _classify_openrouter_error(exc.response.status_code, body)
 
         except httpx.TimeoutException as exc:
             log.warning("upstream_timeout", model=request.model)
@@ -317,8 +329,10 @@ class OpenRouterAdapter(ProviderAdapter):
                 if response.status_code >= 400:
                     await response.aread()
                     body = response.text[:300]
-                    log.warning("upstream_stream_error", status=response.status_code, body=body)
-                    raise UpstreamError()
+                    log.warning(
+                        "upstream_stream_error", status=response.status_code, body=body
+                    )
+                    _classify_openrouter_error(response.status_code, body)
 
                 log.debug("upstream_responses_stream_open")
                 async for chunk in response.aiter_raw():

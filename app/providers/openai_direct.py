@@ -15,13 +15,15 @@ Differences from OpenRouterAdapter
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncGenerator
 
 import httpx
 import structlog
 
-from app.exceptions import GatewayTimeoutError, UpstreamError
+from app.exceptions import GatewayTimeoutError, UnprocessableEntityError, UpstreamError
 from app.providers.base import ProviderAdapter
+from app.exceptions import _classify_openai_error
 from app.providers.openrouter import _build_payload
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.responses import RESPONSES_ONLY_FIELDS, ResponsesRequest
@@ -59,7 +61,7 @@ def _openai_model_id(canonical: str) -> str:
     Strips the "openai/" namespace prefix that RouterV adds.
     """
     if canonical.startswith("openai/"):
-        return canonical[len("openai/"):]
+        return canonical[len("openai/") :]
     return canonical
 
 
@@ -133,8 +135,10 @@ class OpenAIDirectAdapter(ProviderAdapter):
 
         except httpx.HTTPStatusError as exc:
             body = exc.response.text[:300]
-            log.warning("openai_direct_http_error", status=exc.response.status_code, body=body)
-            raise UpstreamError() from exc
+            log.warning(
+                "openai_direct_http_error", status=exc.response.status_code, body=body
+            )
+            _classify_openai_error(exc.response.status_code, body)
 
         except httpx.TimeoutException as exc:
             log.warning("openai_direct_timeout")
@@ -169,7 +173,7 @@ class OpenAIDirectAdapter(ProviderAdapter):
                         status=response.status_code,
                         body=body,
                     )
-                    raise UpstreamError()
+                    _classify_openai_error(response.status_code, body)
 
                 log.debug("openai_direct_stream_open")
                 async for chunk in response.aiter_raw():
@@ -199,8 +203,12 @@ class OpenAIDirectAdapter(ProviderAdapter):
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as exc:
-            logger.warning("openai_upload_file_error", status=exc.response.status_code, body=exc.response.text[:300])
-            raise UpstreamError() from exc
+            logger.warning(
+                "openai_upload_file_error",
+                status=exc.response.status_code,
+                body=exc.response.text[:300],
+            )
+            _classify_openai_error(exc.response.status_code, exc.response.text[:300])
         except httpx.TimeoutException as exc:
             logger.warning("openai_upload_file_timeout")
             raise GatewayTimeoutError() from exc
@@ -215,7 +223,7 @@ class OpenAIDirectAdapter(ProviderAdapter):
             return response.json()
         except httpx.HTTPStatusError as exc:
             logger.warning("openai_get_file_error", status=exc.response.status_code)
-            raise UpstreamError() from exc
+            _classify_openai_error(exc.response.status_code, exc.response.text[:300])
         except httpx.TimeoutException as exc:
             raise GatewayTimeoutError() from exc
 
@@ -229,11 +237,13 @@ class OpenAIDirectAdapter(ProviderAdapter):
             return response.json()
         except httpx.HTTPStatusError as exc:
             logger.warning("openai_delete_file_error", status=exc.response.status_code)
-            raise UpstreamError() from exc
+            _classify_openai_error(exc.response.status_code, exc.response.text[:300])
         except httpx.TimeoutException as exc:
             raise GatewayTimeoutError() from exc
 
-    async def get_file_content(self, file_id: str, *, api_key: str | None = None) -> bytes:
+    async def get_file_content(
+        self, file_id: str, *, api_key: str | None = None
+    ) -> bytes:
         try:
             response = await self._client.get(
                 f"/files/{file_id}/content",
@@ -242,8 +252,10 @@ class OpenAIDirectAdapter(ProviderAdapter):
             response.raise_for_status()
             return response.content
         except httpx.HTTPStatusError as exc:
-            logger.warning("openai_get_file_content_error", status=exc.response.status_code)
-            raise UpstreamError() from exc
+            logger.warning(
+                "openai_get_file_content_error", status=exc.response.status_code
+            )
+            _classify_openai_error(exc.response.status_code, exc.response.text[:300])
         except httpx.TimeoutException as exc:
             raise GatewayTimeoutError() from exc
 
@@ -272,8 +284,12 @@ class OpenAIDirectAdapter(ProviderAdapter):
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as exc:
-            logger.warning("openai_create_batch_error", status=exc.response.status_code, body=exc.response.text[:300])
-            raise UpstreamError() from exc
+            logger.warning(
+                "openai_create_batch_error",
+                status=exc.response.status_code,
+                body=exc.response.text[:300],
+            )
+            _classify_openai_error(exc.response.status_code, exc.response.text[:300])
         except httpx.TimeoutException as exc:
             raise GatewayTimeoutError() from exc
 
@@ -287,7 +303,7 @@ class OpenAIDirectAdapter(ProviderAdapter):
             return response.json()
         except httpx.HTTPStatusError as exc:
             logger.warning("openai_get_batch_error", status=exc.response.status_code)
-            raise UpstreamError() from exc
+            _classify_openai_error(exc.response.status_code, exc.response.text[:300])
         except httpx.TimeoutException as exc:
             raise GatewayTimeoutError() from exc
 
@@ -311,7 +327,7 @@ class OpenAIDirectAdapter(ProviderAdapter):
             return response.json()
         except httpx.HTTPStatusError as exc:
             logger.warning("openai_list_batches_error", status=exc.response.status_code)
-            raise UpstreamError() from exc
+            _classify_openai_error(exc.response.status_code, exc.response.text[:300])
         except httpx.TimeoutException as exc:
             raise GatewayTimeoutError() from exc
 
@@ -325,7 +341,7 @@ class OpenAIDirectAdapter(ProviderAdapter):
             return response.json()
         except httpx.HTTPStatusError as exc:
             logger.warning("openai_cancel_batch_error", status=exc.response.status_code)
-            raise UpstreamError() from exc
+            _classify_openai_error(exc.response.status_code, exc.response.text[:300])
         except httpx.TimeoutException as exc:
             raise GatewayTimeoutError() from exc
 
@@ -340,6 +356,7 @@ class OpenAIDirectAdapter(ProviderAdapter):
         get the "openai/" prefix so they match the model_prices table key.
         """
         import json
+
         results = []
         for raw_line in content.decode(errors="replace").strip().splitlines():
             if not raw_line.strip():
@@ -354,9 +371,9 @@ class OpenAIDirectAdapter(ProviderAdapter):
                 usage = body.get("usage") or {}
                 prompt_tokens: int = usage.get("prompt_tokens") or 0
                 completion_tokens: int = usage.get("completion_tokens") or 0
-                cached_tokens: int = (
-                    (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
-                )
+                cached_tokens: int = (usage.get("prompt_tokens_details") or {}).get(
+                    "cached_tokens"
+                ) or 0
 
                 raw_model: str = body.get("model", "")
                 model = (
@@ -365,21 +382,25 @@ class OpenAIDirectAdapter(ProviderAdapter):
                     else raw_model
                 )
 
-                results.append({
-                    "success": success,
-                    "model": model,
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "cached_tokens": cached_tokens,
-                })
+                results.append(
+                    {
+                        "success": success,
+                        "model": model,
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "cached_tokens": cached_tokens,
+                    }
+                )
             except Exception:
-                results.append({
-                    "success": False,
-                    "model": "",
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "cached_tokens": 0,
-                })
+                results.append(
+                    {
+                        "success": False,
+                        "model": "",
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "cached_tokens": 0,
+                    }
+                )
         return results
 
     # ── Responses API ─────────────────────────────────────────────────────────
@@ -387,7 +408,7 @@ class OpenAIDirectAdapter(ProviderAdapter):
     async def responses_create(
         self,
         request: ResponsesRequest,
-          *,
+        *,
         api_key: str | None = None,
         owner: str | None = None,
         provider_model_id: str | None = None,
@@ -399,8 +420,8 @@ class OpenAIDirectAdapter(ProviderAdapter):
 
         try:
             response = await self._client.post(
-                 "/responses",
-                 json=payload,
+                "/responses",
+                json=payload,
                 headers=self._auth_headers(api_key),
             )
             response.raise_for_status()
@@ -413,7 +434,7 @@ class OpenAIDirectAdapter(ProviderAdapter):
                 status=exc.response.status_code,
                 body=body,
             )
-            raise UpstreamError() from exc
+            _classify_openai_error(exc.response.status_code, body)
 
         except httpx.TimeoutException as exc:
             log.warning("openai_direct_responses_timeout")
@@ -447,7 +468,7 @@ class OpenAIDirectAdapter(ProviderAdapter):
                         status=response.status_code,
                         body=body,
                     )
-                    raise UpstreamError()
+                    _classify_openai_error(response.status_code, body)
 
                 log.debug("openai_direct_responses_stream_open")
                 async for chunk in response.aiter_raw():
@@ -457,7 +478,6 @@ class OpenAIDirectAdapter(ProviderAdapter):
             log.warning("openai_direct_responses_stream_timeout")
             raise GatewayTimeoutError() from exc
 
-            
     async def embeddings(
         self,
         request: EmbeddingsRequest,
@@ -469,7 +489,9 @@ class OpenAIDirectAdapter(ProviderAdapter):
         from app.providers.openrouter import _owner_user_label
 
         # OpenAI API doesn't support input_type; exclude it
-        payload = request.model_dump(exclude_none=True, exclude={"model", "provider", "input_type"})
+        payload = request.model_dump(
+            exclude_none=True, exclude={"model", "provider", "input_type"}
+        )
         model_id = provider_model_id or request.model
         if not model_id:
             raise ValueError("Embeddings model must be resolved before adapter call")
@@ -480,8 +502,8 @@ class OpenAIDirectAdapter(ProviderAdapter):
 
         try:
             response = await self._client.post(
-                 "/embeddings",
-                 json=payload,
+                "/embeddings",
+                json=payload,
                 headers=self._auth_headers(api_key),
             )
             response.raise_for_status()
@@ -489,8 +511,12 @@ class OpenAIDirectAdapter(ProviderAdapter):
 
         except httpx.HTTPStatusError as exc:
             body = exc.response.text
-            log.warning("openai_direct_embed_http_error", status=exc.response.status_code, body=body[:300])
-            raise UpstreamError(upstream_detail=body) from exc
+            log.warning(
+                "openai_direct_embed_http_error",
+                status=exc.response.status_code,
+                body=body[:300],
+            )
+            _classify_openai_error(exc.response.status_code, body)
 
         except httpx.TimeoutException as exc:
             log.warning("openai_direct_embed_timeout")

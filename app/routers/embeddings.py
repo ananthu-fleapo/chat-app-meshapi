@@ -16,8 +16,9 @@ from app.auth.config_resolver import resolve_embeddings_config
 from app.auth.dependencies import get_authenticated_key
 from app.cache.rate_limiter import check_free_model_rate_limits, check_rate_limits
 from app.config import settings
-from app.db.models import ApiKey
+from app.db.models import ApiKey, ModelPrice
 from app.db.session import get_db_session
+from app.exceptions import ModelCapabilityError
 from app.providers.key_resolver import resolve_upstream_key
 from app.providers.registry import get_adapter, resolve_routing
 from app.schemas.embeddings import EmbeddingsRequest
@@ -29,7 +30,115 @@ router = APIRouter()
 logger = structlog.get_logger()
 
 
-@router.post("/v1/embeddings")
+@router.post(
+    "/v1/embeddings",
+    responses={
+        400: {
+            "description": "Model does not support embeddings API",
+            "content": {"application/json": {"example": {
+                "error": {"code": "model_capability_not_supported", "message": "Model 'gpt-4o' does not support the embeddings API."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        401: {
+            "description": "Missing or invalid API key",
+            "content": {"application/json": {"example": {
+                "error": {"code": "unauthorized", "message": "Invalid or missing API key."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        402: {
+            "description": "Insufficient balance or spend cap reached",
+            "content": {"application/json": {"examples": {
+                "spend_cap_reached": {
+                    "summary": "Per-key spend cap reached",
+                    "value": {
+                        "error": {"code": "spend_limit_exceeded", "message": "Spend cap of $10.0000 reached. Current spend: $10.0023. Contact your administrator to increase the cap."},
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    },
+                },
+                "no_balance": {
+                    "summary": "Insufficient credit balance",
+                    "value": {
+                        "error": {"code": "spend_limit_exceeded", "message": "Insufficient balance. Top up your account to use paid models."},
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    },
+                },
+            }}},
+        },
+        403: {
+            "description": "API key is suspended",
+            "content": {"application/json": {"example": {
+                "error": {"code": "forbidden", "message": "API key is suspended."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        422: {
+            "description": "Request validation failed",
+            "content": {"application/json": {"example": {
+                "error": {
+                    "code": "validation_error",
+                    "message": "Request validation failed.",
+                    "details": [{"type": "missing", "loc": ["body", "input"], "msg": "Field required"}],
+                },
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        429: {
+            "description": "Rate limit exceeded (RPM or RPD)",
+            "content": {"application/json": {"examples": {
+                "rpm_exceeded": {
+                    "summary": "Requests-per-minute limit hit",
+                    "value": {
+                        "error": {"code": "rate_limit_exceeded", "message": "RPM limit of 60 req/min exceeded."},
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    },
+                },
+                "rpd_exceeded": {
+                    "summary": "Requests-per-day limit hit",
+                    "value": {
+                        "error": {"code": "rate_limit_exceeded", "message": "RPD limit of 1000 req/day exceeded."},
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    },
+                },
+            }}},
+        },
+        500: {
+            "description": "Upstream provider error or gateway timeout",
+            "content": {"application/json": {"examples": {
+                "upstream_error": {
+                    "summary": "Upstream provider returned an error",
+                    "value": {
+                        "error": {
+                            "code": "upstream_error",
+                            "message": "Upstream provider returned an error.",
+                            "upstream_detail": "{\"error\":{\"message\":\"Input too large for model\",\"code\":413}}",
+                        },
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    },
+                },
+                "gateway_timeout": {
+                    "summary": "Upstream timed out",
+                    "value": {
+                        "error": {"code": "gateway_timeout", "message": "Upstream provider did not respond in time."},
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    },
+                },
+                "internal_error": {
+                    "summary": "Internal platform error (DB failure — FastAPI default format)",
+                    "value": {"detail": "Internal Server Error"},
+                },
+            }}},
+        },
+        503: {
+            "description": "Upstream provider not available — required credentials not configured on this server",
+            "content": {"application/json": {"example": {
+                "error": {"code": "provider_not_available", "message": "Provider 'vertex' is not available. The required credentials may not be configured on this server."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+    },
+)
 async def create_embeddings(
     raw_body: EmbeddingsRequest,
     request: Request,
@@ -62,6 +171,12 @@ async def create_embeddings(
         )
 
     provider, provider_model_id, _ = await resolve_routing(body.model, db)
+
+    # ── Capability check: model+provider must support embeddings ─────────────
+    _price_row = await db.get(ModelPrice, (body.model, provider))
+    if _price_row is not None and not _price_row.supports_embeddings_api:
+        raise ModelCapabilityError(body.model, "embeddings")
+
     upstream_key = await resolve_upstream_key(owner=key.owner, provider=provider, db=db)
     adapter = get_adapter(provider)
 

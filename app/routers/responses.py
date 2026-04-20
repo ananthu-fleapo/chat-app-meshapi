@@ -58,7 +58,121 @@ def _normalize_usage(raw: dict) -> dict:
     return u
 
 
-@router.post("/v1/responses")
+@router.post(
+    "/v1/responses",
+    responses={
+        400: {
+            "description": "Model does not support Responses API",
+            "content": {"application/json": {"example": {
+                "error": {"code": "model_capability_not_supported", "message": "Model 'meta-llama/llama-3.1-8b-instruct' does not support the responses API."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        401: {
+            "description": "Missing or invalid API key",
+            "content": {"application/json": {"example": {
+                "error": {"code": "unauthorized", "message": "Invalid or missing API key."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        402: {
+            "description": "Insufficient balance or spend cap reached",
+            "content": {"application/json": {"examples": {
+                "spend_cap_reached": {
+                    "summary": "Per-key spend cap reached",
+                    "value": {
+                        "error": {"code": "spend_limit_exceeded", "message": "Spend cap of $10.0000 reached. Current spend: $10.0023. Contact your administrator to increase the cap."},
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    },
+                },
+                "no_balance": {
+                    "summary": "Insufficient credit balance",
+                    "value": {
+                        "error": {"code": "spend_limit_exceeded", "message": "Insufficient balance. Top up your account to use paid models."},
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    },
+                },
+            }}},
+        },
+        403: {
+            "description": "API key is suspended",
+            "content": {"application/json": {"example": {
+                "error": {"code": "forbidden", "message": "API key is suspended."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        422: {
+            "description": "Request validation failed",
+            "content": {"application/json": {"example": {
+                "error": {
+                    "code": "validation_error",
+                    "message": "Request validation failed.",
+                    "details": [{"type": "missing", "loc": ["body", "model"], "msg": "Field required"}],
+                },
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        429: {
+            "description": "Rate limit exceeded (RPM or RPD)",
+            "content": {"application/json": {"examples": {
+                "rpm_exceeded": {
+                    "summary": "Requests-per-minute limit hit",
+                    "value": {
+                        "error": {"code": "rate_limit_exceeded", "message": "RPM limit of 60 req/min exceeded."},
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    },
+                },
+                "rpd_exceeded": {
+                    "summary": "Requests-per-day limit hit",
+                    "value": {
+                        "error": {"code": "rate_limit_exceeded", "message": "RPD limit of 1000 req/day exceeded."},
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    },
+                },
+            }}},
+        },
+        500: {
+            "description": "Upstream provider error or gateway timeout",
+            "content": {"application/json": {"examples": {
+                "upstream_error": {
+                    "summary": "Upstream provider returned an error",
+                    "value": {
+                        "error": {
+                            "code": "upstream_error",
+                            "message": "Upstream provider returned an error.",
+                            "upstream_detail": "{\"error\":{\"message\":\"model_not_found\",\"code\":404}}",
+                        },
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    },
+                },
+                "gateway_timeout": {
+                    "summary": "Upstream timed out",
+                    "value": {
+                        "error": {"code": "gateway_timeout", "message": "Upstream provider did not respond in time."},
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    },
+                },
+                "internal_error": {
+                    "summary": "Internal platform error (DB failure — FastAPI default format)",
+                    "value": {"detail": "Internal Server Error"},
+                },
+            }}},
+        },
+        501: {
+            "description": "Provider adapter does not implement the Responses API",
+            "content": {"application/json": {"example": {
+                "detail": "openai/o4-mini does not have support for Responses API.",
+            }}},
+        },
+        503: {
+            "description": "Upstream provider not available — required credentials not configured on this server",
+            "content": {"application/json": {"example": {
+                "error": {"code": "provider_not_available", "message": "Provider 'bedrock' is not available. The required credentials may not be configured on this server."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+    },
+)
 async def create_response(
     raw_body: ResponsesRequest,
     request: Request,

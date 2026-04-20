@@ -73,7 +73,30 @@ class TemplateSummary(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@router.post("", response_model=TemplateSummary, status_code=201)
+@router.post(
+    "",
+    response_model=TemplateSummary,
+    status_code=201,
+    responses={
+        401: {
+            "description": "Missing or invalid credentials",
+            "content": {"application/json": {"example": {
+                "error": {"code": "unauthorized", "message": "Invalid or missing API key."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        409: {
+            "description": "A template with this name already exists for this owner",
+            "content": {"application/json": {"example": {
+                "detail": "A template named 'my-prompt' already exists for owner 'user_abc123'.",
+            }}},
+        },
+        500: {
+            "description": "Database write error",
+            "content": {"application/json": {"example": {"detail": "Internal Server Error"}}},
+        },
+    },
+)
 async def create_template(
     body: CreateTemplateRequest,
     owner: str = Depends(get_any_auth_owner),
@@ -110,7 +133,23 @@ async def create_template(
     return _to_summary(template)
 
 
-@router.get("", response_model=list[TemplateSummary])
+@router.get(
+    "",
+    response_model=list[TemplateSummary],
+    responses={
+        401: {
+            "description": "Missing or invalid credentials",
+            "content": {"application/json": {"example": {
+                "error": {"code": "unauthorized", "message": "Invalid or missing API key."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        500: {
+            "description": "Database read error",
+            "content": {"application/json": {"example": {"detail": "Internal Server Error"}}},
+        },
+    },
+)
 async def list_templates(
     owner: str = Depends(get_any_auth_owner),
     db: AsyncSession = Depends(get_db_session),
@@ -124,7 +163,30 @@ async def list_templates(
     return [_to_summary(t) for t in result.scalars().all()]
 
 
-@router.get("/{template_id}", response_model=TemplateSummary)
+@router.get(
+    "/{template_id}",
+    response_model=TemplateSummary,
+    responses={
+        401: {
+            "description": "Missing or invalid credentials",
+            "content": {"application/json": {"example": {
+                "error": {"code": "unauthorized", "message": "Invalid or missing API key."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        404: {
+            "description": "Template not found or not owned by caller",
+            "content": {"application/json": {"example": {
+                "error": {"code": "not_found", "message": "Template '01ARZ3NDEKTSV4RRFFQ69G5FAV' not found."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        500: {
+            "description": "Database read error",
+            "content": {"application/json": {"example": {"detail": "Internal Server Error"}}},
+        },
+    },
+)
 async def get_template(
     template_id: str,
     owner: str = Depends(get_any_auth_owner),
@@ -135,7 +197,36 @@ async def get_template(
     return _to_summary(template)
 
 
-@router.patch("/{template_id}", response_model=TemplateSummary)
+@router.patch(
+    "/{template_id}",
+    response_model=TemplateSummary,
+    responses={
+        401: {
+            "description": "Missing or invalid credentials",
+            "content": {"application/json": {"example": {
+                "error": {"code": "unauthorized", "message": "Invalid or missing API key."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        404: {
+            "description": "Template not found or not owned by caller",
+            "content": {"application/json": {"example": {
+                "error": {"code": "not_found", "message": "Template '01ARZ3NDEKTSV4RRFFQ69G5FAV' not found."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        409: {
+            "description": "A template with this name already exists for this owner",
+            "content": {"application/json": {"example": {
+                "detail": "A template named 'my-prompt' already exists for owner 'user_abc123'.",
+            }}},
+        },
+        500: {
+            "description": "Database write error",
+            "content": {"application/json": {"example": {"detail": "Internal Server Error"}}},
+        },
+    },
+)
 async def update_template(
     template_id: str,
     body: UpdateTemplateRequest,
@@ -179,7 +270,30 @@ async def update_template(
     return _to_summary(template)
 
 
-@router.delete("/{template_id}", status_code=204)
+@router.delete(
+    "/{template_id}",
+    status_code=204,
+    responses={
+        401: {
+            "description": "Missing or invalid credentials",
+            "content": {"application/json": {"example": {
+                "error": {"code": "unauthorized", "message": "Invalid or missing API key."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        404: {
+            "description": "Template not found or not owned by caller",
+            "content": {"application/json": {"example": {
+                "error": {"code": "not_found", "message": "Template '01ARZ3NDEKTSV4RRFFQ69G5FAV' not found."},
+                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }}},
+        },
+        500: {
+            "description": "Database delete error",
+            "content": {"application/json": {"example": {"detail": "Internal Server Error"}}},
+        },
+    },
+)
 async def delete_template(
     template_id: str,
     owner: str = Depends(get_any_auth_owner),

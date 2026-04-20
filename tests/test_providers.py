@@ -839,7 +839,7 @@ class TestBedrockAdapter:
         adapter = self._make_adapter()
 
         mock_client = AsyncMock()
-        mock_client.converse = AsyncMock(side_effect=Exception("ValidationException"))
+        mock_client.converse = AsyncMock(side_effect=Exception("InternalServerError"))
         cm = MagicMock()
         cm.__aenter__ = AsyncMock(return_value=mock_client)
         cm.__aexit__ = AsyncMock(return_value=False)
