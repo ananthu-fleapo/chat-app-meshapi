@@ -149,7 +149,6 @@ class Settings(BaseSettings):
     service_api_base_url: str = ""
     service_internal_api_key: str = ""
 
-
     # ── Model health check self-calling ──────────────────────────────────────
     # URL of this service's own inference API (e.g. https://api.meshapi.ai).
     # When set, health checks call the live endpoints instead of adapters directly.
@@ -159,7 +158,7 @@ class Settings(BaseSettings):
     # Max requests per minute issued by the health check runner. Keep below the
     # key's rpm_limit in DB (hard ceiling is max_rpm=100). Default 55 leaves
     # headroom so the key is never exhausted mid-run.
-    health_check_rpm: int = 55
+    health_check_rpm: int = 60
 
     # ── CORS ─────────────────────────────────────────────────────────────────
     # Comma-separated list of allowed origins for browser requests.

@@ -72,7 +72,7 @@ def _get_self_client() -> httpx.AsyncClient:
 
 class _RateLimiter:
     """Fixed-window counter: allows up to `rpm` requests to burst immediately,
-    then blocks until the 70s window resets."""
+    then blocks until the 120s window resets."""
 
     def __init__(self, rpm: int) -> None:
         self._rpm = rpm
@@ -83,11 +83,11 @@ class _RateLimiter:
     async def acquire(self) -> None:
         async with self._lock:
             now = time.monotonic()
-            if now - self._window_start >= 70.0:
+            if now - self._window_start >= 120.0:
                 self._window_start = now
                 self._count = 0
             if self._count >= self._rpm:
-                wait = 70.0 - (time.monotonic() - self._window_start)
+                wait = 120.0 - (time.monotonic() - self._window_start)
                 if wait > 0:
                     await asyncio.sleep(wait)
                 self._window_start = time.monotonic()
