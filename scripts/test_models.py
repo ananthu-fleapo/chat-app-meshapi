@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Test every model available on OpenRouter by sending a simple chat request
-through RouterSVC and reporting pass / fail per model.
+Test every model registered in RouterSVC by sending a simple chat request
+and reporting pass / fail per model.
 
 Usage
 -----
   python scripts/test_models.py \\
       --api-key    rsk_your_routersvc_key \\
-      --or-key     sk-or-your_openrouter_key \\
       [--base-url  http://localhost:8000] \\
       [--concurrency 3]          # parallel requests     (default: 3)
       [--rate-limit  15]         # max requests / minute (default: 15)
@@ -83,38 +82,26 @@ class ModelResult:
 # ── Fetch model list ──────────────────────────────────────────────────────────
 
 async def _fetch_models(
-    or_key: str,
+    base_url: str,
+    api_key: str,
     client: httpx.AsyncClient,
     free_only: bool,
     paid_only: bool,
     filter_str: str,
 ) -> list[dict]:
+    """Fetch enabled models from our own /v1/models endpoint."""
     resp = await client.get(
-        "https://openrouter.ai/api/v1/models",
-        headers={
-            "Authorization": f"Bearer {or_key}",
-            "HTTP-Referer": "https://routerv.com",
-            "X-Title": "RouterV",
-        },
+        f"{base_url}/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"},
         timeout=30.0,
     )
     resp.raise_for_status()
-    models: list[dict] = resp.json().get("data", [])
-
-    # Drop internal OpenRouter routing aliases
-    models = [m for m in models if not m.get("id", "").startswith("openrouter/")]
-
-    def _is_free(m: dict) -> bool:
-        p = m.get("pricing") or {}
-        try:
-            return float(p.get("prompt", 1)) == 0 and float(p.get("completion", 1)) == 0
-        except (ValueError, TypeError):
-            return False
+    models: list[dict] = resp.json()
 
     if free_only:
-        models = [m for m in models if _is_free(m)]
+        models = [m for m in models if m.get("is_free")]
     elif paid_only:
-        models = [m for m in models if not _is_free(m)]
+        models = [m for m in models if not m.get("is_free")]
 
     if filter_str:
         models = [m for m in models if filter_str.lower() in m.get("id", "").lower()]
@@ -424,9 +411,7 @@ def _parse_args() -> argparse.Namespace:
         epilog=__doc__,
     )
     p.add_argument("--api-key",  required=True,
-        help="RouterSVC API key (rsk_...) for inference requests.")
-    p.add_argument("--or-key",   default=None,
-        help="OpenRouter key to fetch model list. Falls back to --api-key.")
+        help="RouterSVC API key (rsk_...) for both model list and inference requests.")
     p.add_argument("--base-url", default="http://localhost:8000",
         help="RouterSVC base URL (default: http://localhost:8000).")
     p.add_argument("--concurrency", type=int, default=3,
@@ -460,7 +445,7 @@ async def _main(args: argparse.Namespace) -> int:
     passed_path = str(_OUTPUTS_DIR / f"passed_{ts}.txt")
 
     print(bold("\n  RouterSVC Model Tester"))
-    print(f"  Base URL:     {args.base_url}")
+    print(f"  Base URL:     {args.base_url}  (models fetched from /v1/models)")
     print(f"  Concurrency:  {args.concurrency}")
     print(f"  Rate limit:   {args.rate_limit} req/min  ({60/args.rate_limit:.1f}s between requests)")
     print(f"  Timeout:      {args.timeout}s / model")
@@ -474,18 +459,16 @@ async def _main(args: argparse.Namespace) -> int:
     print(f"  Output:       {json_path}  +  {passed_path}")
     print()
 
-    or_key = args.or_key or args.api_key
-
     async with httpx.AsyncClient() as client:
 
         # 1. Fetch model list
-        print("Fetching model list from OpenRouter... ", end="", flush=True)
+        print(f"Fetching model list from {args.base_url}/v1/models... ", end="", flush=True)
         if args.free_only and args.paid_only:
             print(red("Error: --free-only and --paid-only are mutually exclusive."))
             return 1
 
         try:
-            models = await _fetch_models(or_key, client, args.free_only, args.paid_only, args.filter)
+            models = await _fetch_models(args.base_url, args.api_key, client, args.free_only, args.paid_only, args.filter)
         except httpx.HTTPStatusError as exc:
             print(red(f"FAILED (HTTP {exc.response.status_code})"))
             print(f"  {exc.response.text[:300]}")

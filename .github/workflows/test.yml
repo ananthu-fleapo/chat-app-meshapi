@@ -31,6 +31,8 @@ jobs:
           REDIS_URL: redis://localhost:6379/0
           WEBHOOK_API_KEY: test-webhook-secret
           SUPABASE_JWT_SECRET: test-supabase-jwt-secret-for-testing-only
+          HEALTH_CHECK_API_KEY: rsk_01KPQNHJSKASDFfGT9A668DNDU468W
+          HEALTH_CHECK_SELF_URL: http://localhost:8000
 
       - name: Notify Slack
         if: failure()

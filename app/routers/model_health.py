@@ -10,6 +10,11 @@ Cloud Scheduler config:
     Schedule:  0 */6 * * *
     URL:       POST https://<routersvc-url>/v1/model-health/run
     Header:    Authorization: Bearer <WEBHOOK_API_KEY>
+
+Self-calling mode:
+    When HEALTH_CHECK_SELF_URL and HEALTH_CHECK_API_KEY are set, tests call
+    the live inference endpoints (e.g. https://api.meshapi.ai/v1/chat/completions)
+    so the full user flow — auth, routing, balance, usage logging — is exercised.
 """
 
 from __future__ import annotations
@@ -20,27 +25,23 @@ import math
 import statistics
 import time
 from collections import defaultdict
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import httpx
 import structlog
 import structlog.contextvars
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from sqlalchemy import and_, select
+from sqlalchemy import select
 
 from app.auth.dependencies import verify_webhook_key
 from app.config import settings
 from app.db.engine import get_session_factory
 from app.db.models import Model, ModelPrice
 from app.notifications.slack import send_slack_alert
-from app.providers.key_resolver import resolve_upstream_key
-from app.providers.registry import get_adapter
-from app.schemas.chat import ChatCompletionRequest, Message
-from app.schemas.embeddings import EmbeddingsRequest
-from app.schemas.responses import ResponsesRequest
 from app.storage.gcs import upload_csv
 
 logger = structlog.get_logger()
@@ -48,20 +49,99 @@ router = APIRouter(tags=["model-health"])
 
 _CONCURRENCY = 5
 _TIMEOUT_S = 60.0
-_TEST_MESSAGES = [Message(role="user", content="Say hi")]
-_TEST_RESPONSES_INPUT = "Say hi"
-_TEST_EMBEDDINGS_INPUT = "Hello"
 _MAX_TOKENS = 1024
 
+# ── Self-calling httpx client ─────────────────────────────────────────────────
 
-# ── Context ───────────────────────────────────────────────────────────────────
+_self_client: httpx.AsyncClient | None = None
+
+
+def _get_self_client() -> httpx.AsyncClient:
+    global _self_client
+    if _self_client is None:
+        _self_client = httpx.AsyncClient(
+            base_url=settings.health_check_self_url.rstrip("/"),
+            headers={"Authorization": f"Bearer {settings.health_check_api_key}"},
+            timeout=httpx.Timeout(_TIMEOUT_S),
+        )
+    return _self_client
+
+
+# ── Rate limiter ─────────────────────────────────────────────────────────────
+
+class _RateLimiter:
+    """Fixed-window counter: allows up to `rpm` requests to burst immediately,
+    then blocks until the 60s window resets."""
+
+    def __init__(self, rpm: int) -> None:
+        self._rpm = rpm
+        self._count = 0
+        self._window_start = 0.0
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            if now - self._window_start >= 60.0:
+                self._window_start = now
+                self._count = 0
+            if self._count >= self._rpm:
+                wait = 60.0 - (time.monotonic() - self._window_start)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                self._window_start = time.monotonic()
+                self._count = 0
+            self._count += 1
+
+
+# ── Context & endpoint specs ──────────────────────────────────────────────────
 
 @dataclass
 class ModelTestContext:
     model_id: str
-    model_type: str          # default "unknown" if DB row missing
+    model_type: str   # default "unknown" if DB row missing
     provider: str
-    provider_model_id: str | None
+
+
+@dataclass
+class EndpointSpec:
+    test_type: str
+    path: str
+    payload_fn: Callable[[ModelTestContext], dict]
+
+
+_ENDPOINT_SPECS: list[EndpointSpec] = [
+    EndpointSpec(
+        test_type="completions",
+        path="/v1/chat/completions",
+        payload_fn=lambda ctx: {
+            "model": ctx.model_id,
+            "messages": [{"role": "user", "content": "Say hi"}],
+            "max_tokens": _MAX_TOKENS,
+            "stream": False,
+        },
+    ),
+    EndpointSpec(
+        test_type="responses",
+        path="/v1/responses",
+        payload_fn=lambda ctx: {
+            "model": ctx.model_id,
+            "input": "Say hi",
+            "max_output_tokens": _MAX_TOKENS,
+            "stream": False,
+        },
+    ),
+    EndpointSpec(
+        test_type="embeddings",
+        path="/v1/embeddings",
+        payload_fn=lambda ctx: {
+            "model": ctx.model_id,
+            "input": "Hello",
+        },
+    ),
+]
+
+_SPEC_BY_TYPE: dict[str, EndpointSpec] = {s.test_type: s for s in _ENDPOINT_SPECS}
 
 
 # ── Response schema ───────────────────────────────────────────────────────────
@@ -84,20 +164,25 @@ class ModelHealthResponse(BaseModel):
     failed: int
     pass_rate: str
     avg_latency_ms: int
-    latency_by_model_type: dict[str, dict]   # {"text": {"p50":..,"p95":..,"count":..}}
+    latency_by_model_type: dict[str, dict]   # {"text/completions": {"p50":..,"p95":..,"count":..}}
     results: list[ModelHealthResult]
 
 
 # ── Internals ─────────────────────────────────────────────────────────────────
 
 def _extract_upstream_status(exc: Exception) -> int | None:
+    # httpx.HTTPStatusError carries .response directly
+    if hasattr(exc, "response"):
+        return getattr(exc.response, "status_code", None)
     cause = getattr(exc, "__cause__", None)
     return getattr(getattr(cause, "response", None), "status_code", None)
 
 
 def _extract_upstream_body(exc: Exception) -> str | None:
-    cause = getattr(exc, "__cause__", None)
-    body = getattr(getattr(cause, "response", None), "text", None)
+    resp = getattr(exc, "response", None) or getattr(
+        getattr(exc, "__cause__", None), "response", None
+    )
+    body = getattr(resp, "text", None)
     return body[:300] if body else None
 
 
@@ -117,108 +202,36 @@ def _latency_stats(lats: list[int]) -> dict:
     }
 
 
-async def _test_completions(ctx: ModelTestContext) -> ModelHealthResult:
-    """Test the chat-completions path for a single model. Never raises."""
-    structlog.contextvars.bind_contextvars(
-        model_id=ctx.model_id, provider=ctx.provider, test_type="completions"
-    )
-    start = time.monotonic()
-    try:
-        api_key = await resolve_upstream_key(owner="health-check", provider=ctx.provider, db=None)
-        adapter = get_adapter(ctx.provider)
-        request = ChatCompletionRequest(
-            model=ctx.model_id,
-            messages=_TEST_MESSAGES,
-            max_tokens=_MAX_TOKENS,
-            stream=False,
-        )
-        await asyncio.wait_for(
-            adapter.chat_completion(request, api_key=api_key, provider_model_id=ctx.provider_model_id),
-            timeout=_TIMEOUT_S,
-        )
-        return ModelHealthResult(
-            model_id=ctx.model_id,
-            model_type=ctx.model_type,
-            test_type="completions",
-            status="pass",
-            latency_ms=int((time.monotonic() - start) * 1000),
-            provider=ctx.provider,
-        )
-    except asyncio.TimeoutError:
-        latency_ms = int((time.monotonic() - start) * 1000)
-        logger.warning(
-            "model_health_timeout",
-            test_type="completions",
-            timeout_s=_TIMEOUT_S,
-            latency_ms=latency_ms,
-        )
-        return ModelHealthResult(
-            model_id=ctx.model_id, model_type=ctx.model_type, test_type="completions",
-            status="timeout", latency_ms=latency_ms, provider=ctx.provider,
-        )
-    except Exception as exc:
-        latency_ms = int((time.monotonic() - start) * 1000)
-        upstream_status = _extract_upstream_status(exc)
-        upstream_body = _extract_upstream_body(exc)
-        status = "degraded" if upstream_status == 429 else "fail"
-        log_fn = logger.warning if status == "degraded" else logger.exception
-        log_fn(
-            "model_health_fail",
-            test_type="completions",
-            latency_ms=latency_ms,
-            exc_type=type(exc).__name__,
-            error=str(exc),
-            upstream_status=upstream_status,
-            upstream_body=upstream_body,
-        )
-        return ModelHealthResult(
-            model_id=ctx.model_id, model_type=ctx.model_type, test_type="completions",
-            status=status, latency_ms=latency_ms,
-            error=str(exc), provider=ctx.provider,
-            upstream_status=upstream_status, upstream_body=upstream_body,
-        )
-
-
-async def _test_responses(
+async def _test_endpoint(
     ctx: ModelTestContext,
-    responses_provider_model_id: str | None,
+    spec: EndpointSpec,
+    rate_limiter: _RateLimiter | None = None,
 ) -> ModelHealthResult:
-    """Test the responses API path for a single model. Never raises."""
+    """Test a single inference endpoint for one model. Never raises."""
+    if rate_limiter is not None:
+        await rate_limiter.acquire()
     structlog.contextvars.bind_contextvars(
-        model_id=ctx.model_id, provider=ctx.provider, test_type="responses"
+        model_id=ctx.model_id, provider=ctx.provider, test_type=spec.test_type
     )
     start = time.monotonic()
     try:
-        api_key = await resolve_upstream_key(owner="health-check", provider=ctx.provider, db=None)
-        adapter = get_adapter(ctx.provider)
-        request = ResponsesRequest(
-            model=ctx.model_id,
-            input=_TEST_RESPONSES_INPUT,
-            max_output_tokens=_MAX_TOKENS,
-            stream=False,
-        )
-        await asyncio.wait_for(
-            adapter.responses_create(request, api_key=api_key, provider_model_id=responses_provider_model_id),
-            timeout=_TIMEOUT_S,
-        )
+        client = _get_self_client()
+        resp = await client.post(spec.path, json=spec.payload_fn(ctx))
+        resp.raise_for_status()
         return ModelHealthResult(
             model_id=ctx.model_id,
             model_type=ctx.model_type,
-            test_type="responses",
+            test_type=spec.test_type,
             status="pass",
             latency_ms=int((time.monotonic() - start) * 1000),
             provider=ctx.provider,
         )
-    except asyncio.TimeoutError:
+    except httpx.TimeoutException:
         latency_ms = int((time.monotonic() - start) * 1000)
-        logger.warning(
-            "model_health_timeout",
-            test_type="responses",
-            timeout_s=_TIMEOUT_S,
-            latency_ms=latency_ms,
-        )
+        logger.warning("model_health_timeout", test_type=spec.test_type,
+                       timeout_s=_TIMEOUT_S, latency_ms=latency_ms)
         return ModelHealthResult(
-            model_id=ctx.model_id, model_type=ctx.model_type, test_type="responses",
+            model_id=ctx.model_id, model_type=ctx.model_type, test_type=spec.test_type,
             status="timeout", latency_ms=latency_ms, provider=ctx.provider,
         )
     except Exception as exc:
@@ -227,77 +240,11 @@ async def _test_responses(
         upstream_body = _extract_upstream_body(exc)
         status = "degraded" if upstream_status == 429 else "fail"
         log_fn = logger.warning if status == "degraded" else logger.exception
-        log_fn(
-            "model_health_fail",
-            test_type="responses",
-            latency_ms=latency_ms,
-            exc_type=type(exc).__name__,
-            error=str(exc),
-            upstream_status=upstream_status,
-            upstream_body=upstream_body,
-        )
+        log_fn("model_health_fail", test_type=spec.test_type, latency_ms=latency_ms,
+               exc_type=type(exc).__name__, error=str(exc),
+               upstream_status=upstream_status, upstream_body=upstream_body)
         return ModelHealthResult(
-            model_id=ctx.model_id, model_type=ctx.model_type, test_type="responses",
-            status=status, latency_ms=latency_ms,
-            error=str(exc), provider=ctx.provider,
-            upstream_status=upstream_status, upstream_body=upstream_body,
-        )
-
-
-async def _test_embeddings(ctx: ModelTestContext) -> ModelHealthResult:
-    """Test the embeddings path for a single model. Never raises."""
-    structlog.contextvars.bind_contextvars(
-        model_id=ctx.model_id, provider=ctx.provider, test_type="embeddings"
-    )
-    start = time.monotonic()
-    try:
-        api_key = await resolve_upstream_key(owner="health-check", provider=ctx.provider, db=None)
-        adapter = get_adapter(ctx.provider)
-        request = EmbeddingsRequest(
-            model=ctx.model_id,
-            input=_TEST_EMBEDDINGS_INPUT,
-        )
-        await asyncio.wait_for(
-            adapter.embeddings(request, api_key=api_key, provider_model_id=ctx.provider_model_id),
-            timeout=_TIMEOUT_S,
-        )
-        return ModelHealthResult(
-            model_id=ctx.model_id,
-            model_type=ctx.model_type,
-            test_type="embeddings",
-            status="pass",
-            latency_ms=int((time.monotonic() - start) * 1000),
-            provider=ctx.provider,
-        )
-    except asyncio.TimeoutError:
-        latency_ms = int((time.monotonic() - start) * 1000)
-        logger.warning(
-            "model_health_timeout",
-            test_type="embeddings",
-            timeout_s=_TIMEOUT_S,
-            latency_ms=latency_ms,
-        )
-        return ModelHealthResult(
-            model_id=ctx.model_id, model_type=ctx.model_type, test_type="embeddings",
-            status="timeout", latency_ms=latency_ms, provider=ctx.provider,
-        )
-    except Exception as exc:
-        latency_ms = int((time.monotonic() - start) * 1000)
-        upstream_status = _extract_upstream_status(exc)
-        upstream_body = _extract_upstream_body(exc)
-        status = "degraded" if upstream_status == 429 else "fail"
-        log_fn = logger.warning if status == "degraded" else logger.exception
-        log_fn(
-            "model_health_fail",
-            test_type="embeddings",
-            latency_ms=latency_ms,
-            exc_type=type(exc).__name__,
-            error=str(exc),
-            upstream_status=upstream_status,
-            upstream_body=upstream_body,
-        )
-        return ModelHealthResult(
-            model_id=ctx.model_id, model_type=ctx.model_type, test_type="embeddings",
+            model_id=ctx.model_id, model_type=ctx.model_type, test_type=spec.test_type,
             status=status, latency_ms=latency_ms,
             error=str(exc), provider=ctx.provider,
             upstream_status=upstream_status, upstream_body=upstream_body,
@@ -398,7 +345,20 @@ async def run_model_health(
     Test all enabled models and send results to Slack.
     Triggered by Cloud Scheduler every 6 hours.
     """
-    logger.info("model_health_check_started")
+    logger.info(
+        "model_health_check_started",
+        mode="self" if settings.health_check_self_url else "direct",
+    )
+
+    if not settings.health_check_self_url or not settings.health_check_api_key:
+        logger.error(
+            "model_health_misconfigured",
+            reason="HEALTH_CHECK_SELF_URL and HEALTH_CHECK_API_KEY must both be set",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="HEALTH_CHECK_SELF_URL and HEALTH_CHECK_API_KEY are required for model health checks",
+        )
 
     # Query all enabled models joined with ALL their model_prices rows so that
     # every (model, provider) combination is tested independently.
@@ -410,8 +370,6 @@ async def run_model_health(
                 Model.model_id,
                 Model.model_type,
                 ModelPrice.provider,
-                ModelPrice.provider_model_id,
-                ModelPrice.responses_provider_model_id,
                 ModelPrice.supports_completions_api,
                 ModelPrice.supports_responses_api,
                 ModelPrice.supports_embeddings_api,
@@ -424,6 +382,7 @@ async def run_model_health(
     logger.info("model_health_models_fetched", count=len(model_rows))
 
     # Build a flat list of (ctx, test_type, coro) tuples.
+    rate_limiter = _RateLimiter(settings.health_check_rpm)
     Task = tuple[ModelTestContext, str, Coroutine]
     tasks: list[Task] = []
     for row in model_rows:
@@ -431,23 +390,26 @@ async def run_model_health(
             model_id=row.model_id,
             model_type=row.model_type or "unknown",
             provider=row.provider or "openrouter",
-            provider_model_id=row.provider_model_id,
         )
         # Null means no pricing row — default to completions=True, others=False.
         supports_completions = row.supports_completions_api if row.supports_completions_api is not None else True
         supports_responses   = row.supports_responses_api   if row.supports_responses_api   is not None else False
         supports_embeddings  = row.supports_embeddings_api  if row.supports_embeddings_api  is not None else False
 
-        if supports_completions:
-            tasks.append((ctx, "completions", _test_completions(ctx)))
-        if supports_responses:
-            tasks.append((ctx, "responses",
-                          _test_responses(ctx, row.responses_provider_model_id or row.provider_model_id)))
-        if supports_embeddings:
-            tasks.append((ctx, "embeddings", _test_embeddings(ctx)))
-        if not (supports_completions or supports_responses or supports_embeddings):
+        enabled = {
+            "completions": supports_completions,
+            "responses": supports_responses,
+            "embeddings": supports_embeddings,
+        }
+        any_enabled = False
+        for test_type, supported in enabled.items():
+            if supported:
+                spec = _SPEC_BY_TYPE[test_type]
+                tasks.append((ctx, test_type, _test_endpoint(ctx, spec, rate_limiter)))
+                any_enabled = True
+        if not any_enabled:
             # No flags set at all — fall back to a completions test.
-            tasks.append((ctx, "completions", _test_completions(ctx)))
+            tasks.append((ctx, "completions", _test_endpoint(ctx, _SPEC_BY_TYPE["completions"], rate_limiter)))
 
     # Batched concurrency — _CONCURRENCY tasks tested in parallel per batch.
     results: list[ModelHealthResult] = []
@@ -479,15 +441,13 @@ async def run_model_health(
         int(sum(r.latency_ms for r in passed) / len(passed)) if passed else 0
     )
 
-    # Per-(model_type, test_type) p50/p95 latency stats (passing results only).
-    # Keyed as "{model_type}/{test_type}" so a model supporting both completions
-    # and responses doesn't inflate a single bucket or skew its percentiles.
+    # Per-(model_type/test_type) p50/p95 latency stats (passing results only).
     type_lats: dict[str, list[int]] = defaultdict(list)
     for r in passed:
         type_lats[f"{r.model_type}/{r.test_type}"].append(r.latency_ms)
     latency_by_model_type = {t: _latency_stats(lats) for t, lats in type_lats.items()}
 
-    # Slowest passing result per (model_type, test_type) for Slack body
+    # Slowest passing result per (model_type/test_type) for Slack body
     slowest: dict[str, ModelHealthResult] = {}
     for r in passed:
         key = f"{r.model_type}/{r.test_type}"
@@ -513,11 +473,9 @@ async def run_model_health(
     slack_lines: list[str] = []
     if non_passing:
         for r in non_passing:
-            detail = ""
-            if r.provider:
-                detail = f" {r.provider}"
-                if r.upstream_status:
-                    detail += f" → HTTP {r.upstream_status}"
+            detail = f" {r.provider}" if r.provider else ""
+            if r.upstream_status:
+                detail += f" → HTTP {r.upstream_status}"
             if r.status == "timeout":
                 detail += f" ({_TIMEOUT_S}s timeout)"
             err_str = f": {r.error}" if r.error and r.status not in ("timeout", "degraded") else ""
