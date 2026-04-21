@@ -69,9 +69,10 @@ def _get_self_client() -> httpx.AsyncClient:
 
 # ── Rate limiter ─────────────────────────────────────────────────────────────
 
+
 class _RateLimiter:
     """Fixed-window counter: allows up to `rpm` requests to burst immediately,
-    then blocks until the 60s window resets."""
+    then blocks until the 70s window resets."""
 
     def __init__(self, rpm: int) -> None:
         self._rpm = rpm
@@ -82,11 +83,11 @@ class _RateLimiter:
     async def acquire(self) -> None:
         async with self._lock:
             now = time.monotonic()
-            if now - self._window_start >= 60.0:
+            if now - self._window_start >= 70.0:
                 self._window_start = now
                 self._count = 0
             if self._count >= self._rpm:
-                wait = 60.0 - (time.monotonic() - self._window_start)
+                wait = 70.0 - (time.monotonic() - self._window_start)
                 if wait > 0:
                     await asyncio.sleep(wait)
                 self._window_start = time.monotonic()
@@ -96,10 +97,11 @@ class _RateLimiter:
 
 # ── Context & endpoint specs ──────────────────────────────────────────────────
 
+
 @dataclass
 class ModelTestContext:
     model_id: str
-    model_type: str   # default "unknown" if DB row missing
+    model_type: str  # default "unknown" if DB row missing
     provider: str
 
 
@@ -146,11 +148,12 @@ _SPEC_BY_TYPE: dict[str, EndpointSpec] = {s.test_type: s for s in _ENDPOINT_SPEC
 
 # ── Response schema ───────────────────────────────────────────────────────────
 
+
 class ModelHealthResult(BaseModel):
     model_id: str
     model_type: str = "unknown"
-    test_type: str = "completions"   # "completions" | "responses" | "embeddings"
-    status: str          # "pass" | "fail" | "timeout" | "degraded"
+    test_type: str = "completions"  # "completions" | "responses" | "embeddings"
+    status: str  # "pass" | "fail" | "timeout" | "degraded"
     latency_ms: int
     error: str | None = None
     provider: str | None = None
@@ -164,11 +167,14 @@ class ModelHealthResponse(BaseModel):
     failed: int
     pass_rate: str
     avg_latency_ms: int
-    latency_by_model_type: dict[str, dict]   # {"text/completions": {"p50":..,"p95":..,"count":..}}
+    latency_by_model_type: dict[
+        str, dict
+    ]  # {"text/completions": {"p50":..,"p95":..,"count":..}}
     results: list[ModelHealthResult]
 
 
 # ── Internals ─────────────────────────────────────────────────────────────────
+
 
 def _extract_upstream_status(exc: Exception) -> int | None:
     # httpx.HTTPStatusError carries .response directly
@@ -228,11 +234,19 @@ async def _test_endpoint(
         )
     except httpx.TimeoutException:
         latency_ms = int((time.monotonic() - start) * 1000)
-        logger.warning("model_health_timeout", test_type=spec.test_type,
-                       timeout_s=_TIMEOUT_S, latency_ms=latency_ms)
+        logger.warning(
+            "model_health_timeout",
+            test_type=spec.test_type,
+            timeout_s=_TIMEOUT_S,
+            latency_ms=latency_ms,
+        )
         return ModelHealthResult(
-            model_id=ctx.model_id, model_type=ctx.model_type, test_type=spec.test_type,
-            status="timeout", latency_ms=latency_ms, provider=ctx.provider,
+            model_id=ctx.model_id,
+            model_type=ctx.model_type,
+            test_type=spec.test_type,
+            status="timeout",
+            latency_ms=latency_ms,
+            provider=ctx.provider,
         )
     except Exception as exc:
         latency_ms = int((time.monotonic() - start) * 1000)
@@ -240,14 +254,25 @@ async def _test_endpoint(
         upstream_body = _extract_upstream_body(exc)
         status = "degraded" if upstream_status == 429 else "fail"
         log_fn = logger.warning if status == "degraded" else logger.exception
-        log_fn("model_health_fail", test_type=spec.test_type, latency_ms=latency_ms,
-               exc_type=type(exc).__name__, error=str(exc),
-               upstream_status=upstream_status, upstream_body=upstream_body)
+        log_fn(
+            "model_health_fail",
+            test_type=spec.test_type,
+            latency_ms=latency_ms,
+            exc_type=type(exc).__name__,
+            error=str(exc),
+            upstream_status=upstream_status,
+            upstream_body=upstream_body,
+        )
         return ModelHealthResult(
-            model_id=ctx.model_id, model_type=ctx.model_type, test_type=spec.test_type,
-            status=status, latency_ms=latency_ms,
-            error=str(exc), provider=ctx.provider,
-            upstream_status=upstream_status, upstream_body=upstream_body,
+            model_id=ctx.model_id,
+            model_type=ctx.model_type,
+            test_type=spec.test_type,
+            status=status,
+            latency_ms=latency_ms,
+            error=str(exc),
+            provider=ctx.provider,
+            upstream_status=upstream_status,
+            upstream_body=upstream_body,
         )
 
 
@@ -272,22 +297,28 @@ def _build_csv(results: list[ModelHealthResult], run_ts: datetime) -> str:
     writer = csv.DictWriter(buf, fieldnames=fieldnames, lineterminator="\n")
     writer.writeheader()
     for r in results:
-        writer.writerow({
-            "run_timestamp": run_ts.isoformat(),
-            "model_id": r.model_id,
-            "model_type": r.model_type,
-            "test_type": r.test_type,
-            "status": r.status,
-            "provider": r.provider or "",
-            "latency_ms": r.latency_ms,
-            "upstream_status": r.upstream_status if r.upstream_status is not None else "",
-            "upstream_body": r.upstream_body or "",
-            "error": r.error or "",
-        })
+        writer.writerow(
+            {
+                "run_timestamp": run_ts.isoformat(),
+                "model_id": r.model_id,
+                "model_type": r.model_type,
+                "test_type": r.test_type,
+                "status": r.status,
+                "provider": r.provider or "",
+                "latency_ms": r.latency_ms,
+                "upstream_status": (
+                    r.upstream_status if r.upstream_status is not None else ""
+                ),
+                "upstream_body": r.upstream_body or "",
+                "error": r.error or "",
+            }
+        )
     return buf.getvalue()
 
 
-async def _upload_results_csv(results: list[ModelHealthResult], run_ts: datetime) -> str | None:
+async def _upload_results_csv(
+    results: list[ModelHealthResult], run_ts: datetime
+) -> str | None:
     """Build and upload the results CSV; return the GCS URL or None on failure."""
     bucket = settings.gcs_health_check_bucket
     if not bucket:
@@ -336,6 +367,7 @@ async def _guarded(
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
+
 
 @router.post("/v1/model-health/run", response_model=ModelHealthResponse)
 async def run_model_health(
@@ -392,9 +424,21 @@ async def run_model_health(
             provider=row.provider or "openrouter",
         )
         # Null means no pricing row — default to completions=True, others=False.
-        supports_completions = row.supports_completions_api if row.supports_completions_api is not None else True
-        supports_responses   = row.supports_responses_api   if row.supports_responses_api   is not None else False
-        supports_embeddings  = row.supports_embeddings_api  if row.supports_embeddings_api  is not None else False
+        supports_completions = (
+            row.supports_completions_api
+            if row.supports_completions_api is not None
+            else True
+        )
+        supports_responses = (
+            row.supports_responses_api
+            if row.supports_responses_api is not None
+            else False
+        )
+        supports_embeddings = (
+            row.supports_embeddings_api
+            if row.supports_embeddings_api is not None
+            else False
+        )
 
         enabled = {
             "completions": supports_completions,
@@ -409,7 +453,13 @@ async def run_model_health(
                 any_enabled = True
         if not any_enabled:
             # No flags set at all — fall back to a completions test.
-            tasks.append((ctx, "completions", _test_endpoint(ctx, _SPEC_BY_TYPE["completions"], rate_limiter)))
+            tasks.append(
+                (
+                    ctx,
+                    "completions",
+                    _test_endpoint(ctx, _SPEC_BY_TYPE["completions"], rate_limiter),
+                )
+            )
 
     # Batched concurrency — _CONCURRENCY tasks tested in parallel per batch.
     results: list[ModelHealthResult] = []
@@ -437,9 +487,7 @@ async def run_model_health(
     not_working = pure_fails + timeouts
     total = len(results)
     pass_rate = f"{(len(passed) / total * 100):.1f}%" if total else "0.0%"
-    avg_latency = (
-        int(sum(r.latency_ms for r in passed) / len(passed)) if passed else 0
-    )
+    avg_latency = int(sum(r.latency_ms for r in passed) / len(passed)) if passed else 0
 
     # Per-(model_type/test_type) p50/p95 latency stats (passing results only).
     type_lats: dict[str, list[int]] = defaultdict(list)
@@ -478,8 +526,14 @@ async def run_model_health(
                 detail += f" → HTTP {r.upstream_status}"
             if r.status == "timeout":
                 detail += f" ({_TIMEOUT_S}s timeout)"
-            err_str = f": {r.error}" if r.error and r.status not in ("timeout", "degraded") else ""
-            slack_lines.append(f"• `{r.model_id}` [{r.test_type}] [{r.status}]{detail}{err_str}")
+            err_str = (
+                f": {r.error}"
+                if r.error and r.status not in ("timeout", "degraded")
+                else ""
+            )
+            slack_lines.append(
+                f"• `{r.model_id}` [{r.test_type}] [{r.status}]{detail}{err_str}"
+            )
 
     if slowest:
         slack_lines.append("")
@@ -498,10 +552,12 @@ async def run_model_health(
         {"label": "Degraded (rate-limited)", "value": str(len(degraded))},
     ]
     for key, stats in sorted(latency_by_model_type.items()):
-        fields.append({
-            "label": f"Latency — {key.upper()}",
-            "value": f"p50: {stats['p50']}ms | p95: {stats['p95']}ms | n={stats['count']}",
-        })
+        fields.append(
+            {
+                "label": f"Latency — {key.upper()}",
+                "value": f"p50: {stats['p50']}ms | p95: {stats['p95']}ms | n={stats['count']}",
+            }
+        )
     if csv_url:
         fields.append({"label": "Full Results (CSV)", "value": csv_url})
 
@@ -509,7 +565,9 @@ async def run_model_health(
         title=f"Model Health Check — {len(passed)}/{total} passed",
         fields=fields,
         message=slack_body,
-        notify_here=bool(not_working),  # only page for genuine failures/timeouts, not 429s
+        notify_here=bool(
+            not_working
+        ),  # only page for genuine failures/timeouts, not 429s
     )
 
     return ModelHealthResponse(
