@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.control_plane import get_admin_user
-from app.db.models import UsageEvent
+from app.db.models import UsageEvent, User
 from app.db.session import get_db_session
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_admin_user)])
@@ -20,6 +20,8 @@ router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_ad
 class ErrorLogRow(BaseModel):
     id: str
     request_id: str
+    user_id: str | None
+    email: str | None
     model: str
     provider: str
     error_code: str | None
@@ -35,7 +37,8 @@ async def get_error_logs(
 ):
     """Recent error usage_events, newest first."""
     rows = await db.execute(
-        select(UsageEvent)
+        select(UsageEvent, User.email)
+        .join(User, UsageEvent.user_id == User.id, isouter=True)
         .where(UsageEvent.status == "error")
         .order_by(UsageEvent.created_at.desc())
         .limit(limit)
@@ -44,6 +47,8 @@ async def get_error_logs(
         ErrorLogRow(
             id=str(r.id),
             request_id=r.request_id,
+            user_id=r.user_id,
+            email=email,
             model=r.model,
             provider=r.provider,
             error_code=r.error_code,
@@ -51,5 +56,5 @@ async def get_error_logs(
             latency_ms=r.latency_ms,
             created_at=r.created_at.isoformat(),
         )
-        for r in rows.scalars().all()
+        for r, email in rows.all()
     ]
