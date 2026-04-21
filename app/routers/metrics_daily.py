@@ -25,8 +25,7 @@ from sqlalchemy import func, select, case
 
 from app.auth.dependencies import verify_webhook_key
 from app.db.engine import get_session_factory
-from app.db.models import PaymentEvent, User, UsageEvent, CurrencyConversionRate
-from app.db.models import PaymentEvent, User, UsageEvent, CurrencyConversionRate
+from app.db.models import PaymentEvent, User, UsageEvent, CurrencyConversionRate, Model
 from app.notifications.slack import send_slack_alert
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -49,6 +48,7 @@ class DailySummaryMetrics(BaseModel):
     revenue_usd: float
     payments_received_usd: float
     error_code_counts: dict[str, int]  # error_code → count, sorted by count desc
+    latency_by_model_type: dict[str, dict] = {}  # model_type → {p50, p95, count}
     timestamp: datetime
     start_ist: datetime        # Start of the 10AM–10AM IST window
 
@@ -174,6 +174,29 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
         payments_result = await session.execute(payments_query)
         payments_received_usd = float(payments_result.scalar() or 0)
 
+        # Query 6: p50/p95 latency per model type (successful requests only)
+        latency_result = await session.execute(
+            select(
+                Model.model_type,
+                func.percentile_cont(0.5).within_group(UsageEvent.latency_ms).label("p50"),
+                func.percentile_cont(0.95).within_group(UsageEvent.latency_ms).label("p95"),
+                func.count(UsageEvent.id).label("count"),
+            )
+            .join(Model, UsageEvent.model == Model.model_id)
+            .where(
+                UsageEvent.created_at >= today_start,
+                UsageEvent.created_at < today_end,
+                UsageEvent.status == "success",
+                UsageEvent.latency_ms.isnot(None),
+            )
+            .group_by(Model.model_type)
+        )
+        latency_by_model_type: dict[str, dict] = {
+            row.model_type: {"p50": int(row.p50), "p95": int(row.p95), "count": row.count}
+            for row in latency_result.all()
+            if row.model_type is not None
+        }
+
     return DailySummaryMetrics(
         users_onboarded=users_onboarded,
         requests_processed=requests_processed,
@@ -186,6 +209,7 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
         revenue_usd=revenue_usd,
         payments_received_usd=payments_received_usd,
         error_code_counts=error_code_counts,
+        latency_by_model_type=latency_by_model_type,
         timestamp=datetime.now(UTC),
         start_ist=start_ist,
     )
@@ -224,6 +248,11 @@ async def run_daily_metrics(
         {"label": "Revenue (USD)", "value": f"${metrics.revenue_usd:.4f}"},
         {"label": "Payments Received (USD)", "value": f"${metrics.payments_received_usd:.4f}"},
     ]
+    for model_type, stats in sorted(metrics.latency_by_model_type.items()):
+        fields.append({
+            "label": f"Latency — {model_type.upper()}",
+            "value": f"p50: {stats['p50']}ms | p95: {stats['p95']}ms | n={stats['count']}",
+        })
 
     # Optional message: low success rate warning + error code breakdown
     message_parts: list[str] = []
