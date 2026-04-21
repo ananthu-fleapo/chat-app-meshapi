@@ -16,8 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import math
+import statistics
 import time
+from collections import defaultdict
 from collections.abc import Coroutine
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import structlog
@@ -50,10 +54,21 @@ _TEST_EMBEDDINGS_INPUT = "Hello"
 _MAX_TOKENS = 1024
 
 
+# ── Context ───────────────────────────────────────────────────────────────────
+
+@dataclass
+class ModelTestContext:
+    model_id: str
+    model_type: str          # default "unknown" if DB row missing
+    provider: str
+    provider_model_id: str | None
+
+
 # ── Response schema ───────────────────────────────────────────────────────────
 
 class ModelHealthResult(BaseModel):
     model_id: str
+    model_type: str = "unknown"
     test_type: str = "completions"   # "completions" | "responses" | "embeddings"
     status: str          # "pass" | "fail" | "timeout" | "degraded"
     latency_ms: int
@@ -69,6 +84,7 @@ class ModelHealthResponse(BaseModel):
     failed: int
     pass_rate: str
     avg_latency_ms: int
+    latency_by_model_type: dict[str, dict]   # {"text": {"p50":..,"p95":..,"count":..}}
     results: list[ModelHealthResult]
 
 
@@ -85,35 +101,48 @@ def _extract_upstream_body(exc: Exception) -> str | None:
     return body[:300] if body else None
 
 
-async def _test_completions(
-    model_id: str,
-    provider: str,
-    provider_model_id: str | None,
-) -> ModelHealthResult:
+def _percentile(sorted_lats: list[int], p: float) -> int:
+    if not sorted_lats:
+        return 0
+    idx = max(0, math.ceil(p * len(sorted_lats)) - 1)
+    return sorted_lats[idx]
+
+
+def _latency_stats(lats: list[int]) -> dict:
+    s = sorted(lats)
+    return {
+        "p50": int(statistics.median(s)),
+        "p95": _percentile(s, 0.95),
+        "count": len(s),
+    }
+
+
+async def _test_completions(ctx: ModelTestContext) -> ModelHealthResult:
     """Test the chat-completions path for a single model. Never raises."""
     structlog.contextvars.bind_contextvars(
-        model_id=model_id, provider=provider, test_type="completions"
+        model_id=ctx.model_id, provider=ctx.provider, test_type="completions"
     )
     start = time.monotonic()
     try:
-        api_key = await resolve_upstream_key(owner="health-check", provider=provider, db=None)
-        adapter = get_adapter(provider)
+        api_key = await resolve_upstream_key(owner="health-check", provider=ctx.provider, db=None)
+        adapter = get_adapter(ctx.provider)
         request = ChatCompletionRequest(
-            model=model_id,
+            model=ctx.model_id,
             messages=_TEST_MESSAGES,
             max_tokens=_MAX_TOKENS,
             stream=False,
         )
         await asyncio.wait_for(
-            adapter.chat_completion(request, api_key=api_key, provider_model_id=provider_model_id),
+            adapter.chat_completion(request, api_key=api_key, provider_model_id=ctx.provider_model_id),
             timeout=_TIMEOUT_S,
         )
         return ModelHealthResult(
-            model_id=model_id,
+            model_id=ctx.model_id,
+            model_type=ctx.model_type,
             test_type="completions",
             status="pass",
             latency_ms=int((time.monotonic() - start) * 1000),
-            provider=provider,
+            provider=ctx.provider,
         )
     except asyncio.TimeoutError:
         latency_ms = int((time.monotonic() - start) * 1000)
@@ -124,8 +153,8 @@ async def _test_completions(
             latency_ms=latency_ms,
         )
         return ModelHealthResult(
-            model_id=model_id, test_type="completions",
-            status="timeout", latency_ms=latency_ms, provider=provider,
+            model_id=ctx.model_id, model_type=ctx.model_type, test_type="completions",
+            status="timeout", latency_ms=latency_ms, provider=ctx.provider,
         )
     except Exception as exc:
         latency_ms = int((time.monotonic() - start) * 1000)
@@ -143,42 +172,42 @@ async def _test_completions(
             upstream_body=upstream_body,
         )
         return ModelHealthResult(
-            model_id=model_id, test_type="completions",
+            model_id=ctx.model_id, model_type=ctx.model_type, test_type="completions",
             status=status, latency_ms=latency_ms,
-            error=str(exc), provider=provider,
+            error=str(exc), provider=ctx.provider,
             upstream_status=upstream_status, upstream_body=upstream_body,
         )
 
 
 async def _test_responses(
-    model_id: str,
-    provider: str,
-    provider_model_id: str | None,
+    ctx: ModelTestContext,
+    responses_provider_model_id: str | None,
 ) -> ModelHealthResult:
     """Test the responses API path for a single model. Never raises."""
     structlog.contextvars.bind_contextvars(
-        model_id=model_id, provider=provider, test_type="responses"
+        model_id=ctx.model_id, provider=ctx.provider, test_type="responses"
     )
     start = time.monotonic()
     try:
-        api_key = await resolve_upstream_key(owner="health-check", provider=provider, db=None)
-        adapter = get_adapter(provider)
+        api_key = await resolve_upstream_key(owner="health-check", provider=ctx.provider, db=None)
+        adapter = get_adapter(ctx.provider)
         request = ResponsesRequest(
-            model=model_id,
+            model=ctx.model_id,
             input=_TEST_RESPONSES_INPUT,
             max_output_tokens=_MAX_TOKENS,
             stream=False,
         )
         await asyncio.wait_for(
-            adapter.responses_create(request, api_key=api_key, provider_model_id=provider_model_id),
+            adapter.responses_create(request, api_key=api_key, provider_model_id=responses_provider_model_id),
             timeout=_TIMEOUT_S,
         )
         return ModelHealthResult(
-            model_id=model_id,
+            model_id=ctx.model_id,
+            model_type=ctx.model_type,
             test_type="responses",
             status="pass",
             latency_ms=int((time.monotonic() - start) * 1000),
-            provider=provider,
+            provider=ctx.provider,
         )
     except asyncio.TimeoutError:
         latency_ms = int((time.monotonic() - start) * 1000)
@@ -189,8 +218,8 @@ async def _test_responses(
             latency_ms=latency_ms,
         )
         return ModelHealthResult(
-            model_id=model_id, test_type="responses",
-            status="timeout", latency_ms=latency_ms, provider=provider,
+            model_id=ctx.model_id, model_type=ctx.model_type, test_type="responses",
+            status="timeout", latency_ms=latency_ms, provider=ctx.provider,
         )
     except Exception as exc:
         latency_ms = int((time.monotonic() - start) * 1000)
@@ -208,40 +237,37 @@ async def _test_responses(
             upstream_body=upstream_body,
         )
         return ModelHealthResult(
-            model_id=model_id, test_type="responses",
+            model_id=ctx.model_id, model_type=ctx.model_type, test_type="responses",
             status=status, latency_ms=latency_ms,
-            error=str(exc), provider=provider,
+            error=str(exc), provider=ctx.provider,
             upstream_status=upstream_status, upstream_body=upstream_body,
         )
 
 
-async def _test_embeddings(
-    model_id: str,
-    provider: str,
-    provider_model_id: str | None,
-) -> ModelHealthResult:
+async def _test_embeddings(ctx: ModelTestContext) -> ModelHealthResult:
     """Test the embeddings path for a single model. Never raises."""
     structlog.contextvars.bind_contextvars(
-        model_id=model_id, provider=provider, test_type="embeddings"
+        model_id=ctx.model_id, provider=ctx.provider, test_type="embeddings"
     )
     start = time.monotonic()
     try:
-        api_key = await resolve_upstream_key(owner="health-check", provider=provider, db=None)
-        adapter = get_adapter(provider)
+        api_key = await resolve_upstream_key(owner="health-check", provider=ctx.provider, db=None)
+        adapter = get_adapter(ctx.provider)
         request = EmbeddingsRequest(
-            model=model_id,
+            model=ctx.model_id,
             input=_TEST_EMBEDDINGS_INPUT,
         )
         await asyncio.wait_for(
-            adapter.embeddings(request, api_key=api_key, provider_model_id=provider_model_id),
+            adapter.embeddings(request, api_key=api_key, provider_model_id=ctx.provider_model_id),
             timeout=_TIMEOUT_S,
         )
         return ModelHealthResult(
-            model_id=model_id,
+            model_id=ctx.model_id,
+            model_type=ctx.model_type,
             test_type="embeddings",
             status="pass",
             latency_ms=int((time.monotonic() - start) * 1000),
-            provider=provider,
+            provider=ctx.provider,
         )
     except asyncio.TimeoutError:
         latency_ms = int((time.monotonic() - start) * 1000)
@@ -252,8 +278,8 @@ async def _test_embeddings(
             latency_ms=latency_ms,
         )
         return ModelHealthResult(
-            model_id=model_id, test_type="embeddings",
-            status="timeout", latency_ms=latency_ms, provider=provider,
+            model_id=ctx.model_id, model_type=ctx.model_type, test_type="embeddings",
+            status="timeout", latency_ms=latency_ms, provider=ctx.provider,
         )
     except Exception as exc:
         latency_ms = int((time.monotonic() - start) * 1000)
@@ -271,9 +297,9 @@ async def _test_embeddings(
             upstream_body=upstream_body,
         )
         return ModelHealthResult(
-            model_id=model_id, test_type="embeddings",
+            model_id=ctx.model_id, model_type=ctx.model_type, test_type="embeddings",
             status=status, latency_ms=latency_ms,
-            error=str(exc), provider=provider,
+            error=str(exc), provider=ctx.provider,
             upstream_status=upstream_status, upstream_body=upstream_body,
         )
 
@@ -286,6 +312,7 @@ def _build_csv(results: list[ModelHealthResult], run_ts: datetime) -> str:
     fieldnames = [
         "run_timestamp",
         "model_id",
+        "model_type",
         "test_type",
         "status",
         "provider",
@@ -301,6 +328,7 @@ def _build_csv(results: list[ModelHealthResult], run_ts: datetime) -> str:
         writer.writerow({
             "run_timestamp": run_ts.isoformat(),
             "model_id": r.model_id,
+            "model_type": r.model_type,
             "test_type": r.test_type,
             "status": r.status,
             "provider": r.provider or "",
@@ -328,9 +356,8 @@ async def _upload_results_csv(results: list[ModelHealthResult], run_ts: datetime
 
 async def _guarded(
     coro: Coroutine,
-    model_id: str,
+    ctx: ModelTestContext,
     test_type: str,
-    provider: str | None,
 ) -> ModelHealthResult:
     """Catch any unexpected exception that escapes a test function.
 
@@ -343,19 +370,21 @@ async def _guarded(
     except BaseException as exc:
         logger.error(
             "model_health_task_crashed",
-            model_id=model_id,
+            model_id=ctx.model_id,
+            model_type=ctx.model_type,
             test_type=test_type,
-            provider=provider,
+            provider=ctx.provider,
             error=str(exc),
             exc_info=exc,
         )
         return ModelHealthResult(
-            model_id=model_id,
+            model_id=ctx.model_id,
+            model_type=ctx.model_type,
             test_type=test_type,
             status="fail",
             latency_ms=0,
             error=f"internal error: {exc}",
-            provider=provider,
+            provider=ctx.provider,
         )
 
 
@@ -379,6 +408,7 @@ async def run_model_health(
         result = await session.execute(
             select(
                 Model.model_id,
+                Model.model_type,
                 ModelPrice.provider,
                 ModelPrice.provider_model_id,
                 ModelPrice.responses_provider_model_id,
@@ -393,32 +423,31 @@ async def run_model_health(
         model_rows = result.all()
     logger.info("model_health_models_fetched", count=len(model_rows))
 
-    # Build a flat list of (model_id, test_type, provider, coro) tuples.
-    # Storing metadata alongside each coroutine lets _guarded produce a
-    # meaningful ModelHealthResult if the task crashes unexpectedly.
-    Task = tuple[str, str, str | None, Coroutine]
+    # Build a flat list of (ctx, test_type, coro) tuples.
+    Task = tuple[ModelTestContext, str, Coroutine]
     tasks: list[Task] = []
     for row in model_rows:
-        provider = row.provider or "openrouter"
+        ctx = ModelTestContext(
+            model_id=row.model_id,
+            model_type=row.model_type or "unknown",
+            provider=row.provider or "openrouter",
+            provider_model_id=row.provider_model_id,
+        )
         # Null means no pricing row — default to completions=True, others=False.
         supports_completions = row.supports_completions_api if row.supports_completions_api is not None else True
         supports_responses   = row.supports_responses_api   if row.supports_responses_api   is not None else False
         supports_embeddings  = row.supports_embeddings_api  if row.supports_embeddings_api  is not None else False
 
         if supports_completions:
-            tasks.append((row.model_id, "completions", provider,
-                          _test_completions(row.model_id, provider, row.provider_model_id)))
+            tasks.append((ctx, "completions", _test_completions(ctx)))
         if supports_responses:
-            tasks.append((row.model_id, "responses", provider,
-                          _test_responses(row.model_id, provider,
-                                          row.responses_provider_model_id or row.provider_model_id)))
+            tasks.append((ctx, "responses",
+                          _test_responses(ctx, row.responses_provider_model_id or row.provider_model_id)))
         if supports_embeddings:
-            tasks.append((row.model_id, "embeddings", provider,
-                          _test_embeddings(row.model_id, provider, row.provider_model_id)))
+            tasks.append((ctx, "embeddings", _test_embeddings(ctx)))
         if not (supports_completions or supports_responses or supports_embeddings):
             # No flags set at all — fall back to a completions test.
-            tasks.append((row.model_id, "completions", provider,
-                          _test_completions(row.model_id, provider, row.provider_model_id)))
+            tasks.append((ctx, "completions", _test_completions(ctx)))
 
     # Batched concurrency — _CONCURRENCY tasks tested in parallel per batch.
     results: list[ModelHealthResult] = []
@@ -429,10 +458,10 @@ async def run_model_health(
         batch_results = await asyncio.gather(
             *[
                 asyncio.create_task(
-                    _guarded(coro, model_id, test_type, provider),
+                    _guarded(coro, ctx, test_type),
                     context=contextvars.copy_context(),
                 )
-                for model_id, test_type, provider, coro in batch
+                for ctx, test_type, coro in batch
             ],
             return_exceptions=False,  # _guarded never raises
         )
@@ -450,6 +479,21 @@ async def run_model_health(
         int(sum(r.latency_ms for r in passed) / len(passed)) if passed else 0
     )
 
+    # Per-(model_type, test_type) p50/p95 latency stats (passing results only).
+    # Keyed as "{model_type}/{test_type}" so a model supporting both completions
+    # and responses doesn't inflate a single bucket or skew its percentiles.
+    type_lats: dict[str, list[int]] = defaultdict(list)
+    for r in passed:
+        type_lats[f"{r.model_type}/{r.test_type}"].append(r.latency_ms)
+    latency_by_model_type = {t: _latency_stats(lats) for t, lats in type_lats.items()}
+
+    # Slowest passing result per (model_type, test_type) for Slack body
+    slowest: dict[str, ModelHealthResult] = {}
+    for r in passed:
+        key = f"{r.model_type}/{r.test_type}"
+        if key not in slowest or r.latency_ms > slowest[key].latency_ms:
+            slowest[key] = r
+
     logger.info(
         "model_health_check_completed",
         total=total,
@@ -466,9 +510,8 @@ async def run_model_health(
 
     # Build Slack message — group by status for clarity
     non_passing = not_working + degraded
-    failed_message: str | None = None
+    slack_lines: list[str] = []
     if non_passing:
-        lines = []
         for r in non_passing:
             detail = ""
             if r.provider:
@@ -478,8 +521,15 @@ async def run_model_health(
             if r.status == "timeout":
                 detail += f" ({_TIMEOUT_S}s timeout)"
             err_str = f": {r.error}" if r.error and r.status not in ("timeout", "degraded") else ""
-            lines.append(f"• `{r.model_id}` [{r.test_type}] [{r.status}]{detail}{err_str}")
-        failed_message = "\n".join(lines)
+            slack_lines.append(f"• `{r.model_id}` [{r.test_type}] [{r.status}]{detail}{err_str}")
+
+    if slowest:
+        slack_lines.append("")
+        slack_lines.append("*Slowest passing model per type:*")
+        for key, r in sorted(slowest.items()):
+            slack_lines.append(f"• `{r.model_id}` ({key}) — {r.latency_ms}ms")
+
+    slack_body = "\n".join(slack_lines) if slack_lines else None
 
     fields: list[dict[str, str]] = [
         {"label": "Timestamp", "value": run_ts.isoformat()},
@@ -489,13 +539,18 @@ async def run_model_health(
         {"label": "Timeouts", "value": str(len(timeouts))},
         {"label": "Degraded (rate-limited)", "value": str(len(degraded))},
     ]
+    for key, stats in sorted(latency_by_model_type.items()):
+        fields.append({
+            "label": f"Latency — {key.upper()}",
+            "value": f"p50: {stats['p50']}ms | p95: {stats['p95']}ms | n={stats['count']}",
+        })
     if csv_url:
         fields.append({"label": "Full Results (CSV)", "value": csv_url})
 
     await send_slack_alert(
         title=f"Model Health Check — {len(passed)}/{total} passed",
         fields=fields,
-        message=failed_message,
+        message=slack_body,
         notify_here=bool(not_working),  # only page for genuine failures/timeouts, not 429s
     )
 
@@ -505,5 +560,6 @@ async def run_model_health(
         failed=len(not_working),
         pass_rate=pass_rate,
         avg_latency_ms=avg_latency,
+        latency_by_model_type=latency_by_model_type,
         results=results,
     )

@@ -71,6 +71,7 @@ def _make_row(
     model_id: str,
     *,
     provider: str = "openrouter",
+    model_type: str = "text",
     provider_model_id: str | None = None,
     responses_provider_model_id: str | None = None,
     supports_completions: bool = True,
@@ -80,6 +81,7 @@ def _make_row(
     """Build a mock DB row returned by the Model+ModelPrice join query."""
     row = MagicMock()
     row.model_id = model_id
+    row.model_type = model_type
     row.provider = provider
     row.provider_model_id = provider_model_id
     row.responses_provider_model_id = responses_provider_model_id
@@ -118,9 +120,10 @@ def _mock_test_completions(
 ):
     from app.routers.model_health import ModelHealthResult
 
-    async def _result(model_id: str, provider: str, provider_model_id):
+    async def _result(ctx):
         return ModelHealthResult(
-            model_id=model_id,
+            model_id=ctx.model_id,
+            model_type=ctx.model_type,
             test_type="completions",
             status=status,
             latency_ms=latency_ms,
@@ -174,8 +177,8 @@ class TestHappyPath:
             "model-c": ModelHealthResult(model_id="model-c", test_type="completions", status="timeout", latency_ms=20000),
         }
 
-        async def _mixed(model_id, provider, provider_model_id):
-            return results_map[model_id]
+        async def _mixed(ctx):
+            return results_map[ctx.model_id]
 
         with _mock_get_model_rows(["model-a", "model-b", "model-c"]), \
              patch("app.routers.model_health._test_completions", side_effect=_mixed), \
@@ -232,11 +235,11 @@ class TestHappyPath:
         """A model with completions + embeddings should produce 2 results."""
         from app.routers.model_health import ModelHealthResult
 
-        async def _pass_completions(model_id, provider, provider_model_id):
-            return ModelHealthResult(model_id=model_id, test_type="completions", status="pass", latency_ms=100)
+        async def _pass_completions(ctx):
+            return ModelHealthResult(model_id=ctx.model_id, model_type=ctx.model_type, test_type="completions", status="pass", latency_ms=100)
 
-        async def _pass_embeddings(model_id, provider, provider_model_id):
-            return ModelHealthResult(model_id=model_id, test_type="embeddings", status="pass", latency_ms=80)
+        async def _pass_embeddings(ctx):
+            return ModelHealthResult(model_id=ctx.model_id, model_type=ctx.model_type, test_type="embeddings", status="pass", latency_ms=80)
 
         with _mock_get_model_rows(
                 ["model-a"],
@@ -256,9 +259,9 @@ class TestHappyPath:
 
     def test_model_with_no_capabilities_falls_back_to_completions(self, client, mock_db_session):
         """A model row with all capability flags False should still get one completions test."""
-        async def _pass(model_id, provider, provider_model_id):
+        async def _pass(ctx):
             from app.routers.model_health import ModelHealthResult
-            return ModelHealthResult(model_id=model_id, test_type="completions", status="pass", latency_ms=50)
+            return ModelHealthResult(model_id=ctx.model_id, model_type=ctx.model_type, test_type="completions", status="pass", latency_ms=50)
 
         with _mock_get_model_rows(
                 ["model-a"],
@@ -325,7 +328,8 @@ class TestSlack:
             client.post("/v1/model-health/run", headers=WEBHOOK_HEADERS)
 
         message = mock_slack.call_args.kwargs.get("message")
-        assert message is None
+        # When all pass the message only has the slowest-model summary — no failure lines.
+        assert message is None or "fail" not in message
 
 
 # ── _test_completions unit tests ──────────────────────────────────────────────
@@ -343,7 +347,8 @@ class TestTestCompletions:
             adapter.chat_completion = AsyncMock(return_value={"choices": []})
             mock_get_adapter.return_value = adapter
 
-            result = await _test_completions("model-a", "openrouter", "openrouter/model-a")
+            from app.routers.model_health import ModelTestContext
+            result = await _test_completions(ModelTestContext(model_id="model-a", model_type="text", provider="openrouter", provider_model_id="openrouter/model-a"))
 
         assert result.status == "pass"
         assert result.test_type == "completions"
@@ -362,7 +367,8 @@ class TestTestCompletions:
             adapter.chat_completion = AsyncMock(side_effect=Exception("upstream 500"))
             mock_get_adapter.return_value = adapter
 
-            result = await _test_completions("model-a", "openrouter", "openrouter/model-a")
+            from app.routers.model_health import ModelTestContext
+            result = await _test_completions(ModelTestContext(model_id="model-a", model_type="text", provider="openrouter", provider_model_id="openrouter/model-a"))
 
         assert result.status == "fail"
         assert result.test_type == "completions"
@@ -380,7 +386,8 @@ class TestTestCompletions:
             adapter.chat_completion = AsyncMock(side_effect=asyncio.TimeoutError())
             mock_get_adapter.return_value = adapter
 
-            result = await _test_completions("model-a", "openrouter", "openrouter/model-a")
+            from app.routers.model_health import ModelTestContext
+            result = await _test_completions(ModelTestContext(model_id="model-a", model_type="text", provider="openrouter", provider_model_id="openrouter/model-a"))
 
         assert result.status == "timeout"
         assert result.test_type == "completions"
@@ -398,6 +405,7 @@ class TestTestCompletions:
             adapter.chat_completion = AsyncMock(return_value={})
             mock_get_adapter.return_value = adapter
 
-            result = await _test_completions("model-a", "openrouter", "openrouter/model-a")
+            from app.routers.model_health import ModelTestContext
+            result = await _test_completions(ModelTestContext(model_id="model-a", model_type="text", provider="openrouter", provider_model_id="openrouter/model-a"))
 
         assert result.latency_ms >= 0
