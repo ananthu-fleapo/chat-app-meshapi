@@ -503,9 +503,13 @@ class TestPaymentTransactions:
         events_result = MagicMock()
         events_result.scalars.return_value.all.return_value = [event]
 
+        email_result = MagicMock()
+        email_result.all.return_value = []
+
         mock_db.execute.side_effect = [
             count_result,
             events_result,
+            email_result,  # User email lookup added in get_payment_transactions
         ]
 
         resp = client.get("/admin/payments/transactions", headers=ADMIN_HEADERS)
@@ -515,6 +519,7 @@ class TestPaymentTransactions:
         assert tx["coupon_code"] is None
         assert tx["discount_amount_raw"] is None
         assert tx["discount_amount_display"] is None
+        assert tx["email"] is None
 
 
 # ── Analytics cache ───────────────────────────────────────────────────────────

@@ -34,6 +34,7 @@ jobs:
           SUPABASE_JWT_SECRET: test-supabase-jwt-secret-for-testing-only
           HEALTH_CHECK_API_KEY: rsk_01KPQNHJSKASDFfGT9A668DNDU468W
           HEALTH_CHECK_SELF_URL: http://localhost:8000
+          MONGODB_URL: mongodb://user:pass@meshapi.ai/routersvc
 
       - name: Notify Slack
         if: failure()
