@@ -81,6 +81,7 @@ def _make_event(
     prompt_tokens: int | None = 100,
     latency_ms: int | None = 450,
     created_at: datetime | None = None,
+    user_id: str | None = None,
 ) -> MagicMock:
     event = MagicMock()
     event.id = uuid.uuid4()
@@ -91,7 +92,13 @@ def _make_event(
     event.prompt_tokens = prompt_tokens
     event.latency_ms = latency_ms
     event.created_at = created_at or datetime(2026, 4, 1, 12, 0, 0, tzinfo=timezone.utc)
+    event.user_id = user_id
     return event
+
+
+def _row(event: MagicMock, email: str | None = None) -> tuple:
+    """Wrap an event mock in the (UsageEvent, email) tuple the JOIN query returns."""
+    return (event, email)
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -107,14 +114,18 @@ class TestGetErrorLogs:
         assert resp.json() == []
 
     def test_returns_all_fields(self, client, mock_db):
+        user_id = str(uuid.uuid4())
         event = _make_event(
             model="anthropic/claude-3-haiku",
             provider="bedrock",
             error_code="rate_limit_exceeded",
             prompt_tokens=50,
             latency_ms=200,
+            user_id=user_id,
         )
-        mock_db.execute.return_value = make_execute_result(rows=[event])
+        mock_db.execute.return_value = make_execute_result(
+            rows=[_row(event, email="user@example.com")]
+        )
 
         resp = client.get("/admin/usage/errors", headers=ADMIN_HEADERS)
 
@@ -124,6 +135,8 @@ class TestGetErrorLogs:
         row = data[0]
         assert row["id"] == str(event.id)
         assert row["request_id"] == event.request_id
+        assert row["user_id"] == user_id
+        assert row["email"] == "user@example.com"
         assert row["model"] == "anthropic/claude-3-haiku"
         assert row["provider"] == "bedrock"
         assert row["error_code"] == "rate_limit_exceeded"
@@ -132,9 +145,9 @@ class TestGetErrorLogs:
         assert "created_at" in row
 
     def test_nullable_fields_serialised_as_none(self, client, mock_db):
-        """error_code, prompt_tokens, and latency_ms may all be None."""
+        """error_code, prompt_tokens, latency_ms, user_id, and email may all be None."""
         event = _make_event(error_code=None, prompt_tokens=None, latency_ms=None)
-        mock_db.execute.return_value = make_execute_result(rows=[event])
+        mock_db.execute.return_value = make_execute_result(rows=[_row(event, email=None)])
 
         resp = client.get("/admin/usage/errors", headers=ADMIN_HEADERS)
 
@@ -143,10 +156,14 @@ class TestGetErrorLogs:
         assert row["error_code"] is None
         assert row["prompt_tokens"] is None
         assert row["latency_ms"] is None
+        assert row["user_id"] is None
+        assert row["email"] is None
 
     def test_multiple_rows_returned(self, client, mock_db):
         events = [_make_event() for _ in range(3)]
-        mock_db.execute.return_value = make_execute_result(rows=events)
+        mock_db.execute.return_value = make_execute_result(
+            rows=[_row(e) for e in events]
+        )
 
         resp = client.get("/admin/usage/errors", headers=ADMIN_HEADERS)
 
@@ -173,12 +190,11 @@ class TestGetErrorLogs:
         event = _make_event(
             created_at=datetime(2026, 4, 7, 9, 30, 0, tzinfo=timezone.utc)
         )
-        mock_db.execute.return_value = make_execute_result(rows=[event])
+        mock_db.execute.return_value = make_execute_result(rows=[_row(event)])
 
         resp = client.get("/admin/usage/errors", headers=ADMIN_HEADERS)
 
         row = resp.json()[0]
-        # Should be parseable as ISO 8601
         parsed = datetime.fromisoformat(row["created_at"])
         assert parsed.year == 2026
         assert parsed.month == 4
