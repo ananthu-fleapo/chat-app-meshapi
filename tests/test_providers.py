@@ -1176,18 +1176,16 @@ class TestRegistry:
         assert provider == "openrouter"
         assert model_id is None
 
-    async def test_resolve_routing_falls_back_to_openrouter_if_not_in_db(self, mock_db):
-        """Model absent from model_prices → ('openrouter', None, None)."""
+    async def test_resolve_routing_raises_if_not_in_db(self, mock_db):
+        """Model absent from model_prices → UnsupportedModelError (no OpenRouter fallback)."""
+        from app.exceptions import UnsupportedModelError
         from app.providers.registry import resolve_routing
 
         no_row = _make_routing_result(None)
         mock_db.execute.side_effect = [no_row, no_row]
 
-        provider, model_id, responses_model_id = await resolve_routing("unknown/model", mock_db)
-
-        assert provider == "openrouter"
-        assert model_id is None
-        assert responses_model_id is None
+        with pytest.raises(UnsupportedModelError):
+            await resolve_routing("unknown/model", mock_db)
 
     async def test_resolve_routing_falls_back_to_any_row(self, mock_db):
         """No is_default row → any row for this model is used."""
@@ -1230,16 +1228,16 @@ class TestRegistry:
         assert result == "openrouter"
         assert mock_db.execute.call_count == 2
 
-    async def test_resolve_provider_falls_back_to_openrouter_if_not_in_db(self, mock_db):
-        """Model not in model_prices → defaults to 'openrouter'."""
+    async def test_resolve_provider_raises_if_not_in_db(self, mock_db):
+        """Model not in model_prices → UnsupportedModelError (no OpenRouter fallback)."""
+        from app.exceptions import UnsupportedModelError
         from app.providers.registry import resolve_provider
 
         no_row = _make_routing_result(None)
         mock_db.execute.side_effect = [no_row, no_row]
 
-        result = await resolve_provider("unknown/model-xyz", mock_db)
-
-        assert result == "openrouter"
+        with pytest.raises(UnsupportedModelError):
+            await resolve_provider("unknown/model-xyz", mock_db)
 
     def test_get_adapter_openrouter_returns_singleton(self):
         """get_adapter('openrouter') returns the OpenRouterAdapter singleton."""

@@ -26,7 +26,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.exceptions import ProviderNotAvailableError
+from app.exceptions import ProviderNotAvailableError, UnsupportedModelError
 from app.providers.base import ProviderAdapter
 from app.providers.openrouter import OpenRouterAdapter
 
@@ -77,7 +77,7 @@ async def resolve_routing(
     Lookup order:
       1. Row where (model_id=model, is_default=True)   — explicit default
       2. Any row where model_id=model                  — first available
-      3. ("openrouter", None, None)                    — safe fallback
+      3. UnsupportedModelError(404)                    — model not in DB
     """
     from app.db.models import ModelPrice
 
@@ -109,18 +109,17 @@ async def resolve_routing(
         )
         return row.provider, row.provider_model_id, row.responses_provider_model_id
 
-    # Model not in price table — default to OpenRouter
-    logger.debug("provider_resolved_fallback_openrouter", model=model)
-    return "openrouter", None, None
+    # Model not in price table — reject rather than silently routing to OpenRouter
+    logger.warning("provider_resolved_model_not_found", model=model)
+    raise UnsupportedModelError(model)
 
 
 async def resolve_batch_routing(
     model: str, db: AsyncSession
 ) -> tuple[str, str | None, str | None]:
     """
-    Same as resolve_routing but raises UnsupportedModelError(404) instead of
-    falling back to OpenRouter when the model has no price table entry.
-    Used by the Batch API where an unknown model must be rejected explicitly.
+    Same as resolve_routing — raises UnsupportedModelError(404) when the model
+    has no price table entry. Kept as a separate entry point for the Batch API.
     """
     from app.db.models import ModelPrice
     from app.exceptions import UnsupportedModelError
