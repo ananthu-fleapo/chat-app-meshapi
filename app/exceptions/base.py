@@ -91,7 +91,7 @@ class UnsupportedModelError(RouterVError):
     message = "Model not found or not supported."
 
     def __init__(self, model: str | None = None) -> None:
-        msg = f"Model '{model}' is not supported." if model else self.__class__.message
+        msg = f"Model '{model}' is not supported or is invalid." if model else self.__class__.message
         super().__init__(msg)
 
 
