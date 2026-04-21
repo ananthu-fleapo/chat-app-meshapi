@@ -309,6 +309,22 @@ class TestLogUsageEvent:
         assert added_event.completion_tokens == 0
         assert added_event.total_tokens == 100
 
+    async def test_user_id_stored_on_usage_event(self):
+        """owner is written to UsageEvent.user_id in the Postgres row."""
+        from app.usage.logger import log_usage_event
+
+        write_session = _make_write_session()
+        sf = _make_session_factory(write_session)
+
+        with patch("app.usage.logger._our_cost", AsyncMock(return_value=Decimal("0.01"))), \
+             patch("app.usage.logger.get_session_factory", sf), \
+             patch("app.usage.balance.deduct_balance", AsyncMock()), \
+             patch("app.metrics.record_inference", MagicMock()):
+            await log_usage_event(**self._log_kwargs(status="success"))
+
+        added_event = write_session.add.call_args[0][0]
+        assert added_event.user_id == OWNER
+
     async def test_db_write_failure_silently_swallowed(self):
         """DB error during event write → no exception propagates."""
         from app.usage.logger import log_usage_event

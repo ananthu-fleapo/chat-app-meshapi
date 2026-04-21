@@ -361,8 +361,8 @@ class SystemUsageSummary(BaseModel):
     successful_requests: int
     total_tokens: int | None
     total_cost_usd: str | None
-    unique_models: int
-    unique_keys: int
+    total_models: int
+    total_keys: int
 
 
 @router.get("/keys/{key_id}/usage", response_model=KeyUsageSummary)
@@ -606,21 +606,22 @@ async def get_usage_summary(
             func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("cost"),
             func.count(UsageEvent.id).filter(
                 UsageEvent.status == "success"
-            ).label("success"),
-            func.count(func.distinct(UsageEvent.model)).label("models"),
-            func.count(func.distinct(UsageEvent.key_id)).label("keys"),
+            ).label("success")
         )
     )
     r = row.one()
     total_cost = Decimal(str(r.cost))
+
+    models_count = await db.scalar(select(func.count(Model.model_id)))
+    keys_count = await db.scalar(select(func.count(ApiKey.id)))
 
     return SystemUsageSummary(
         total_requests=r.total,
         successful_requests=r.success,
         total_tokens=r.tokens if r.tokens else None,
         total_cost_usd=str(total_cost) if total_cost else None,
-        unique_models=r.models,
-        unique_keys=r.keys,
+        total_models=models_count or 0,
+        total_keys=keys_count or 0,
     )
 
 
@@ -2697,6 +2698,7 @@ class PaymentSummary(BaseModel):
 class PaymentTransactionOut(BaseModel):
     id: str
     user_id: str
+    email: str | None = None
     payment_id: str
     provider: str
     order_id: str | None
@@ -2908,15 +2910,23 @@ async def get_payment_top_users(
         .limit(limit)
     )
 
+    all_rows = rows.all()
+    owner_ids = [r.owner for r in all_rows if r.owner]
+    email_by_owner: dict[str, str] = {}
+    if owner_ids:
+        email_q = await db.execute(select(User.id, User.email).where(User.id.in_(owner_ids)))
+        email_by_owner = {row.id: row.email for row in email_q.all()}
+
     result = [
         OwnerUsageRow(
             owner=r.owner,
+            email=email_by_owner.get(r.owner),
             requests=r.requests,
             successful_requests=r.success,
             total_tokens=None,
             total_cost_usd=str(Decimal(str(r.cost)).quantize(Decimal("0.0001"))),
         )
-        for r in rows.all()
+        for r in all_rows
     ]
 
     if redis is not None:
@@ -3058,12 +3068,13 @@ async def _load_coupon_code_map(
     return {str(code).strip().upper(): str(code).strip().upper() for (code,) in result.all() if code}
 
 
-def _payment_to_out(e: PaymentEvent, coupon_code_map: dict[str, str] | None = None) -> PaymentTransactionOut:
+def _payment_to_out(e: PaymentEvent, coupon_code_map: dict[str, str] | None = None, email: str | None = None) -> PaymentTransactionOut:
     normalized_coupon_code = str(e.coupon_code).strip().upper() if e.coupon_code else None
     discount_amount_raw = _extract_discount_amount_raw(e)
     return PaymentTransactionOut(
         id=str(e.id),
         user_id=e.user_id,
+        email=email,
         payment_id=e.payment_id,
         provider=e.provider,
         order_id=e.order_id,
@@ -3135,8 +3146,13 @@ async def get_payment_transactions(
         db,
         {event.coupon_code for event in events if event.coupon_code},
     )
+    user_ids = [e.user_id for e in events if e.user_id]
+    email_by_user: dict[str, str] = {}
+    if user_ids:
+        email_q = await db.execute(select(User.id, User.email).where(User.id.in_(user_ids)))
+        email_by_user = {row.id: row.email for row in email_q.all()}
     return PaymentTransactionsPage(
-        transactions=[_payment_to_out(e, coupon_code_map) for e in events],
+        transactions=[_payment_to_out(e, coupon_code_map, email=email_by_user.get(e.user_id)) for e in events],
         total=total,
         limit=limit,
         offset=offset,

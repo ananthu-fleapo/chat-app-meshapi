@@ -231,6 +231,7 @@ async def log_usage_event(
         async with get_session_factory()() as session:
             event = UsageEvent(
                 key_id=uuid.UUID(key_id),
+                user_id=owner,
                 request_id=request_id,
                 model=model,
                 provider=provider,

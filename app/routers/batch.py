@@ -697,6 +697,7 @@ async def create_batch(
 
     event = UsageEvent(
         key_id=key.id,
+        user_id=key.owner,
         request_id=result["id"],
         model=model,
         provider=provider,

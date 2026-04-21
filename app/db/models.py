@@ -204,6 +204,7 @@ class UsageEvent(Base):
         server_default=func.gen_random_uuid(),
     )
     key_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    user_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     request_id: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     template_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
