@@ -56,7 +56,7 @@ async def verify_gstin(
     so v1 and v2 entries do not collide.
     """
     gstin = gstin.upper().strip()
-    cache_key = f"gstin:{gstin}"
+    cache_key = f"gstin_cache:{gstin}"
 
     # ── Cache hit ─────────────────────────────────────────────────────────────
     redis = get_redis()
@@ -121,7 +121,7 @@ async def verify_gstin(
     logger.info("gstin_v2_verified", gstin=gstin, valid=result.valid, status=result.status)
 
     # ── Populate cache ────────────────────────────────────────────────────────
-    if redis is not None:
+    if redis is not None and result.valid:
         try:
             await redis.setex(cache_key, _SIX_MONTHS_TTL, result.model_dump_json())
         except Exception as exc:  # noqa: BLE001
