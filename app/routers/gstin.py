@@ -110,11 +110,11 @@ async def verify_gstin(
         gstin=payload.get("GSTIN", gstin),
         legal_name=payload.get("legal_name_of_business", ""),
         trade_name=payload.get("trade_name_of_business", ""),
-        status=payload.get("gstin_status", ""),
+        status=payload.get("gst_in_status", ""),
         business_type=payload.get("constitution_of_business", ""),
         taxpayer_type=payload.get("taxpayer_type", ""),
         registration_date=payload.get("date_of_registration", ""),
-        cancellation_date=payload.get("date_of_cancellation") or None,
+        cancellation_date=payload.get("cancellation_date") or None,
         address=payload.get("principal_place_address", ""),
     )
 
