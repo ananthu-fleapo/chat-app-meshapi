@@ -136,6 +136,15 @@ class Settings(BaseSettings):
     # segment: <gstin_verify_api_url>/<gstin>
     gstin_verify_api_url: str = ""
 
+    # ── Cashfree Verification Suite ───────────────────────────────────────────
+    # Used by GET /v2/gstin/{gstin}. POSTs to <cashfree_verify_api_url>/gstin
+    # with x-client-id / x-client-secret headers.
+    # Prod: https://api.cashfree.com
+    # Sandbox: https://sandbox.cashfree.com
+    cashfree_verify_api_url: str = "https://api.cashfree.com"
+    cashfree_client_id: str = ""
+    cashfree_client_secret: str = ""
+
     # ── Webhook auth ─────────────────────────────────────────────────────────
     # Static secret for inbound webhook calls (e.g. payment provider callbacks).
     # Set WEBHOOK_API_KEY in .env. Requests must pass it as: Bearer <key>.

@@ -48,10 +48,12 @@ async def verify_gstin(
     _identity: ControlPlaneIdentity = Depends(get_control_plane_user),
 ) -> GstinResponse:
     """
-    Verify a GSTIN and return key business details from the GST portal.
+    Verify a GSTIN via Cashfree's Verification Suite.
 
-    Results are cached for 6 months — GSTINs are stable identifiers and the
-    underlying data (legal name, address, registration date) rarely changes.
+    POSTs to <cashfree_verify_api_url>/gstin with x-client-id / x-client-secret
+    headers and maps the flat Cashfree response into the same GstinResponse
+    shape returned by v1. Cached 6 months in Redis under the `gstin:v2:` prefix
+    so v1 and v2 entries do not collide.
     """
     gstin = gstin.upper().strip()
     cache_key = f"gstin:{gstin}"
@@ -62,54 +64,67 @@ async def verify_gstin(
         try:
             cached = await redis.get(cache_key)
             if cached is not None:
-                logger.info("gstin_cache_hit", gstin=gstin)
+                logger.info("gstin_v2_cache_hit", gstin=gstin)
                 return GstinResponse(**json.loads(cached))
         except Exception as exc:  # noqa: BLE001
-            logger.warning("gstin_cache_read_error", error=str(exc))
+            logger.warning("gstin_v2_cache_read_error", error=str(exc))
 
-    # ── External API call ─────────────────────────────────────────────────────
-    if not settings.gstin_verify_api_url:
+    # ── Cashfree call ─────────────────────────────────────────────────────────
+    if not (
+        settings.cashfree_verify_api_url
+        and settings.cashfree_client_id
+        and settings.cashfree_client_secret
+    ):
         raise RouterVError(
             status_code=503,
             error_code="gstin_not_configured",
-            message="GSTIN verification is not configured.",
+            message="Cashfree GSTIN verification is not configured.",
         )
+
+    headers = {
+        "x-client-id": settings.cashfree_client_id,
+        "x-client-secret": settings.cashfree_client_secret,
+        "Content-Type": "application/json",
+    }
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            resp = await client.get(f"{settings.gstin_verify_api_url}/{gstin}")
+            resp = await client.post(
+                f"{settings.cashfree_verify_api_url}/verification/gstin",
+                headers=headers,
+                json={"GSTIN": gstin},
+            )
             resp.raise_for_status()
         except httpx.HTTPError as exc:
-            logger.error("gstin_fetch_failed", gstin=gstin, error=str(exc))
+            logger.error("gstin_v2_fetch_failed", gstin=gstin, error=str(exc))
             raise RouterVError(
                 status_code=502,
                 error_code="gstin_fetch_error",
-                message=f"GSTIN verification API request failed: {exc}",
+                message=f"Cashfree GSTIN verification request failed: {exc}",
             ) from exc
 
     payload = resp.json()
-    data = payload.get("data") or {}
 
     result = GstinResponse(
-        valid=payload.get("flag") is True,
-        gstin=data.get("gstin", gstin),
-        legal_name=data.get("lgnm", ""),
-        trade_name=data.get("tradeNam", ""),
-        status=data.get("sts", ""),
-        business_type=data.get("ctb", ""),
-        taxpayer_type=data.get("dty", ""),
-        registration_date=data.get("rgdt", ""),
-        cancellation_date=data.get("cxdt") or None,
-        address=(data.get("pradr") or {}).get("adr", ""),
+        valid=payload.get("valid") is True,
+        gstin=payload.get("GSTIN", gstin),
+        legal_name=payload.get("legal_name_of_business", ""),
+        trade_name=payload.get("trade_name_of_business", ""),
+        status=payload.get("gstin_status", ""),
+        business_type=payload.get("constitution_of_business", ""),
+        taxpayer_type=payload.get("taxpayer_type", ""),
+        registration_date=payload.get("date_of_registration", ""),
+        cancellation_date=payload.get("date_of_cancellation") or None,
+        address=payload.get("principal_place_address", ""),
     )
 
-    logger.info("gstin_verified", gstin=gstin, valid=result.valid, status=result.status)
+    logger.info("gstin_v2_verified", gstin=gstin, valid=result.valid, status=result.status)
 
     # ── Populate cache ────────────────────────────────────────────────────────
     if redis is not None:
         try:
             await redis.setex(cache_key, _SIX_MONTHS_TTL, result.model_dump_json())
         except Exception as exc:  # noqa: BLE001
-            logger.warning("gstin_cache_write_error", error=str(exc))
+            logger.warning("gstin_v2_cache_write_error", error=str(exc))
 
     return result
