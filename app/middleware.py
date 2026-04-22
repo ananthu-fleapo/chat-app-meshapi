@@ -227,6 +227,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                 latency_ms=latency_ms,
                 client_ip=client_ip,
                 user_agent=request.headers.get("user-agent", ""),
+                owner=request.scope.get("_owner"),
                 # GCP Cloud Logging recognises the top-level "httpRequest" key
                 # and surfaces it as structured HTTP metadata in Logs Explorer.
                 httpRequest={
@@ -275,14 +276,31 @@ class RequestLoggingMiddleware:
         from app.db.mongo import is_mongo_available
 
         path = scope.get("path", "")
+        mongo_ok = is_mongo_available()
 
         # Skip noisy health/metrics endpoints
         if path in _REQUEST_LOG_SKIP:
             await self.app(scope, receive, send)
             return
-        if not is_mongo_available():
+
+        # ── Wrap receive to capture request body ──────────────────────────────
+        # Body capture runs regardless of mongo availability so the outer
+        # RequestIdMiddleware can include it in the http_request access log.
+        body_chunks: list[bytes] = []
+
+        async def receive_wrapper() -> Message:
+            message = await receive()
+            if message["type"] == "http.request":
+                chunk = message.get("body", b"")
+                if chunk:
+                    body_chunks.append(chunk)
+                if not message.get("more_body", False):
+                    scope["_request_body"] = b"".join(body_chunks)
+            return message
+
+        if not mongo_ok:
             logger.warning("request_log_skipped_no_mongo", path=path)
-            await self.app(scope, receive, send)
+            await self.app(scope, receive_wrapper, send)
             return
 
         # ── Capture request_id early ──────────────────────────────────────────
@@ -301,17 +319,6 @@ class RequestLoggingMiddleware:
             if k.lower() not in _SENSITIVE_HEADERS
         }
 
-        # ── Wrap receive to capture request body ──────────────────────────────
-        body_chunks: list[bytes] = []
-
-        async def receive_wrapper() -> Message:
-            message = await receive()
-            if message["type"] == "http.request":
-                chunk = message.get("body", b"")
-                if chunk:
-                    body_chunks.append(chunk)
-            return message
-
         # ── Wrap send to capture response ─────────────────────────────────────
         response_chunks: list[bytes] = []
         status_code: int = 0
@@ -320,8 +327,6 @@ class RequestLoggingMiddleware:
 
         async def send_wrapper(message: Message) -> None:
             nonlocal status_code, response_headers
-
-            logger.debug("request_log_send_message", path=path, msg_type=message["type"])
 
             if message["type"] == "http.response.start":
                 status_code = message.get("status", 0)
@@ -338,31 +343,12 @@ class RequestLoggingMiddleware:
                 if not message.get("more_body", False):
                     # Last byte sent — schedule MongoDB write in background
                     latency_ms = int((time.monotonic() - start_time) * 1000)
-                    state = scope.get("state")
-                    request_id = getattr(state, "request_id", None) or f"req_{ULID()}"
-                    owner = getattr(state, "owner", None)
-
-                more_body = message.get("more_body", False)
-                logger.debug(
-                    "request_log_body_chunk",
-                    path=path,
-                    chunk_len=len(chunk),
-                    more_body=more_body,
-                )
-                if not more_body:
-                    # Last byte sent — schedule MongoDB write in background
-                    latency_ms = int((time.monotonic() - start_time) * 1000)
                     # request_id captured at __call__ entry (see above).
-                    # owner is set by the auth dep during request processing,
-                    # so read it here after the route handler has run.
-                    owner = getattr(scope.get("state"), "owner", None)
+                    # owner is set by the auth dep via scope["_owner"] (not
+                    # scope["state"], which BaseHTTPMiddleware does not
+                    # reliably propagate to inner raw ASGI middleware).
+                    owner = scope.get("_owner")
 
-                    logger.debug(
-                        "request_log_scheduling",
-                        path=path,
-                        request_id=request_id,
-                        status_code=status_code,
-                    )
                     asyncio.create_task(
                         _write_request_log(
                             request_id=request_id,
@@ -409,13 +395,6 @@ async def _write_request_log(
     Persist one request/response document to MongoDB request_logs collection.
     All errors are caught and logged — must never affect the request path.
     """
-    logger.debug(
-        "request_log_attempt",
-        request_id=request_id,
-        method=method,
-        path=path,
-        status_code=status_code,
-    )
     try:
         from app.db.mongo import get_mongo_db
 
@@ -473,7 +452,6 @@ async def _write_request_log(
 
         db = get_mongo_db()
         await db.request_logs.insert_one(doc)
-        logger.debug("request_log_inserted", request_id=request_id)
 
     except Exception as exc:  # noqa: BLE001
         logger.error("request_log_mongo_failed", request_id=request_id, error=str(exc))

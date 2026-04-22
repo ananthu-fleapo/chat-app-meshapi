@@ -81,6 +81,10 @@ async def get_authenticated_key(
         logger.debug("auth_cache_hit", key_id=str(cached.id), owner=cached.owner)
         _check_active(cached, raw_key)
         request.state.owner = cached.owner
+        # Mirror to raw scope so RequestLoggingMiddleware (raw ASGI, inside
+        # BaseHTTPMiddleware) can read it — scope["state"] is not reliably
+        # propagated across BaseHTTPMiddleware boundaries.
+        request.scope["_owner"] = cached.owner
         return cached
 
     # ── 2. Cache miss → Postgres ──────────────────────────────────────────────
@@ -105,6 +109,7 @@ async def get_authenticated_key(
     # Stored on request.state so the ASGI middleware can include it in the
     # MongoDB request_log document without re-parsing the auth header.
     request.state.owner = key.owner
+    request.scope["_owner"] = key.owner
 
     return key
 
