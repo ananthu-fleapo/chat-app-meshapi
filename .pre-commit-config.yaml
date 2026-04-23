@@ -1,0 +1,30 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        files: ^app/
+      - id: end-of-file-fixer
+        files: ^app/
+      - id: check-yaml
+        args: [--unsafe]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.1
+    hooks:
+      # Run the linter.
+      - id: ruff
+        args: [ --fix ]
+        files: ^app/
+      # Run the formatter.
+      - id: ruff-format
+        files: ^app/
+
+  - repo: local
+    hooks:
+      - id: pyright
+        name: pyright
+        entry: pyright
+        language: system
+        types: [python]
+        files: ^app/
