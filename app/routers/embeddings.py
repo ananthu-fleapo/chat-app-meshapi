@@ -10,6 +10,7 @@ import time
 
 import structlog
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.config_resolver import resolve_embeddings_config
@@ -190,7 +191,9 @@ async def create_embeddings(
     response_body: dict | None = None
     status = "success"
     error_code_val: str | None = None
+    provider_latency_ms = 0
 
+    provider_start = time.monotonic()
     try:
         response_body = await adapter.embeddings(
             body,
@@ -208,6 +211,7 @@ async def create_embeddings(
         )
         raise
     finally:
+        provider_latency_ms = int((time.monotonic() - provider_start) * 1000)
         latency_ms = int((time.monotonic() - start) * 1000)
         usage = (response_body or {}).get("usage") or {}
         prompt_tokens = usage.get("prompt_tokens")
@@ -235,4 +239,7 @@ async def create_embeddings(
         prompt_tokens=usage.get("prompt_tokens"),
     )
 
-    return response_body
+    return JSONResponse(
+        content=response_body,
+        headers={"X-Provider-Latency-Ms": str(provider_latency_ms)},
+    )

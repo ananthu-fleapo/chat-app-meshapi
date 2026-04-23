@@ -154,6 +154,8 @@ class ModelHealthResult(BaseModel):
     test_type: str = "completions"  # "completions" | "responses" | "embeddings"
     status: str  # "pass" | "fail" | "timeout" | "degraded"
     latency_ms: int
+    provider_latency_ms: int = 0   # time spent in upstream provider call
+    platform_latency_ms: int = 0   # our overhead = total - provider
     error: str | None = None
     provider: str | None = None
     upstream_status: int | None = None
@@ -223,12 +225,16 @@ async def _test_endpoint(
         client = _get_self_client()
         resp = await client.post(spec.path, json=spec.payload_fn(ctx))
         resp.raise_for_status()
+        total_latency_ms = int((time.monotonic() - start) * 1000)
+        provider_latency_ms = int(resp.headers.get("x-provider-latency-ms", 0))
         return ModelHealthResult(
             model_id=ctx.model_id,
             model_type=ctx.model_type,
             test_type=spec.test_type,
             status="pass",
-            latency_ms=int((time.monotonic() - start) * 1000),
+            latency_ms=total_latency_ms,
+            provider_latency_ms=provider_latency_ms,
+            platform_latency_ms=max(0, total_latency_ms - provider_latency_ms),
             provider=ctx.provider,
         )
     except httpx.TimeoutException:
@@ -288,6 +294,8 @@ def _build_csv(results: list[ModelHealthResult], run_ts: datetime) -> str:
         "status",
         "provider",
         "latency_ms",
+        "provider_latency_ms",
+        "platform_latency_ms",
         "upstream_status",
         "upstream_body",
         "error",
@@ -305,6 +313,8 @@ def _build_csv(results: list[ModelHealthResult], run_ts: datetime) -> str:
                 "status": r.status,
                 "provider": r.provider or "",
                 "latency_ms": r.latency_ms,
+                "provider_latency_ms": r.provider_latency_ms,
+                "platform_latency_ms": r.platform_latency_ms,
                 "upstream_status": (
                     r.upstream_status if r.upstream_status is not None else ""
                 ),
@@ -464,9 +474,21 @@ async def run_model_health(
 
     # Per-(model_type/test_type) p50/p95 latency stats (passing results only).
     type_lats: dict[str, list[int]] = defaultdict(list)
+    type_provider_lats: dict[str, list[int]] = defaultdict(list)
+    type_platform_lats: dict[str, list[int]] = defaultdict(list)
     for r in passed:
-        type_lats[f"{r.model_type}/{r.test_type}"].append(r.latency_ms)
-    latency_by_model_type = {t: _latency_stats(lats) for t, lats in type_lats.items()}
+        key = f"{r.model_type}/{r.test_type}"
+        type_lats[key].append(r.latency_ms)
+        type_provider_lats[key].append(r.provider_latency_ms)
+        type_platform_lats[key].append(r.platform_latency_ms)
+    latency_by_model_type = {
+        t: {
+            **_latency_stats(lats),
+            **{f"provider_{k}": v for k, v in _latency_stats(type_provider_lats[t]).items()},
+            **{f"platform_{k}": v for k, v in _latency_stats(type_platform_lats[t]).items()},
+        }
+        for t, lats in type_lats.items()
+    }
 
     # Slowest passing result per (model_type/test_type) for Slack body
     slowest: dict[str, ModelHealthResult] = {}
@@ -512,7 +534,11 @@ async def run_model_health(
         slack_lines.append("")
         slack_lines.append("*Slowest passing model per type:*")
         for key, r in sorted(slowest.items()):
-            slack_lines.append(f"• `{r.model_id}` ({key}) — {r.latency_ms}ms")
+            slack_lines.append(
+                f"• `{r.model_id}` ({key}) — total: {r.latency_ms}ms"
+                f" | provider: {r.provider_latency_ms}ms"
+                f" | platform: {r.platform_latency_ms}ms"
+            )
 
     slack_body = "\n".join(slack_lines) if slack_lines else None
 
