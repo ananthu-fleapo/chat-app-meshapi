@@ -75,6 +75,8 @@ class TestCalcUpstreamCost:
 
         row = _make_model_price_row(upstream_prompt=0.003, upstream_completion=0.015)
         session = AsyncMock()
+        # v1 resolver path uses db.get() for exact (model, provider) lookup
+        session.get = AsyncMock(return_value=row)
         session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=row)))
         sf = _make_session_factory(session)
 
@@ -128,6 +130,8 @@ class TestCalcUpstreamCost:
 
         row = _make_model_price_row(upstream_prompt=0.00002, upstream_completion=0)
         session = AsyncMock()
+        # v1 resolver path uses db.get() for exact (model, provider) lookup
+        session.get = AsyncMock(return_value=row)
         session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=row)))
         sf = _make_session_factory(session)
 

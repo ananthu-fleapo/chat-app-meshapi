@@ -33,8 +33,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import get_any_auth_owner
 from app.cache.redis_client import get_redis
 from app.db.engine import get_session_factory
-from app.db.models import Discount, Model, ModelPrice
+from app.db.models import Discount, Model
 from app.db.session import get_db_session
+from app.pricing.resolver import PriceRow, list_default_price_rows
 
 router = APIRouter(tags=["models"])
 logger = structlog.get_logger()
@@ -85,7 +86,7 @@ class ModelOut(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _row_to_model_out(m: Model, mp: ModelPrice) -> ModelOut:
+def _row_to_model_out(m: Model, mp: PriceRow) -> ModelOut:
     """Map a (Model, ModelPrice) ORM pair to the public ModelOut schema."""
     if mp.is_free:
         pricing = ModelPricing(
@@ -143,17 +144,7 @@ async def _get_models() -> list[ModelOut]:
     # ── DB query ──────────────────────────────────────────────────────────────
     try:
         async with get_session_factory()() as session:
-            result = await session.execute(
-                select(Model, ModelPrice)
-                .join(
-                    ModelPrice,
-                    (ModelPrice.model_id == Model.model_id)
-                    & ModelPrice.is_default.is_(True),
-                )
-                .where(Model.is_enabled.is_(True))
-                .order_by(Model.model_id)
-            )
-            rows = result.all()
+            rows = await list_default_price_rows(session)
 
         models = [_row_to_model_out(m, mp) for m, mp in rows]
         logger.info("models_fetched_from_db", count=len(models))

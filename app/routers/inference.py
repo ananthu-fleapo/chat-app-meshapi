@@ -22,9 +22,10 @@ from app.auth.config_resolver import resolve_config
 from app.auth.dependencies import get_authenticated_key
 from app.cache.rate_limiter import check_free_model_rate_limits, check_rate_limits
 from app.config import settings
-from app.db.models import ApiKey, ModelPrice
+from app.db.models import ApiKey
 from app.db.session import get_db_session
 from app.exceptions import ModelCapabilityError
+from app.pricing.resolver import get_price_row
 from app.providers.key_resolver import resolve_upstream_key
 from app.providers.registry import get_adapter, resolve_routing
 from app.schemas.chat import ChatCompletionRequest
@@ -244,7 +245,7 @@ async def chat_completions(
     provider, provider_model_id, _ = await resolve_routing(body.model, db)
 
     # ── Capability check: model+provider must support chat/completions ────────
-    _price_row = await db.get(ModelPrice, (body.model, provider))
+    _price_row = await get_price_row(body.model, provider, db)
     if _price_row is not None and not _price_row.supports_completions_api:
         raise ModelCapabilityError(body.model, "chat/completions")
 

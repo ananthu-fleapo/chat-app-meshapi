@@ -23,12 +23,9 @@ Phase 5: usage reporting endpoints
 Phase 6: admin provider key management
 """
 
-import asyncio
 import hashlib
 import json
-import time
 import uuid
-from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
@@ -37,10 +34,8 @@ from typing import Literal
 import structlog
 from structlog.contextvars import bind_contextvars
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, func, or_, select, text, update
 from pydantic import BaseModel, field_validator, model_validator
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from ulid import ULID
 
@@ -48,7 +43,7 @@ from app.auth.control_plane import get_admin_user
 from app.cache.key_cache import invalidate_cached_key
 from app.cache.redis_client import get_redis
 from app.config import settings
-from app.db.models import ApiKey, CheckoutCoupon, CurrencyConversionRate, Discount, Model, ModelPrice, PaymentEvent, ProviderKey, Template, UsageEvent, UserBalance, User
+from app.db.models import ApiKey, CheckoutCoupon, CurrencyConversionRate, Discount, Model, ModelPrice, ModelPricing, PaymentEvent, ProviderKey, Template, UsageEvent, UserBalance, User
 from app.cache.analytics_cache import get_analytics_cached, set_analytics_cached
 from app.routers.usage import UsageEventOut, UsageEventsPage, _parse_dt, _split_model, _tokens_per_second
 from app.db.session import get_db_session
@@ -1004,7 +999,34 @@ class ModelPriceOut(BaseModel):
     updated_at: str
 
 
-def _to_price_out(p: ModelPrice) -> ModelPriceOut:
+def _to_price_out(p: ModelPrice | ModelPricing) -> ModelPriceOut:
+    if isinstance(p, ModelPricing):
+        unit = p.pricing_unit or "per_1k_tokens"
+        def _norm(cost: Decimal | None) -> Decimal:
+            if cost is None:
+                return Decimal("0")
+            return Decimal(str(cost)) / 1000 if unit == "per_1m_tokens" else Decimal(str(cost))
+        prompt = _norm(p.input_cost)
+        completion = _norm(p.output_cost)
+        return ModelPriceOut(
+            model_id=p.model_id,
+            provider=p.provider,
+            is_default=p.is_default,
+            prompt_usd_per_1k=str(prompt),
+            completion_usd_per_1k=str(completion),
+            prompt_usd_per_1m=_per_1m(prompt),
+            completion_usd_per_1m=_per_1m(completion),
+            supports_thinking=p.supports_thinking,
+            supports_completions_api=p.supports_completions_api,
+            supports_responses_api=p.supports_responses_api,
+            supports_batching=p.supports_batching,
+            is_free=p.is_free,
+            upstream_prompt_usd_per_1k=None,
+            upstream_completion_usd_per_1k=None,
+            upstream_prompt_usd_per_1m=None,
+            upstream_completion_usd_per_1m=None,
+            updated_at=p.updated_at.isoformat(),
+        )
     return ModelPriceOut(
         model_id=p.model_id,
         provider=p.provider,
@@ -1044,11 +1066,16 @@ async def _invalidate_models_cache() -> None:
             logger.warning("models_cache_invalidation_failed", error=str(exc))
 
 
-async def _clear_default( model_id: str, db: AsyncSession) -> None:
-    """Clear is_default on all provider rows for the given model_id."""
+async def _clear_default(model_id: str, db: AsyncSession) -> None:
+    """Clear is_default on all provider rows for the given model_id in both tables."""
     await db.execute(
         update(ModelPrice)
         .where(ModelPrice.model_id == model_id, ModelPrice.is_default.is_(True))
+        .values(is_default=False)
+    )
+    await db.execute(
+        update(ModelPricing)
+        .where(ModelPricing.model_id == model_id, ModelPricing.is_default.is_(True))
         .values(is_default=False)
     )
 
@@ -1064,30 +1091,28 @@ async def create_model_price(
     Setting is_default=true atomically clears the flag on any other provider
     row for this model_id so exactly one default exists per model.
     """
-    existing = await db.execute(
-        select(ModelPrice).where(
-            ModelPrice.model_id == body.model_id,
-            ModelPrice.provider == body.provider,
-        )
-    )
-    price = existing.scalar_one_or_none()
-
     # If making this the default, clear any existing default first
     if body.is_default:
         await _clear_default(body.model_id, db)
 
     if body.is_free:
-        # is_free rows must always store zero prices — never retain billable values.
         effective_prompt = Decimal("0")
         effective_completion = Decimal("0")
-        up_prompt: Decimal | None = None
-        up_completion: Decimal | None = None
     else:
         effective_prompt = body.resolved_prompt()
         effective_completion = body.resolved_completion()
-        up_prompt = body.resolved_upstream_prompt()
-        up_completion = body.resolved_upstream_completion()
 
+    up_prompt = body.resolved_upstream_prompt() if not body.is_free else None
+    up_completion = body.resolved_upstream_completion() if not body.is_free else None
+
+    # ── Write to model_prices (v1) ─────────────────────────────────────────
+    existing_v1 = await db.execute(
+        select(ModelPrice).where(
+            ModelPrice.model_id == body.model_id,
+            ModelPrice.provider == body.provider,
+        )
+    )
+    price: ModelPrice = existing_v1.scalar_one_or_none()
     if price is None:
         price = ModelPrice(
             model_id=body.model_id,
@@ -1115,6 +1140,46 @@ async def create_model_price(
         price.supports_completions_api = body.supports_completions_api
         price.supports_responses_api = body.supports_responses_api
         price.supports_batching = body.supports_batching
+
+    # ── Write to model_pricing (v2) ────────────────────────────────────────
+    from datetime import date as _date
+    existing_v2 = await db.execute(
+        select(ModelPricing).where(
+            ModelPricing.model_id == body.model_id,
+            ModelPricing.provider == body.provider,
+            ModelPricing.is_active.is_(True),
+        )
+    )
+    pricing_v2_row = existing_v2.scalar_one_or_none()
+    if pricing_v2_row is None:
+        pricing_v2_row = ModelPricing(
+            model_id=body.model_id,
+            provider_model_id=body.model_id,
+            model_name=body.model_id,
+            provider=body.provider,
+            modality=["text"],
+            pricing_unit="per_1k_tokens",
+            effective_date=_date.today(),
+            is_default=body.is_default,
+            is_free=body.is_free,
+            is_active=True,
+            input_cost=effective_prompt,
+            output_cost=effective_completion,
+            supports_thinking=body.supports_thinking,
+            supports_completions_api=body.supports_completions_api,
+            supports_responses_api=body.supports_responses_api,
+            supports_batching=body.supports_batching,
+        )
+        db.add(pricing_v2_row)
+    else:
+        pricing_v2_row.is_default = body.is_default
+        pricing_v2_row.is_free = body.is_free
+        pricing_v2_row.input_cost = effective_prompt
+        pricing_v2_row.output_cost = effective_completion
+        pricing_v2_row.supports_thinking = body.supports_thinking
+        pricing_v2_row.supports_completions_api = body.supports_completions_api
+        pricing_v2_row.supports_responses_api = body.supports_responses_api
+        pricing_v2_row.supports_batching = body.supports_batching
 
     await db.flush()
     await db.refresh(price)
@@ -1167,9 +1232,16 @@ async def list_model_prices(
     db: AsyncSession = Depends(get_db_session),
 ):
     """List all model prices (all providers per model)."""
-    result = await db.execute(
-        select(ModelPrice).order_by(ModelPrice.model_id, ModelPrice.provider)
-    )
+    if settings.pricing_v2:
+        result = await db.execute(
+            select(ModelPricing)
+            .where(ModelPricing.is_active.is_(True))
+            .order_by(ModelPricing.model_id, ModelPricing.provider)
+        )
+    else:
+        result = await db.execute(
+            select(ModelPrice).order_by(ModelPrice.model_id, ModelPrice.provider)
+        )
     return [_to_price_out(p) for p in result.scalars().all()]
 
 
@@ -1187,16 +1259,6 @@ async def update_model_price(
     Setting is_default=true atomically clears the flag on any other provider
     row for this model_id.
     """
-    result = await db.execute(
-        select(ModelPrice).where(
-            ModelPrice.model_id == model_id,
-            ModelPrice.provider == provider,
-        )
-    )
-    price = result.scalar_one_or_none()
-    if price is None:
-        raise NotFoundError(f"Model price for '{model_id}/{provider}' not found.")
-
     if body.is_default is not None and body.is_default:
         await _clear_default(model_id, db)
 
@@ -1205,11 +1267,19 @@ async def update_model_price(
     resolved_up_prompt = body.resolved_upstream_prompt()
     resolved_up_completion = body.resolved_upstream_completion()
 
-    # Determine the effective is_free after applying the patch body.
-    final_is_free = body.is_free if body.is_free is not None else price.is_free
+    # ── Update model_prices (v1) ───────────────────────────────────────────
+    result_v1 = await db.execute(
+        select(ModelPrice).where(
+            ModelPrice.model_id == model_id,
+            ModelPrice.provider == provider,
+        )
+    )
+    price: ModelPrice | None = result_v1.scalar_one_or_none()
+    if price is None:
+        raise NotFoundError(f"Model price for '{model_id}/{provider}' not found.")
 
-    if final_is_free:
-        # Free rows must never carry billable prices — clear regardless of input.
+    final_is_free_v1 = body.is_free if body.is_free is not None else price.is_free
+    if final_is_free_v1:
         price.prompt_usd_per_1k = Decimal("0")
         price.completion_usd_per_1k = Decimal("0")
         price.upstream_prompt_usd_per_1k = None
@@ -1223,11 +1293,9 @@ async def update_model_price(
             price.upstream_prompt_usd_per_1k = resolved_up_prompt
         if resolved_up_completion is not None:
             price.upstream_completion_usd_per_1k = resolved_up_completion
-        # If any stored price is non-zero ensure is_free stays False.
         if price.prompt_usd_per_1k > 0 or price.completion_usd_per_1k > 0:
-            final_is_free = False
-
-    price.is_free = final_is_free
+            final_is_free_v1 = False
+    price.is_free = final_is_free_v1
     if body.is_default is not None:
         price.is_default = body.is_default
     if body.supports_thinking is not None:
@@ -1238,6 +1306,39 @@ async def update_model_price(
         price.supports_responses_api = body.supports_responses_api
     if body.supports_batching is not None:
         price.supports_batching = body.supports_batching
+
+    # ── Update model_pricing (v2) — best-effort, skip if not found ─────────
+    result_v2 = await db.execute(
+        select(ModelPricing).where(
+            ModelPricing.model_id == model_id,
+            ModelPricing.provider == provider,
+            ModelPricing.is_active.is_(True),
+        )
+    )
+    pricing_v2_row = result_v2.scalar_one_or_none()
+    if pricing_v2_row is not None:
+        final_is_free_v2 = body.is_free if body.is_free is not None else pricing_v2_row.is_free
+        if final_is_free_v2:
+            pricing_v2_row.input_cost = Decimal("0")
+            pricing_v2_row.output_cost = Decimal("0")
+        else:
+            if resolved_prompt is not None:
+                pricing_v2_row.input_cost = resolved_prompt
+            if resolved_completion is not None:
+                pricing_v2_row.output_cost = resolved_completion
+            if (pricing_v2_row.input_cost or 0) > 0 or (pricing_v2_row.output_cost or 0) > 0:
+                final_is_free_v2 = False
+        pricing_v2_row.is_free = final_is_free_v2
+        if body.is_default is not None:
+            pricing_v2_row.is_default = body.is_default
+        if body.supports_thinking is not None:
+            pricing_v2_row.supports_thinking = body.supports_thinking
+        if body.supports_completions_api is not None:
+            pricing_v2_row.supports_completions_api = body.supports_completions_api
+        if body.supports_responses_api is not None:
+            pricing_v2_row.supports_responses_api = body.supports_responses_api
+        if body.supports_batching is not None:
+            pricing_v2_row.supports_batching = body.supports_batching
 
     await db.flush()
     await db.refresh(price)
@@ -1252,138 +1353,41 @@ async def delete_model_price(
     provider: str,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """Remove a (model_id, provider) row from the price table."""
-    result = await db.execute(
+    """Remove a (model_id, provider) row from both price tables.
+
+    model_prices: hard-delete.
+    model_pricing: soft-delete (is_active=False + deprecated_date=today) to
+    preserve pricing history for historical usage reconciliation.
+    """
+    from datetime import date as _date
+
+    # ── Hard-delete from model_prices (v1) ────────────────────────────────
+    result_v1 = await db.execute(
         select(ModelPrice).where(
             ModelPrice.model_id == model_id,
             ModelPrice.provider == provider,
         )
     )
-    price = result.scalar_one_or_none()
-    if price is None:
+    price_v1 = result_v1.scalar_one_or_none()
+    if price_v1 is None:
         raise NotFoundError(f"Model price for '{model_id}/{provider}' not found.")
-    await db.delete(price)
+    await db.delete(price_v1)
+
+    # ── Soft-delete from model_pricing (v2) — best-effort ─────────────────
+    result_v2 = await db.execute(
+        select(ModelPricing).where(
+            ModelPricing.model_id == model_id,
+            ModelPricing.provider == provider,
+            ModelPricing.is_active.is_(True),
+        )
+    )
+    price_v2 = result_v2.scalar_one_or_none()
+    if price_v2 is not None:
+        price_v2.is_active = False
+        price_v2.deprecated_date = _date.today()
+
     await _invalidate_models_cache()
     logger.info("model_price_deleted", model_id=model_id, provider=provider)
-
-
-class SeedPricesResponse(BaseModel):
-    seeded: int
-    skipped: int
-    models: list[str]
-
-
-@router.post("/model-prices/seed", response_model=SeedPricesResponse)
-async def seed_model_prices(
-    db: AsyncSession = Depends(get_db_session),
-    overwrite: bool = False,
-):
-    """
-    Fetch live pricing from OpenRouter's /api/v1/models and upsert into
-    model_prices.
-
-    OpenRouter returns pricing in USD per token; we store USD per 1k tokens.
-    Models with prompt=0 and completion=0 are marked is_free=True.
-
-    Set overwrite=true to update existing rows; default skips already-priced models.
-    """
-    import httpx
-    from decimal import Decimal
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                "https://openrouter.ai/api/v1/models",
-                headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch OpenRouter models: {exc}")
-
-    models_data = data.get("data", [])
-    seeded_ids: list[str] = []
-    skipped = 0
-
-    for model in models_data:
-        model_id: str = model.get("id", "")
-        pricing = model.get("pricing") or {}
-
-        try:
-            prompt_per_token = float(pricing.get("prompt") or 0)
-            completion_per_token = float(pricing.get("completion") or 0)
-        except (ValueError, TypeError):
-            skipped += 1
-            continue
-
-        if not model_id:
-            skipped += 1
-            continue
-
-        # Convert per-token → per 1k tokens (Decimal-safe: avoid float * 1000 imprecision)
-        prompt_per_1k = (Decimal(str(prompt_per_token)) * 1000).quantize(Decimal("0.00000001"))
-        completion_per_1k = (Decimal(str(completion_per_token)) * 1000).quantize(Decimal("0.00000001"))
-        is_free = prompt_per_token == 0 and completion_per_token == 0
-
-        # ── Seed model_prices ──────────────────────────────────────────────
-        price_stmt = pg_insert(ModelPrice).values(
-            model_id=model_id,
-            provider="openrouter",
-            is_default=True,
-            prompt_usd_per_1k=prompt_per_1k,
-            completion_usd_per_1k=completion_per_1k,
-            is_free=is_free,
-        )
-        if overwrite:
-            price_stmt = price_stmt.on_conflict_do_update(
-                index_elements=["model_id", "provider"],
-                set_={
-                    "prompt_usd_per_1k": price_stmt.excluded.prompt_usd_per_1k,
-                    "completion_usd_per_1k": price_stmt.excluded.completion_usd_per_1k,
-                    "is_free": price_stmt.excluded.is_free,
-                    "updated_at": func.now(),
-                },
-            )
-        else:
-            price_stmt = price_stmt.on_conflict_do_nothing(index_elements=["model_id", "provider"])
-
-        await db.execute(price_stmt)
-
-        # ── Seed models (metadata) ─────────────────────────────────────────
-        # name/context_length/description from OpenRouter; is_enabled=true by default.
-        model_name: str = model.get("name") or model_id
-        context_length: int | None = model.get("context_length")
-        description: str | None = model.get("description")
-
-        model_stmt = pg_insert(Model).values(
-            model_id=model_id,
-            name=model_name,
-            context_length=context_length,
-            description=description,
-            is_enabled=True,
-        )
-        if overwrite:
-            model_stmt = model_stmt.on_conflict_do_update(
-                index_elements=["model_id"],
-                set_={
-                    "name": model_stmt.excluded.name,
-                    "context_length": model_stmt.excluded.context_length,
-                    "description": model_stmt.excluded.description,
-                    "updated_at": func.now(),
-                },
-            )
-        else:
-            # Never overwrite is_enabled — admin may have toggled it deliberately
-            model_stmt = model_stmt.on_conflict_do_nothing(index_elements=["model_id"])
-
-        await db.execute(model_stmt)
-        seeded_ids.append(model_id)
-
-    await db.commit()
-    await _invalidate_models_cache()
-    logger.info("model_prices_seeded", count=len(seeded_ids), skipped=skipped, overwrite=overwrite)
-    return SeedPricesResponse(seeded=len(seeded_ids), skipped=skipped, models=seeded_ids)
 
 
 # ── Admin: model registry ─────────────────────────────────────────────────────
@@ -1434,7 +1438,7 @@ class ModelRegistryOut(BaseModel):
 
 def _to_model_out(
     m: Model,
-    prices: list[ModelPrice] | None = None,
+    prices: list[ModelPrice | ModelPricing] | None = None,
     max_discount_pct: str | None = None,
 ) -> ModelRegistryOut:
     return ModelRegistryOut(
@@ -1502,17 +1506,31 @@ async def list_models_admin(
     db: AsyncSession = Depends(get_db_session),
 ):
     """List all models (including disabled) with their pricing rows. For the public listing use GET /v1/models."""
-    query = (
-        select(Model, ModelPrice)
-        .outerjoin(ModelPrice, ModelPrice.model_id == Model.model_id)
-    )
-    if is_enabled is not None:
-        query = query.where(Model.is_enabled.is_(is_enabled))
-    if type is not None:
-        query = query.where(Model.model_type == type)
+    if settings.pricing_v2:
+        query = (
+            select(Model, ModelPricing)
+            .outerjoin(
+                ModelPricing,
+                (ModelPricing.model_id == Model.model_id) & ModelPricing.is_active.is_(True),
+            )
+        )
+        if is_enabled is not None:
+            query = query.where(Model.is_enabled.is_(is_enabled))
+        if type is not None:
+            query = query.where(Model.model_type == type)
+        result = await db.execute(query.order_by(Model.model_id, ModelPricing.provider))
+    else:
+        query = (
+            select(Model, ModelPrice)
+            .outerjoin(ModelPrice, ModelPrice.model_id == Model.model_id)
+        )
+        if is_enabled is not None:
+            query = query.where(Model.is_enabled.is_(is_enabled))
+        if type is not None:
+            query = query.where(Model.model_type == type)
+        result = await db.execute(query.order_by(Model.model_id, ModelPrice.provider))
 
-    result = await db.execute(query.order_by(Model.model_id, ModelPrice.provider))
-    models_map: dict[str, tuple[Model, list[ModelPrice]]] = {}
+    models_map: dict[str, tuple[Model, list]] = {}
     for m, mp in result.all():
         if m.model_id not in models_map:
             models_map[m.model_id] = (m, [])
@@ -2103,207 +2121,6 @@ async def delete_global_template(
     template = await _get_global_or_404(db, template_id)
     await db.delete(template)
     logger.info("global_template_deleted", template_id=str(template.id), name=template.name)
-# ── Test & register models ─────────────────────────────────────────────────────
-
-class TestModelItem(BaseModel):
-    model_id: str
-    """Canonical RouterSVC model ID, e.g. 'anthropic/claude-3-haiku'."""
-    provider_model_id: str | None = None
-    """
-    Exact upstream model ID the provider expects, e.g.
-    'us.anthropic.claude-3-haiku-20240307-v1:0' for Bedrock.
-    If omitted, the adapter falls back to its internal _MODEL_MAP translation.
-    Stored in model_prices.provider_model_id on success.
-    """
-    input_token_cost_per_1k: float | None = None
-    output_token_cost_per_1k: float | None = None
-
-
-class TestModelsRequest(BaseModel):
-    is_dry_run: bool = True
-
-    provider: str
-    """
-    Provider slug to test against: openrouter | vertex | bedrock | openai | qwen.
-    Credentials are read from server config — no keys in the request body.
-    """
-    models: list[TestModelItem]
-    """List of models to test."""
-    prompt: str = "Reply with just the word OK and nothing else."
-    timeout: float = 30.0
-
-
-def _derive_model_name(model_id: str) -> str:
-    """Derive a human-readable display name from a canonical model ID."""
-    slug = model_id.split("/", 1)[-1]
-    return slug.replace("-", " ").replace("_", " ").replace(".", " ").title()
-
-
-async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, None]:
-    """
-    Async generator that tests each model against the provider, writes results
-    to the DB, and yields SSE events.
-
-    Per-model DB logic
-    ------------------
-    models row       — INSERT if not exists (is_enabled=false); on pass → SET is_enabled=true
-    model_prices row — INSERT if not exists (price=0, is_default=false); on pass →
-                       if no other row for this model_id has is_default=true → SET is_default=true
-    Both inserts use ON CONFLICT DO NOTHING — existing rows are never overwritten.
-    """
-    from app.db.engine import get_session_factory
-    from app.providers.registry import get_adapter
-    from app.schemas.chat import ChatCompletionRequest, Message
-
-    # Validate provider has a registered adapter before streaming anything
-    try:
-        adapter = get_adapter(body.provider)
-    except Exception as exc:
-        yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n".encode()
-        return
-
-    session_factory = get_session_factory()
-    passed = failed = 0
-
-    for item in body.models:
-        model_id              = item.model_id
-        provider_model_id     = item.provider_model_id
-        prompt_usd_per_1k     = item.input_token_cost_per_1k
-        completion_usd_per_1k = item.output_token_cost_per_1k
-        t0                    = time.monotonic()
-        status                = "fail"
-        error: str | None     = None
-
-        # ── Test the model ─────────────────────────────────────────────────
-        req = ChatCompletionRequest(
-            model=model_id,
-            messages=[Message(role="user", content=body.prompt)],
-            max_tokens=32,
-            stream=False,
-        )
-        try:
-            resp = await asyncio.wait_for(
-                adapter.chat_completion(
-                    req, api_key=None, owner=None,
-                    provider_model_id=provider_model_id,
-                ),
-                timeout=body.timeout,
-            )
-            # Verify the model responded — check content OR finish_reason
-            # (reasoning models like gpt-5 may return null content)
-            choice = (resp.get("choices") or [{}])[0]
-            text = (choice.get("message", {}).get("content") or "").strip()
-            finish_reason = choice.get("finish_reason") or ""
-            if text or finish_reason:
-                status = "pass"
-            else:
-                status = "fail"
-                error  = "Empty response content"
-        except asyncio.TimeoutError:
-            status = "timeout"
-            error  = f"Timed out after {body.timeout:.0f}s"
-        except Exception as exc:  # noqa: BLE001
-            status = "fail"
-            error  = str(exc)[:200]
-
-        latency_ms   = int((time.monotonic() - t0) * 1000)
-        test_passed  = status == "pass"
-        is_default   = False
-
-        if test_passed:
-            passed += 1
-        else:
-            failed += 1
-
-        # ── DB writes (only on pass) ────────────────────────────────────────
-        if test_passed and not body.is_dry_run:
-            name = _derive_model_name(model_id)
-            try:
-                async with session_factory() as db:
-                    # 1. Insert model row if it doesn't exist (disabled by default)
-                    await db.execute(
-                        pg_insert(Model).values(
-                            model_id=model_id,
-                            name=name,
-                            context_length=None,
-                            brand=model_id.split("/")[0],
-                            description=None,
-                            is_enabled=False,
-                        ).on_conflict_do_nothing(index_elements=["model_id"])
-                    )
-
-                    # 2. Insert model_prices row if (model_id, provider) not present
-                    await db.execute(
-                        pg_insert(ModelPrice).values(
-                            model_id=model_id,
-                            provider=body.provider,
-                            provider_model_id=provider_model_id,
-                            is_default=False,
-                            prompt_usd_per_1k=prompt_usd_per_1k,
-                            completion_usd_per_1k=completion_usd_per_1k,
-                            is_free=False,
-                        ).on_conflict_do_nothing(index_elements=["model_id", "provider"])
-                    )
-
-                    if test_passed:
-                        # 3. Enable the model
-                        await db.execute(
-                            update(Model)
-                            .where(Model.model_id == model_id)
-                            .values(is_enabled=True)
-                        )
-
-                        # 4. Clear any existing default, then set this provider as default
-                        await db.execute(
-                            update(ModelPrice)
-                            .where(ModelPrice.model_id == model_id)
-                            .values(is_default=False)
-                        )
-                        await db.execute(
-                            update(ModelPrice)
-                            .where(
-                                ModelPrice.model_id == model_id,
-                                ModelPrice.provider == body.provider,
-                            )
-                            .values(
-                                is_default=True,
-                                prompt_usd_per_1k=prompt_usd_per_1k,
-                                completion_usd_per_1k=completion_usd_per_1k,
-                            )
-                        )
-                        is_default = True
-
-                    await db.commit()
-            except Exception as db_exc:  # noqa: BLE001
-                logger.exception(
-                    "test_models_db_error",
-                    model_id=model_id,
-                    provider=body.provider,
-                    error=str(db_exc),
-                )
-
-        # ── Yield SSE event ────────────────────────────────────────────────
-        event = {
-            "model_id":   model_id,
-            "status":     status,
-            "latency_ms": latency_ms,
-            "is_default": is_default,
-            "error":      error,
-        }
-        yield f"data: {json.dumps(event)}\n\n".encode()
-
-    # Invalidate models cache so GET /v1/models reflects new state immediately
-    try:
-        redis = await get_redis()
-        await redis.delete("routerv:models:list")
-    except Exception:  # noqa: BLE001
-        pass
-
-    # Final summary event
-    yield f"data: {json.dumps({'type': 'summary', 'total': len(body.models), 'passed': passed, 'failed': failed, 'is_dry_run': body.is_dry_run})}\n\n".encode()
-    yield b"data: [DONE]\n\n"
-
-
 # ── User detail analytics ─────────────────────────────────────────────────────
 
 class UserDetailSummary(BaseModel):
@@ -3158,33 +2975,3 @@ async def get_payment_transactions(
         offset=offset,
     )
 
-
-@router.post("/test-models", summary="Test models against a provider and register results")
-async def test_models(body: TestModelsRequest) -> StreamingResponse:
-    """
-    Test each model in the list against the specified provider using server-side
-    credentials, then register the results in the DB.
-
-    Streams SSE events — one per model — as they complete, followed by a summary.
-
-    **SSE event format (per model)**
-    ```json
-    {"model_id": "anthropic/claude-3-haiku", "status": "pass", "latency_ms": 342, "is_default": true, "error": null}
-    ```
-
-    **SSE summary event**
-    ```json
-    {"type": "summary", "total": 5, "passed": 4, "failed": 1}
-    ```
-
-    **DB behaviour**
-    - `models` row: inserted with `is_enabled=false` if new; set to `is_enabled=true` on pass
-    - `model_prices` row: inserted with `price=0, is_default=false` if new (model_id, provider) pair;
-      `is_default` set to `true` on pass only if no other provider already holds the default
-    - Existing rows are never overwritten (ON CONFLICT DO NOTHING)
-    """
-    return StreamingResponse(
-        _test_models_stream(body),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )

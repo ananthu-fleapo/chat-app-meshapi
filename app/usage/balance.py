@@ -31,15 +31,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import UTC, datetime
 
 from app.db.engine import get_session_factory
-from app.db.models import Discount, ModelPrice, UserBalance
+from app.db.models import Discount, UserBalance
 from app.exceptions import PaymentRequiredError
+from app.pricing.resolver import PriceRow, get_default_price_row
 
 logger = structlog.get_logger()
 
 
-async def _lookup_model_price(model: str, db: AsyncSession) -> ModelPrice | None:
+async def _lookup_model_price(model: str, db: AsyncSession) -> PriceRow | None:
     """
-    Look up a ModelPrice row with :free-suffix abuse prevention.
+    Look up a price row with :free-suffix abuse prevention.
 
     Lookup order:
       1. Exact match on model — covers all normal cases.
@@ -50,27 +51,16 @@ async def _lookup_model_price(model: str, db: AsyncSession) -> ModelPrice | None
          unknown, return None (allow through).
 
     This keeps OpenRouter's legitimate ':free' variants working (they have
-    their own exact rows in model_prices) while closing the abuse vector.
+    their own exact rows in the price table) while closing the abuse vector.
+    Routes to model_prices or model_pricing based on settings.pricing_v2.
     """
-    result = await db.execute(
-        select(ModelPrice).where(
-            ModelPrice.model_id == model,
-            ModelPrice.is_default.is_(True),
-        )
-    )
-    row = result.scalar_one_or_none()
+    row = await get_default_price_row(model, db)
     if row is not None:
         return row
 
     if model.endswith(":free"):
         base = model.removesuffix(":free")
-        result = await db.execute(
-            select(ModelPrice).where(
-                ModelPrice.model_id == base,
-                ModelPrice.is_default.is_(True),
-            )
-        )
-        base_row = result.scalar_one_or_none()
+        base_row = await get_default_price_row(base, db)
         # Only return the base row when it is a paid model — that means the
         # ':free' suffix was fabricated to evade the balance check.
         if base_row is not None and not base_row.is_free:

@@ -1139,9 +1139,9 @@ def _make_routing_row(provider: str, provider_model_id: str | None = None, respo
 
 
 def _make_routing_result(provider: str | None, provider_model_id: str | None = None, responses_provider_model_id: str | None = None):
-    """make_execute_result variant for resolve_routing (uses .one_or_none())."""
+    """make_execute_result variant for resolve_routing (uses .scalar_one_or_none())."""
     result = MagicMock()
-    result.one_or_none.return_value = (
+    result.scalar_one_or_none.return_value = (
         _make_routing_row(provider, provider_model_id, responses_provider_model_id) if provider is not None else None
     )
     return result

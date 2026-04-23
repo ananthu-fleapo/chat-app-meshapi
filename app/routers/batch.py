@@ -63,9 +63,10 @@ from app.auth.dependencies import get_authenticated_key
 from app.cache.rate_limiter import check_rate_limits
 from app.config import settings
 from app.db.engine import get_session_factory
-from app.db.models import ApiKey, BatchFile, BatchJob, Model, ModelPrice, UsageEvent
+from app.db.models import ApiKey, BatchFile, BatchJob, UsageEvent
 from app.db.session import get_db_session
 from app.exceptions import RouterVError, UnsupportedModelError
+from app.pricing.resolver import get_price_row, resolve_canonical_model_id
 from app.providers.base import ProviderAdapter
 from app.providers.key_resolver import resolve_upstream_key
 from app.providers.registry import get_adapter, resolve_batch_routing
@@ -100,36 +101,13 @@ async def _resolve_canonical_model(raw_model: str, db: AsyncSession) -> str:
     """
     Resolve a raw model string from the JSONL body.model to a canonical model_id.
 
-    Lookup order:
-      1. Exact match on model_prices.model_id  (e.g. "openai/gpt-4o-mini")
-      2. Match on model_prices.provider_model_id  (e.g. "gpt-4o-mini-2024-07-18")
-    Both paths require models.is_enabled=True.
-
-    Raises UnsupportedModelError if neither lookup finds a row.
+    Dispatches to model_prices or model_pricing based on settings.pricing_v2.
+    Raises UnsupportedModelError if no match is found.
     """
-    # 1. Exact model_id match
-    result = await db.execute(
-        select(ModelPrice.model_id)
-        .join(Model, Model.model_id == ModelPrice.model_id)
-        .where(ModelPrice.model_id == raw_model, Model.is_enabled.is_(True))
-        .limit(1)
-    )
-    row = result.one_or_none()
-    if row is not None:
-        return row.model_id
-
-    # 2. provider_model_id match (bare upstream IDs like "gpt-4o-mini-2024-07-18")
-    result = await db.execute(
-        select(ModelPrice.model_id)
-        .join(Model, Model.model_id == ModelPrice.model_id)
-        .where(ModelPrice.provider_model_id == raw_model, Model.is_enabled.is_(True))
-        .limit(1)
-    )
-    row = result.one_or_none()
-    if row is not None:
-        return row.model_id
-
-    raise UnsupportedModelError(raw_model)
+    canonical = await resolve_canonical_model_id(raw_model, db)
+    if canonical is None:
+        raise UnsupportedModelError(raw_model)
+    return canonical
 
 
 async def _resolve_and_map_models(
@@ -183,16 +161,11 @@ async def _resolve_and_map_models(
         provider, provider_model_id, _ = await resolve_batch_routing(canonical, db)
 
         # Enforce the supports_batching capability flag.
-        sb_result = await db.execute(
-            select(ModelPrice.supports_batching)
-            .where(ModelPrice.model_id == canonical, ModelPrice.provider == provider)
-            .limit(1)
-        )
-        sb_row = sb_result.one_or_none()
-        if not sb_row or not sb_row.supports_batching:
+        _batch_row = await get_price_row(canonical, provider, db)
+        if not _batch_row or not _batch_row.supports_batching:
             raise RouterVError(
                 f"Model '{raw}' does not support the Batch API. "
-                "Enable supports_batching in model_prices to use this model in a batch.",
+                "Enable supports_batching in the price table to use this model in a batch.",
                 status_code=400,
                 error_code="model_not_supported_for_batching",
             )
@@ -309,29 +282,15 @@ async def _sync_usage(
     _canonical_cache: dict[str, str] = {}
 
     async def _resolve_item_model(raw: str) -> str:
-        """Resolve a versioned provider model ID to a canonical model_prices.model_id."""
+        """Resolve a versioned provider model ID to a canonical model_id."""
         if raw in _canonical_cache:
             return _canonical_cache[raw]
-        resolved = raw
         async with get_session_factory()() as s:
-            from app.db.models import ModelPrice as _MP
-            # 1. Exact model_id match (unlikely for versioned IDs, but cheap to try)
-            r = await s.execute(
-                select(_MP.model_id).where(_MP.model_id == raw).limit(1)
-            )
-            row = r.one_or_none()
-            if row:
-                resolved = row.model_id
-            else:
-                # 2. provider_model_id match — strip provider prefix if present
-                #    "openai/gpt-4.1-2025-04-14" → "gpt-4.1-2025-04-14"
-                provider_part = raw.split("/", 1)[-1] if "/" in raw else raw
-                r = await s.execute(
-                    select(_MP.model_id).where(_MP.provider_model_id == provider_part).limit(1)
-                )
-                row = r.one_or_none()
-                if row:
-                    resolved = row.model_id
+            canonical = await resolve_canonical_model_id(raw, s)
+            # provider_model_id match may need the bare ID without the org prefix
+            if canonical is None and "/" in raw:
+                canonical = await resolve_canonical_model_id(raw.split("/", 1)[-1], s)
+        resolved = canonical or raw
         _canonical_cache[raw] = resolved
         return resolved
 

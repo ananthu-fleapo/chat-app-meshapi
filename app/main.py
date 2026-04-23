@@ -19,7 +19,7 @@ from app.providers.registry import register_adapter
 from prometheus_fastapi_instrumentator import Instrumentator
 import asyncio
 
-from app.routers import admin, admin_test_embeddings, admin_test_responses, auth, balance, batch, coupons, embeddings, error_logs, fx_rates, gstin, inference, keys, metrics_daily, models, payments, responses, usage
+from app.routers import admin, admin_test_completions, admin_test_embeddings, admin_test_responses, auth, balance, batch, coupons, embeddings, error_logs, fx_rates, gstin, inference, keys, metrics_daily, models, payments, responses, usage
 
 from fastapi.middleware.cors import CORSMiddleware 
 
@@ -295,6 +295,7 @@ def create_app() -> FastAPI:
     app.include_router(error_logs.router)
 
     # Test endpoints — dev only (returns 404 in prod)
+    app.include_router(admin_test_completions.router)
     app.include_router(admin_test_responses.router)
     app.include_router(admin_test_embeddings.router)
 

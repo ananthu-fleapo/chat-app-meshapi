@@ -77,18 +77,41 @@ def _make_row(
     supports_completions: bool = True,
     supports_responses: bool = False,
     supports_embeddings: bool = False,
-) -> MagicMock:
-    """Build a mock DB row returned by the Model+ModelPrice join query."""
-    row = MagicMock()
-    row.model_id = model_id
-    row.model_type = model_type
-    row.provider = provider
-    row.provider_model_id = provider_model_id
-    row.responses_provider_model_id = responses_provider_model_id
-    row.supports_completions_api = supports_completions
-    row.supports_responses_api = supports_responses
-    row.supports_embeddings_api = supports_embeddings
-    return row
+) -> tuple[MagicMock, MagicMock]:
+    """
+    Build a (Model mock, ModelPrice mock) pair as returned by list_all_provider_price_rows.
+
+    The resolver unpacks result.all() as (Model, ModelPrice) pairs and wraps the
+    ModelPrice in _row_from_v1 → PriceRow.  model_health then receives (Model, PriceRow).
+    """
+    m = MagicMock()
+    m.model_id = model_id
+    m.model_type = model_type
+
+    mp = MagicMock()
+    mp.provider = provider
+    mp.provider_model_id = provider_model_id
+    mp.responses_provider_model_id = responses_provider_model_id
+    mp.supports_completions_api = supports_completions
+    mp.supports_responses_api = supports_responses
+    # v1 field name:
+    mp.supports_embeddings_api = supports_embeddings
+    # v2 field name (resolver reads this when pricing_v2=True):
+    mp.supports_embeddings = supports_embeddings
+    # Additional fields for _row_from_v1 / _row_from_v2
+    mp.is_free = False
+    mp.is_default = True
+    mp.prompt_usd_per_1k = None       # v1 cost field
+    mp.completion_usd_per_1k = None
+    mp.upstream_prompt_usd_per_1k = None
+    mp.upstream_completion_usd_per_1k = None
+    mp.input_cost = None              # v2 cost field
+    mp.output_cost = None
+    mp.pricing_unit = "per_1k_tokens"
+    mp.supports_thinking = False
+    mp.supports_batching = False
+
+    return (m, mp)
 
 
 def _mock_slack():

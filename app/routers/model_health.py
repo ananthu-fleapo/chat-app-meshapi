@@ -35,12 +35,11 @@ import structlog.contextvars
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from sqlalchemy import select
-
 from app.auth.dependencies import verify_webhook_key
 from app.config import settings
 from app.db.engine import get_session_factory
-from app.db.models import Model, ModelPrice
+from app.db.models import Model
+from app.pricing.resolver import list_all_provider_price_rows
 from app.notifications.slack import send_slack_alert
 from app.storage.gcs import upload_csv
 
@@ -392,53 +391,27 @@ async def run_model_health(
             detail="HEALTH_CHECK_SELF_URL and HEALTH_CHECK_API_KEY are required for model health checks",
         )
 
-    # Query all enabled models joined with ALL their model_prices rows so that
+    # Query all enabled models with ALL their provider price rows so that
     # every (model, provider) combination is tested independently.
-    # Outer join preserves models that have no pricing row at all (NULLs →
-    # capability defaults applied below).
+    # Models with no pricing row yield (Model, None) — capability defaults apply.
     async with get_session_factory()() as session:
-        result = await session.execute(
-            select(
-                Model.model_id,
-                Model.model_type,
-                ModelPrice.provider,
-                ModelPrice.supports_completions_api,
-                ModelPrice.supports_responses_api,
-                ModelPrice.supports_embeddings_api,
-            )
-            .outerjoin(ModelPrice, Model.model_id == ModelPrice.model_id)
-            .where(Model.is_enabled.is_(True))
-            .order_by(Model.model_id, ModelPrice.provider)
-        )
-        model_rows = result.all()
+        model_rows = await list_all_provider_price_rows(session)
     logger.info("model_health_models_fetched", count=len(model_rows))
 
     # Build a flat list of (ctx, test_type, coro) tuples.
     rate_limiter = _RateLimiter(settings.health_check_rpm)
     Task = tuple[ModelTestContext, str, Coroutine]
     tasks: list[Task] = []
-    for row in model_rows:
+    for m, price_row in model_rows:
         ctx = ModelTestContext(
-            model_id=row.model_id,
-            model_type=row.model_type or "unknown",
-            provider=row.provider or "openrouter",
+            model_id=m.model_id,
+            model_type=m.model_type or "unknown",
+            provider=price_row.provider if price_row is not None else "openrouter",
         )
-        # Null means no pricing row — default to completions=True, others=False.
-        supports_completions = (
-            row.supports_completions_api
-            if row.supports_completions_api is not None
-            else True
-        )
-        supports_responses = (
-            row.supports_responses_api
-            if row.supports_responses_api is not None
-            else False
-        )
-        supports_embeddings = (
-            row.supports_embeddings_api
-            if row.supports_embeddings_api is not None
-            else False
-        )
+        # None means no pricing row — default to completions=True, others=False.
+        supports_completions = price_row.supports_completions_api if price_row is not None else True
+        supports_responses = price_row.supports_responses_api if price_row is not None else False
+        supports_embeddings = price_row.supports_embeddings_api if price_row is not None else False
 
         enabled = {
             "completions": supports_completions,

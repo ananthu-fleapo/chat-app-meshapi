@@ -458,6 +458,122 @@ class ModelPrice(Base):
         )
 
 
+class ModelPricing(Base):
+    """
+    Pricing V2 — richer per-model pricing table (model_pricing).
+
+    Replaces model_prices when settings.pricing_v2 is True.
+    Supports non-token billing units (per_image, per_second, …), long-context
+    tiers, prompt-caching rates, batch discounts, and modality-specific costs.
+    All cost columns are in USD per one pricing_unit.
+    """
+
+    __tablename__ = "model_pricing"
+    __table_args__ = (
+        UniqueConstraint("model_id", "provider", name="model_pricing_model_id_provider_unique"),
+        UniqueConstraint("model_id", "provider", "effective_date", name="model_pricing_history_unique"),
+        Index("ix_model_pricing_one_default", "model_id", unique=True, postgresql_where="is_default = TRUE"),
+        Index("idx_model_pricing_provider", "provider"),
+        Index("idx_model_pricing_is_active", "is_active"),
+        Index("idx_model_pricing_effective_date", "effective_date"),
+        CheckConstraint("input_cost IS NULL OR input_cost >= 0", name="model_pricing_input_cost_nonneg"),
+        CheckConstraint("output_cost IS NULL OR output_cost >= 0", name="model_pricing_output_cost_nonneg"),
+        CheckConstraint("request_cost IS NULL OR request_cost >= 0", name="model_pricing_request_cost_nonneg"),
+        CheckConstraint(
+            "(long_context_input_cost IS NULL AND long_context_output_cost IS NULL) OR standard_context_threshold IS NOT NULL",
+            name="model_pricing_long_context_requires_threshold",
+        ),
+        CheckConstraint(
+            "(long_context_cache_read_input_cost IS NULL AND long_context_cache_write_input_cost IS NULL) OR standard_context_threshold IS NOT NULL",
+            name="model_pricing_long_context_cache_requires_threshold",
+        ),
+        CheckConstraint(
+            "deprecated_date IS NULL OR deprecated_date >= effective_date",
+            name="model_pricing_deprecated_after_effective",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # Identity
+    model_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    provider_model_id: Mapped[str] = mapped_column(Text, nullable=False)
+    model_name: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Modality & capabilities — stored as Text[] (enums created by migration)
+    modality: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    input_modalities: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
+    output_modalities: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
+    supports_tools: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    supports_structured_output: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    supports_system_prompt: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    supports_thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    supports_batching: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    supports_completions_api: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    supports_responses_api: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    supports_embeddings: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+
+    # Pricing unit & base costs
+    pricing_unit: Mapped[str] = mapped_column(Text, nullable=False)  # pricing_unit_enum
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="USD")
+    input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    output_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    request_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+
+    # Long-context tiers
+    context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    standard_context_threshold: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    long_context_input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    long_context_output_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+
+    # Prompt caching — standard context
+    cache_read_input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    cache_write_input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+
+    # Prompt caching — long context
+    long_context_cache_read_input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    long_context_cache_write_input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+
+    # Batch pricing
+    batch_input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    batch_output_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+
+    # Fine-tuning
+    training_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    fine_tuned_input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    fine_tuned_output_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+
+    # Modality-specific costs
+    image_input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    image_output_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    image_output_size: Mapped[str | None] = mapped_column(Text, nullable=True)
+    audio_input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    audio_output_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    transcription_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+
+    # Lifecycle
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    is_free: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    effective_date: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    deprecated_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ModelPricing model_id={self.model_id!r} provider={self.provider!r} "
+            f"unit={self.pricing_unit} default={self.is_default}>"
+        )
+
+
 class CurrencyConversionRate(Base):
     """
     Append-only log of FX rate snapshots fetched by the scheduler.

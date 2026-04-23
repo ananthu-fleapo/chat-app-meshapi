@@ -23,7 +23,6 @@ get_adapter(provider)
 from __future__ import annotations
 
 import structlog
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import ProviderNotAvailableError, UnsupportedModelError
@@ -74,42 +73,21 @@ async def resolve_routing(
     Both IDs are None when the column is unset — adapters fall back to their
     internal _MODEL_MAP translation in that case.
 
+    Routes to model_prices or model_pricing based on settings.pricing_v2.
+
     Lookup order:
       1. Row where (model_id=model, is_default=True)   — explicit default
       2. Any row where model_id=model                  — first available
       3. UnsupportedModelError(404)                    — model not in DB
     """
-    from app.db.models import ModelPrice
+    from app.pricing.resolver import get_default_price_row
 
-    # Prefer the is_default row; fetch all routing columns in one round-trip
-    result = await db.execute(
-        select(ModelPrice.provider, ModelPrice.provider_model_id, ModelPrice.responses_provider_model_id)
-        .where(
-            ModelPrice.model_id == model,
-            ModelPrice.is_default.is_(True),
-        )
-        .limit(1)
-    )
-    row = result.one_or_none()
+    row = await get_default_price_row(model, db)
     if row is not None:
+        if not row.is_default:
+            logger.debug("provider_resolved_no_default", model=model, provider=row.provider)
         return row.provider, row.provider_model_id, row.responses_provider_model_id
 
-    # Fall back to any row for this model (no is_default row found)
-    result = await db.execute(
-        select(ModelPrice.provider, ModelPrice.provider_model_id, ModelPrice.responses_provider_model_id)
-        .where(ModelPrice.model_id == model)
-        .limit(1)
-    )
-    row = result.one_or_none()
-    if row is not None:
-        logger.debug(
-            "provider_resolved_no_default",
-            model=model,
-            provider=row.provider,
-        )
-        return row.provider, row.provider_model_id, row.responses_provider_model_id
-
-    # Model not in price table — reject rather than silently routing to OpenRouter
     logger.warning("provider_resolved_model_not_found", model=model)
     raise UnsupportedModelError(model)
 
@@ -120,22 +98,14 @@ async def resolve_batch_routing(
     """
     Same as resolve_routing — raises UnsupportedModelError(404) when the model
     has no price table entry. Kept as a separate entry point for the Batch API.
-    """
-    from app.db.models import ModelPrice
-    from app.exceptions import UnsupportedModelError
 
-    for where in [
-        (ModelPrice.model_id == model, ModelPrice.is_default.is_(True)),
-        (ModelPrice.model_id == model,),
-    ]:
-        result = await db.execute(
-            select(ModelPrice.provider, ModelPrice.provider_model_id, ModelPrice.responses_provider_model_id)
-            .where(*where)
-            .limit(1)
-        )
-        row = result.one_or_none()
-        if row is not None:
-            return row.provider, row.provider_model_id, row.responses_provider_model_id
+    Routes to model_prices or model_pricing based on settings.pricing_v2.
+    """
+    from app.pricing.resolver import get_default_price_row
+
+    row = await get_default_price_row(model, db)
+    if row is not None:
+        return row.provider, row.provider_model_id, row.responses_provider_model_id
 
     raise UnsupportedModelError(model)
 

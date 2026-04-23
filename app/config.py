@@ -196,6 +196,13 @@ class Settings(BaseSettings):
     # Disable to reduce storage costs or when messages contain sensitive data.
     log_request_bodies: bool = True
 
+    # ── Pricing V2 ───────────────────────────────────────────────────────────
+    # When True, provider routing, balance checks, cost calculation, and the
+    # models listing all read from model_pricing instead of model_prices.
+    # Admin endpoints still manage model_prices; flip this flag only after
+    # model_pricing has been populated with equivalent data.
+    pricing_v2: bool = False
+
     # ── Prometheus ────────────────────────────────────────────────────────────
     # Internal URL of the Prometheus instance for status page metric queries.
     # Dev: http://localhost:9090  Prod: http://<host>:9090

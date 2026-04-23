@@ -109,9 +109,10 @@ class TestCheckBalance:
 
         mock_db.execute.return_value = make_execute_result(scalar=None)  # not in table
 
-        # Should not raise even with zero balance — only one execute call (price lookup)
+        # Should not raise even with zero balance.
+        # get_default_price_row makes two queries: is_default=True then any-row fallback.
         await check_balance("user-123", "unknown/model-x", mock_db)
-        assert mock_db.execute.call_count == 1
+        assert mock_db.execute.call_count == 2
 
     async def test_no_balance_row_treated_as_zero(self, mock_db):
         """User with no balance row → treated as $0 → blocked for explicitly paid model."""

@@ -52,23 +52,17 @@ async def _calc_upstream_cost(
     completion_tokens: int = 0,
 ) -> Decimal | None:
     """
-    Calculate upstream cost from model_prices.upstream_*_usd_per_1k.
+    Calculate upstream cost from the price table's upstream_*_usd_per_1k fields.
 
     Used for providers that don't report cost in their API response
     (Vertex AI, Bedrock, OpenAI Direct, Qwen).  Returns None when upstream
-    pricing is not configured for this (model, provider) pair.
+    pricing is not configured for this (model, provider) pair, or when
+    settings.pricing_v2 is True (model_pricing has no upstream cost columns).
     """
     try:
-        from app.db.models import ModelPrice
-        from sqlalchemy import select
+        from app.pricing.resolver import get_price_row
         async with get_session_factory()() as session:
-            result = await session.execute(
-                select(ModelPrice).where(
-                    ModelPrice.model_id == model,
-                    ModelPrice.provider == provider,
-                )
-            )
-            row = result.scalar_one_or_none()
+            row = await get_price_row(model, provider, session)
 
         if row is None or row.upstream_prompt_usd_per_1k is None:
             return None
