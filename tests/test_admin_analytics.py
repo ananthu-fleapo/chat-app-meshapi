@@ -521,6 +521,79 @@ class TestPaymentTransactions:
         assert tx["discount_amount_display"] is None
         assert tx["email"] is None
 
+    def _make_event(self, event_id: str, user_id: str, created_at: datetime):
+        event = MagicMock()
+        event.id = event_id
+        event.user_id = user_id
+        event.payment_id = f"pay_{event_id}"
+        event.provider = "stripe"
+        event.order_id = None
+        event.currency = "USD"
+        event.amount = 1000
+        event.amount_usd = 1000
+        event.coupon_code = None
+        event.payment_metadata = None
+        event.created_at = created_at
+        return event
+
+    def _side_effect(self, mock_db, events: list):
+        count_result = MagicMock()
+        count_result.scalar_one.return_value = len(events)
+        events_result = MagicMock()
+        events_result.scalars.return_value.all.return_value = events
+        email_result = MagicMock()
+        email_result.all.return_value = []
+        mock_db.execute.side_effect = [count_result, events_result, email_result]
+
+    def test_date_from_filters_out_earlier_events(self, client, mock_db):
+        old = self._make_event("old", "u1", datetime(2026, 4, 22, tzinfo=timezone.utc))
+        recent = self._make_event("recent", "u1", datetime(2026, 4, 24, tzinfo=timezone.utc))
+        # Only recent event falls within date_from=2026-04-24
+        self._side_effect(mock_db, [recent])
+
+        resp = client.get(
+            "/admin/payments/transactions?date_from=2026-04-24",
+            headers=ADMIN_HEADERS,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["transactions"][0]["id"] == "recent"
+
+    def test_date_to_filters_out_later_events(self, client, mock_db):
+        recent = self._make_event("recent", "u1", datetime(2026, 4, 24, tzinfo=timezone.utc))
+        # Only recent event falls within date_to=2026-04-23 — so nothing returned
+        self._side_effect(mock_db, [])
+
+        resp = client.get(
+            "/admin/payments/transactions?date_to=2026-04-23",
+            headers=ADMIN_HEADERS,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 0
+        assert data["transactions"] == []
+
+    def test_date_from_and_date_to_together(self, client, mock_db):
+        event = self._make_event("e1", "u1", datetime(2026, 4, 23, 12, 0, tzinfo=timezone.utc))
+        self._side_effect(mock_db, [event])
+
+        resp = client.get(
+            "/admin/payments/transactions?date_from=2026-04-23&date_to=2026-04-23",
+            headers=ADMIN_HEADERS,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["transactions"][0]["id"] == "e1"
+
+    def test_invalid_date_format_returns_422(self, client, mock_db):
+        resp = client.get(
+            "/admin/payments/transactions?date_from=not-a-date",
+            headers=ADMIN_HEADERS,
+        )
+        assert resp.status_code == 422
+
 
 # ── Analytics cache ───────────────────────────────────────────────────────────
 

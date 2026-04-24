@@ -26,7 +26,7 @@ Phase 6: admin provider key management
 import hashlib
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 
@@ -2944,6 +2944,8 @@ async def get_payment_transactions(
     limit: int = 50,
     offset: int = 0,
     coupon_code: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
     db: AsyncSession = Depends(get_db_session),
 ):
     """Paginated list of all payment transactions across all users, newest first."""
@@ -2952,6 +2954,14 @@ async def get_payment_transactions(
     if coupon_code:
         normalized = coupon_code.strip().upper()
         filt = func.upper(PaymentEvent.coupon_code) == normalized
+        base_q = base_q.where(filt)
+        count_q = count_q.where(filt)
+    if date_from:
+        filt = PaymentEvent.created_at >= datetime.combine(date_from, time.min)
+        base_q = base_q.where(filt)
+        count_q = count_q.where(filt)
+    if date_to:
+        filt = PaymentEvent.created_at <= datetime.combine(date_to, time.max)
         base_q = base_q.where(filt)
         count_q = count_q.where(filt)
 
