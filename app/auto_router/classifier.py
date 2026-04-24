@@ -120,7 +120,6 @@ async def call_classifier(
         raw_usage = response.get("usage") or {}
         usage: dict | None = {
             "model_id": model_id,
-            "provider": provider,
             "prompt_tokens": raw_usage.get("prompt_tokens"),
             "completion_tokens": raw_usage.get("completion_tokens"),
         }
@@ -136,7 +135,7 @@ async def call_classifier(
         )
         return content, "", usage
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         elapsed_ms = int((time.monotonic() - start) * 1000)
         logger.warning(
             "classifier_timeout",

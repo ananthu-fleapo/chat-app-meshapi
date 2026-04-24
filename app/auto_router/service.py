@@ -19,7 +19,10 @@ from dataclasses import dataclass, field
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auto_router.benchmark_classifier import call_benchmark_classifier, parse_benchmark_response
+from app.auto_router.benchmark_classifier import (
+    call_benchmark_classifier,
+    parse_benchmark_response,
+)
 from app.auto_router.benchmarks import resolve_from_benchmark_category
 from app.auto_router.classifier import call_classifier, parse_classifier_response
 from app.auto_router.registry import ApiType, get_enabled_models
@@ -47,7 +50,8 @@ class ClassifierUsage:
 
 @dataclass
 class AutoRouteResult:
-    """Carries the resolved model ID, routing metadata, and classifier usage for response injection."""
+    """Carries the resolved model ID, routing metadata, and classifier usage
+    for response injection."""
 
     resolved_model_id: str
     used_fallback: bool = False
@@ -74,10 +78,8 @@ def _inject_auto_route_meta(response_body: dict, result: AutoRouteResult) -> Non
         response_body["x_classifier_usage"] = [
             {
                 "model_id": u.model_id,
-                "provider": u.provider,
                 "prompt_tokens": u.prompt_tokens,
                 "completion_tokens": u.completion_tokens,
-                "cost_usd": u.cost,
             }
             for u in result.classifier_usages
         ]
@@ -159,9 +161,7 @@ async def resolve_auto_model(
             fallback_reason="empty_registry",
             default_model_id=settings.auto_router_default_model_id,
         )
-        return _use_default(
-            "empty_registry", valid_ids, request_id, classifier_usages=[]
-        )
+        return _use_default("empty_registry", valid_ids, request_id, classifier_usages=[])
 
     classifier_usages: list[ClassifierUsage] = []
 
@@ -188,9 +188,7 @@ async def resolve_auto_model(
             resolved_model_id=resolved_id,
             resolution_method="primary_classifier",
         )
-        return AutoRouteResult(
-            resolved_model_id=resolved_id, classifier_usages=classifier_usages
-        )
+        return AutoRouteResult(resolved_model_id=resolved_id, classifier_usages=classifier_usages)
 
     # ── Fallback classifier retry ─────────────────────────────────────────────
     fallback_classifier = settings.auto_router_fallback_model_id.strip()
@@ -239,9 +237,7 @@ async def resolve_auto_model(
         fallback_reason=reason,
         default_model_id=settings.auto_router_default_model_id,
     )
-    return _use_default(
-        reason, valid_ids, request_id, classifier_usages=classifier_usages
-    )
+    return _use_default(reason, valid_ids, request_id, classifier_usages=classifier_usages)
 
 
 async def _resolve_via_benchmarks(
@@ -296,9 +292,7 @@ async def _resolve_via_benchmarks(
                 category=category,
                 mode=mode,
             )
-            return AutoRouteResult(
-                resolved_model_id=model_id, classifier_usages=classifier_usages
-            )
+            return AutoRouteResult(resolved_model_id=model_id, classifier_usages=classifier_usages)
 
     # ── Fallback classifier ───────────────────────────────────────────────────
     fallback_classifier = settings.auto_router_fallback_model_id.strip()
