@@ -169,6 +169,30 @@ class Settings(BaseSettings):
     # headroom so the key is never exhausted mid-run.
     health_check_rpm: int = 60
 
+    # ── Auto Router ───────────────────────────────────────────────────────────
+    # Master switch. When False, model="auto" returns HTTP 400.
+    auto_router_enabled: bool = True
+    # Primary classifier model — LLM that selects the best model for the request.
+    auto_router_classifier_model_id: str = "openai/gpt-4o-mini"
+    # Fallback classifier — retried when the primary classifier fails or returns
+    # an unrecognised model ID. Leave empty to skip the retry step.
+    auto_router_fallback_model_id: str = "x-ai/grok-4.1-fast"
+    # Final default model routed to when both classifiers fail (empty registry,
+    # timeout, bad response from both). Required in production.
+    # If empty or not in the enabled registry → HTTP 500 AUTOROUTE_MISCONFIGURED.
+    auto_router_default_model_id: str = "qwen/qwen3.5-27b"
+    # Abort threshold for each classifier call. Exceeded → next tier used.
+    auto_router_classifier_timeout_ms: int = 5000
+    # Caps classifier output tokens (and cost). A single model ID is ≤ 16 chars.
+    auto_router_classifier_max_tokens: int = 16
+    # Deterministic classifier output.
+    auto_router_classifier_temperature: float = 0.0
+    # When True, inject benchmark performance rankings into the classifier prompt
+    # so it can make better-informed model selections per task type.
+    # The existing registry-based candidate list is still used; this only enriches
+    # the prompt with domain-level ranking hints from ai-benchmarks.
+    auto_router_use_benchmarks: bool = True
+
     # ── CORS ─────────────────────────────────────────────────────────────────
     # Comma-separated list of allowed origins for browser requests.
     # Dev default "*" — in prod set to your exact frontend URL(s), e.g.:

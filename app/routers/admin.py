@@ -1048,22 +1048,16 @@ def _to_price_out(p: ModelPrice | ModelPricing) -> ModelPriceOut:
     )
 
 
-_MODELS_CACHE_KEY = "routerv:models:list"
-
-
 async def _invalidate_models_cache() -> None:
     """
-    Evict the public models list cache so the next request fetches fresh data.
+    Evict the public models list cache and all auto-router filtered caches so the
+    next request fetches fresh data from Postgres.
 
     Called after any admin write to `models` or `model_prices` so that
     changes are visible within seconds rather than waiting for the 5-min TTL.
     """
-    redis = get_redis()
-    if redis is not None:
-        try:
-            await redis.delete(_MODELS_CACHE_KEY)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("models_cache_invalidation_failed", error=str(exc))
+    from app.models.cache import invalidate_models_cache
+    await invalidate_models_cache()
 
 
 async def _clear_default(model_id: str, db: AsyncSession) -> None:

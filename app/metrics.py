@@ -124,6 +124,26 @@ REDIS_COMMANDS_PROCESSED_SNAPSHOT = Gauge(
 )
 
 
+# ── Auto Router ───────────────────────────────────────────────────────────────
+
+AUTO_ROUTER_REQUESTS = Counter(
+    "gateway_auto_router_requests_total",
+    "Total requests routed through the Auto Router.",
+)
+
+AUTO_ROUTER_FALLBACK = Counter(
+    "gateway_auto_router_fallback_total",
+    "Auto Router requests that fell back to the configured default model.",
+    ["reason"],  # empty_registry | classifier_error | classifier_timeout | invalid_response
+)
+
+AUTO_ROUTER_CLASSIFIER_LATENCY = Histogram(
+    "gateway_auto_router_classifier_latency_ms",
+    "Classifier LLM call latency in milliseconds.",
+    buckets=[50, 100, 250, 500, 1000, 2000, 3000, 5000, 10000],
+)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def record_inference(

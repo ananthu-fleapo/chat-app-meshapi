@@ -91,7 +91,11 @@ class UnsupportedModelError(RouterVError):
     message = "Model not found or not supported."
 
     def __init__(self, model: str | None = None) -> None:
-        msg = f"Model '{model}' is not supported or is invalid." if model else self.__class__.message
+        msg = (
+            f"Model '{model}' is not supported or is invalid."
+            if model
+            else self.__class__.message
+        )
         super().__init__(msg)
 
 
@@ -171,9 +175,18 @@ class UpstreamError(RouterVError):
 
 
 class GatewayTimeoutError(RouterVError):
-    status_code = 500
+    status_code = 504
     error_code = "gateway_timeout"
     message = "Upstream provider did not respond in time."
+
+
+class AutoRouterMisconfiguredError(RouterVError):
+    status_code = 500
+    error_code = "AUTOROUTE_MISCONFIGURED"
+    message = "Auto-router fallback model is not configured or not in the model registry."
+
+    def __init__(self, detail: str | None = None) -> None:
+        super().__init__(detail or self.__class__.message)
 
 
 # ── Handlers ─────────────────────────────────────────────────────────────────

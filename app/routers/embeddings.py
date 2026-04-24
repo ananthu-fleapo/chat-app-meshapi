@@ -15,11 +15,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.config_resolver import resolve_embeddings_config
 from app.auth.dependencies import get_authenticated_key
+from app.auto_router.service import (
+    AutoRouteResult,
+    _inject_auto_route_meta,
+    _is_auto,
+    resolve_auto_model,
+)
 from app.cache.rate_limiter import check_free_model_rate_limits, check_rate_limits
 from app.config import settings
 from app.db.models import ApiKey
 from app.db.session import get_db_session
-from app.exceptions import ModelCapabilityError
+from app.exceptions import ModelCapabilityError, UnprocessableEntityError
 from app.pricing.resolver import get_price_row
 from app.providers.key_resolver import resolve_upstream_key
 from app.providers.registry import get_adapter, resolve_routing
@@ -32,112 +38,186 @@ router = APIRouter()
 logger = structlog.get_logger()
 
 
+def _extract_embeddings_content(input_) -> str:
+    """Return representative text from an embeddings input for classifier routing."""
+    if isinstance(input_, str):
+        return input_[:2000]
+    if isinstance(input_, list) and input_ and isinstance(input_[0], str):
+        return input_[0][:2000]
+    return ""  # token ID arrays — not meaningful text for routing
+
+
 @router.post(
     "/v1/embeddings",
     responses={
         400: {
             "description": "Model does not support embeddings API",
-            "content": {"application/json": {"example": {
-                "error": {"code": "model_capability_not_supported", "message": "Model 'gpt-4o' does not support the embeddings API."},
-                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            }}},
+            "content": {
+                "application/json": {
+                    "example": {
+                        "error": {
+                            "code": "model_capability_not_supported",
+                            "message": "Model 'gpt-4o' does not support the embeddings API.",
+                        },
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    }
+                }
+            },
         },
         401: {
             "description": "Missing or invalid API key",
-            "content": {"application/json": {"example": {
-                "error": {"code": "unauthorized", "message": "Invalid or missing API key."},
-                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            }}},
+            "content": {
+                "application/json": {
+                    "example": {
+                        "error": {
+                            "code": "unauthorized",
+                            "message": "Invalid or missing API key.",
+                        },
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    }
+                }
+            },
         },
         402: {
             "description": "Insufficient balance or spend cap reached",
-            "content": {"application/json": {"examples": {
-                "spend_cap_reached": {
-                    "summary": "Per-key spend cap reached",
-                    "value": {
-                        "error": {"code": "spend_limit_exceeded", "message": "Spend cap of $10.0000 reached. Current spend: $10.0023. Contact your administrator to increase the cap."},
-                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-                    },
-                },
-                "no_balance": {
-                    "summary": "Insufficient credit balance",
-                    "value": {
-                        "error": {"code": "spend_limit_exceeded", "message": "Insufficient balance. Top up your account to use paid models."},
-                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-                    },
-                },
-            }}},
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "spend_cap_reached": {
+                            "summary": "Per-key spend cap reached",
+                            "value": {
+                                "error": {
+                                    "code": "spend_limit_exceeded",
+                                    "message": "Spend cap of $10.0000 reached. Current spend: $10.0023. Contact your administrator to increase the cap.",
+                                },
+                                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                            },
+                        },
+                        "no_balance": {
+                            "summary": "Insufficient credit balance",
+                            "value": {
+                                "error": {
+                                    "code": "spend_limit_exceeded",
+                                    "message": "Insufficient balance. Top up your account to use paid models.",
+                                },
+                                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                            },
+                        },
+                    }
+                }
+            },
         },
         403: {
             "description": "API key is suspended",
-            "content": {"application/json": {"example": {
-                "error": {"code": "forbidden", "message": "API key is suspended."},
-                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            }}},
+            "content": {
+                "application/json": {
+                    "example": {
+                        "error": {
+                            "code": "forbidden",
+                            "message": "API key is suspended.",
+                        },
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    }
+                }
+            },
         },
         422: {
             "description": "Request validation failed",
-            "content": {"application/json": {"example": {
-                "error": {
-                    "code": "validation_error",
-                    "message": "Request validation failed.",
-                    "details": [{"type": "missing", "loc": ["body", "input"], "msg": "Field required"}],
-                },
-                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            }}},
+            "content": {
+                "application/json": {
+                    "example": {
+                        "error": {
+                            "code": "validation_error",
+                            "message": "Request validation failed.",
+                            "details": [
+                                {
+                                    "type": "missing",
+                                    "loc": ["body", "input"],
+                                    "msg": "Field required",
+                                }
+                            ],
+                        },
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    }
+                }
+            },
         },
         429: {
             "description": "Rate limit exceeded (RPM or RPD)",
-            "content": {"application/json": {"examples": {
-                "rpm_exceeded": {
-                    "summary": "Requests-per-minute limit hit",
-                    "value": {
-                        "error": {"code": "rate_limit_exceeded", "message": "RPM limit of 60 req/min exceeded."},
-                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-                    },
-                },
-                "rpd_exceeded": {
-                    "summary": "Requests-per-day limit hit",
-                    "value": {
-                        "error": {"code": "rate_limit_exceeded", "message": "RPD limit of 1000 req/day exceeded."},
-                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-                    },
-                },
-            }}},
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "rpm_exceeded": {
+                            "summary": "Requests-per-minute limit hit",
+                            "value": {
+                                "error": {
+                                    "code": "rate_limit_exceeded",
+                                    "message": "RPM limit of 60 req/min exceeded.",
+                                },
+                                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                            },
+                        },
+                        "rpd_exceeded": {
+                            "summary": "Requests-per-day limit hit",
+                            "value": {
+                                "error": {
+                                    "code": "rate_limit_exceeded",
+                                    "message": "RPD limit of 1000 req/day exceeded.",
+                                },
+                                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                            },
+                        },
+                    }
+                }
+            },
         },
         500: {
             "description": "Upstream provider error or gateway timeout",
-            "content": {"application/json": {"examples": {
-                "upstream_error": {
-                    "summary": "Upstream provider returned an error",
-                    "value": {
-                        "error": {
-                            "code": "upstream_error",
-                            "message": "Upstream provider returned an error.",
-                            "upstream_detail": "{\"error\":{\"message\":\"Input too large for model\",\"code\":413}}",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "upstream_error": {
+                            "summary": "Upstream provider returned an error",
+                            "value": {
+                                "error": {
+                                    "code": "upstream_error",
+                                    "message": "Upstream provider returned an error.",
+                                    "upstream_detail": '{"error":{"message":"Input too large for model","code":413}}',
+                                },
+                                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                            },
                         },
-                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-                    },
-                },
-                "gateway_timeout": {
-                    "summary": "Upstream timed out",
-                    "value": {
-                        "error": {"code": "gateway_timeout", "message": "Upstream provider did not respond in time."},
-                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-                    },
-                },
-                "internal_error": {
-                    "summary": "Internal platform error (DB failure — FastAPI default format)",
-                    "value": {"detail": "Internal Server Error"},
-                },
-            }}},
+                        "gateway_timeout": {
+                            "summary": "Upstream timed out",
+                            "value": {
+                                "error": {
+                                    "code": "gateway_timeout",
+                                    "message": "Upstream provider did not respond in time.",
+                                },
+                                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                            },
+                        },
+                        "internal_error": {
+                            "summary": "Internal platform error (DB failure — FastAPI default format)",
+                            "value": {"detail": "Internal Server Error"},
+                        },
+                    }
+                }
+            },
         },
         503: {
             "description": "Upstream provider not available — required credentials not configured on this server",
-            "content": {"application/json": {"example": {
-                "error": {"code": "provider_not_available", "message": "Provider 'vertex' is not available. The required credentials may not be configured on this server."},
-                "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            }}},
+            "content": {
+                "application/json": {
+                    "example": {
+                        "error": {
+                            "code": "provider_not_available",
+                            "message": "Provider 'vertex' is not available. The required credentials may not be configured on this server.",
+                        },
+                        "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    }
+                }
+            },
         },
     },
 )
@@ -163,6 +243,38 @@ async def create_embeddings(
         await check_spend_cap(str(key.id), key.spend_cap_usd, db)
 
     body = resolve_embeddings_config(raw_body, key)
+
+    # ── Auto Router: resolve model="auto" to a concrete model ID ─────────────
+    auto_route_result: AutoRouteResult | None = None
+    if _is_auto(body.model):
+        if not settings.auto_router_enabled:
+            raise UnprocessableEntityError(
+                "model='auto' is not supported. The Auto Router is disabled on this gateway.",
+                status_code=400,
+            )
+        user_content = _extract_embeddings_content(body.input)
+        auto_route_result = await resolve_auto_model(
+            user_content, "embeddings", db=db, request_id=request_id, owner=key.owner
+        )
+        body = body.model_copy(update={"model": auto_route_result.resolved_model_id})
+        for _cu in auto_route_result.classifier_usages:
+            fire_usage_log(
+                owner=key.owner,
+                key_id=str(key.id),
+                request_id=request_id,
+                model=_cu.model_id,
+                provider=_cu.provider,
+                template_id=None,
+                stream=False,
+                prompt_tokens=_cu.prompt_tokens,
+                completion_tokens=_cu.completion_tokens,
+                cached_tokens=None,
+                upstream_cost=_cu.cost,
+                latency_ms=None,
+                status="success",
+                error_code=None,
+            )
+    # ─────────────────────────────────────────────────────────────────────────
 
     is_free_model = await check_balance(key.owner, body.model, db)
     if is_free_model:
@@ -238,6 +350,9 @@ async def create_embeddings(
         model_used=response_body.get("model", body.model),
         prompt_tokens=usage.get("prompt_tokens"),
     )
+
+    if auto_route_result is not None and response_body is not None:
+        _inject_auto_route_meta(response_body, auto_route_result)
 
     return JSONResponse(
         content=response_body,

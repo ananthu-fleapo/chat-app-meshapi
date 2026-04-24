@@ -23,6 +23,7 @@ from .base import (
     ProviderNotAvailableError,
     UpstreamError,
     GatewayTimeoutError,
+    AutoRouterMisconfiguredError,
 )
 
 # ── Provider error codes ─────────────────────────────────────────────

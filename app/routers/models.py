@@ -35,15 +35,12 @@ from app.cache.redis_client import get_redis
 from app.db.engine import get_session_factory
 from app.db.models import Discount, Model
 from app.db.session import get_db_session
+from app.models.cache import MODELS_CACHE_KEY as _MODELS_CACHE_KEY
+from app.models.cache import MODELS_CACHE_TTL as _MODELS_CACHE_TTL
 from app.pricing.resolver import PriceRow, list_default_price_rows
 
 router = APIRouter(tags=["models"])
 logger = structlog.get_logger()
-
-# In-house DB — 5-minute TTL is a safe balance between freshness and DB load.
-# Admin writes to `models` or `model_prices` invalidate this key immediately.
-_MODELS_CACHE_KEY = "routerv:models:list"
-_MODELS_CACHE_TTL = 300  # 5 minutes
 
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────

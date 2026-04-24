@@ -23,7 +23,6 @@ from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.auth.control_plane import ControlPlaneIdentity, get_admin_user
-from app.cache.redis_client import get_redis
 from app.db.models import Model, ModelPrice
 
 router = APIRouter(prefix="/test", tags=["test"])
@@ -91,13 +90,13 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
     passed = failed = 0
 
     for item in body.models:
-        model_id              = item.model_id
-        provider_model_id     = item.provider_model_id
-        prompt_usd_per_1k     = item.input_token_cost_per_1k
+        model_id = item.model_id
+        provider_model_id = item.provider_model_id
+        prompt_usd_per_1k = item.input_token_cost_per_1k
         completion_usd_per_1k = item.output_token_cost_per_1k
-        t0                    = time.monotonic()
-        status                = "fail"
-        error: str | None     = None
+        t0 = time.monotonic()
+        status = "fail"
+        error: str | None = None
 
         # ── Test the model ─────────────────────────────────────────────────
         req = ChatCompletionRequest(
@@ -109,7 +108,9 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
         try:
             resp = await asyncio.wait_for(
                 adapter.chat_completion(
-                    req, api_key=None, owner=None,
+                    req,
+                    api_key=None,
+                    owner=None,
                     provider_model_id=provider_model_id,
                 ),
                 timeout=body.timeout,
@@ -123,17 +124,17 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                 status = "pass"
             else:
                 status = "fail"
-                error  = "Empty response content"
-        except asyncio.TimeoutError:
+                error = "Empty response content"
+        except TimeoutError:
             status = "timeout"
-            error  = f"Timed out after {body.timeout:.0f}s"
+            error = f"Timed out after {body.timeout:.0f}s"
         except Exception as exc:  # noqa: BLE001
             status = "fail"
-            error  = str(exc)[:200]
+            error = str(exc)[:200]
 
-        latency_ms   = int((time.monotonic() - t0) * 1000)
-        test_passed  = status == "pass"
-        is_default   = False
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        test_passed = status == "pass"
+        is_default = False
 
         if test_passed:
             passed += 1
@@ -147,19 +148,22 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                 async with session_factory() as db:
                     # 1. Insert model row if it doesn't exist (disabled by default)
                     await db.execute(
-                        pg_insert(Model).values(
+                        pg_insert(Model)
+                        .values(
                             model_id=model_id,
                             name=name,
                             context_length=None,
                             brand=model_id.split("/")[0],
                             description=None,
                             is_enabled=False,
-                        ).on_conflict_do_nothing(index_elements=["model_id"])
+                        )
+                        .on_conflict_do_nothing(index_elements=["model_id"])
                     )
 
                     # 2. Insert model_prices row if (model_id, provider) not present
                     await db.execute(
-                        pg_insert(ModelPrice).values(
+                        pg_insert(ModelPrice)
+                        .values(
                             model_id=model_id,
                             provider=body.provider,
                             provider_model_id=provider_model_id,
@@ -167,15 +171,14 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                             prompt_usd_per_1k=prompt_usd_per_1k,
                             completion_usd_per_1k=completion_usd_per_1k,
                             is_free=False,
-                        ).on_conflict_do_nothing(index_elements=["model_id", "provider"])
+                        )
+                        .on_conflict_do_nothing(index_elements=["model_id", "provider"])
                     )
 
                     if test_passed:
                         # 3. Enable the model
                         await db.execute(
-                            update(Model)
-                            .where(Model.model_id == model_id)
-                            .values(is_enabled=True)
+                            update(Model).where(Model.model_id == model_id).values(is_enabled=True)
                         )
 
                         # 4. Clear any existing default, then set this provider as default
@@ -209,20 +212,18 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
 
         # ── Yield SSE event ────────────────────────────────────────────────
         event = {
-            "model_id":   model_id,
-            "status":     status,
+            "model_id": model_id,
+            "status": status,
             "latency_ms": latency_ms,
             "is_default": is_default,
-            "error":      error,
+            "error": error,
         }
         yield f"data: {json.dumps(event)}\n\n".encode()
 
-    # Invalidate models cache so GET /v1/models reflects new state immediately
-    try:
-        redis = await get_redis()
-        await redis.delete("routerv:models:list")
-    except Exception:  # noqa: BLE001
-        pass
+    # Invalidate models + auto-router caches so GET /v1/models reflects new state immediately
+    from app.models.cache import invalidate_models_cache
+
+    await invalidate_models_cache()
 
     # Final summary event
     yield f"data: {json.dumps({'type': 'summary', 'total': len(body.models), 'passed': passed, 'failed': failed, 'is_dry_run': body.is_dry_run})}\n\n".encode()
@@ -232,7 +233,7 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
 @router.post("/completions", summary="Test models against a provider and register results")
 async def test_completions(
     body: TestModelsRequest,
-    _: ControlPlaneIdentity = Depends(get_admin_user),
+    _: ControlPlaneIdentity = Depends(get_admin_user),  # noqa: B008
 ) -> StreamingResponse:
     """
     Test each model in the list against the specified provider using server-side

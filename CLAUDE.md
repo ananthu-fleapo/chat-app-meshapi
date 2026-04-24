@@ -31,7 +31,30 @@ pytest -k "rate_limit" -v                 # filter by name
 
 # With monitoring (Prometheus :9090, Grafana :3000 admin/admin)
 docker-compose --profile monitoring up -d
+
+# Linting (ruff)
+ruff check .                  # check all files
+ruff check . --fix            # auto-fix safe issues
+ruff check app/routers/foo.py # single file
+ruff format .                 # format (like black)
 ```
+
+## Ruff
+
+Config lives in `pyproject.toml` under `[tool.ruff]` and `[tool.ruff.lint]`.
+
+| Setting | Value | Notes |
+|---|---|---|
+| `target-version` | `py312` | |
+| `line-length` | `100` | |
+| `select` | `E, W, F, I, B, UP` | pycodestyle, pyflakes, isort, bugbear, pyupgrade |
+| `ignore` | _(empty)_ | Add rule codes here to disable globally |
+
+**Suppressing a rule on one line** — append `# noqa: <CODE>`:
+```python
+_: User = Depends(get_current_user)  # noqa: B008
+```
+B008 fires on `Depends(...)` in FastAPI endpoint signatures — this is a known false positive; always suppress it with `# noqa: B008` rather than disabling the rule globally.
 
 ---
 
