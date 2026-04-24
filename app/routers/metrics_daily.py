@@ -63,15 +63,9 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
     """
     now_ist = datetime.now(IST)
 
-    today_10am = now_ist.replace(hour=10, minute=0, second=0, microsecond=0)
-
-    # Set boundary at 10:00 (10 AM IST)
-    # Always pick LAST COMPLETED window
-    if now_ist >= today_10am:
-        end_ist = today_10am
-    else:
-        end_ist = today_10am - timedelta(days=1)
-
+    # Always report the last completed 8AM→8AM IST window.
+    today_8am = now_ist.replace(hour=8, minute=0, second=0, microsecond=0)
+    end_ist = today_8am if now_ist >= today_8am else today_8am - timedelta(days=1)
     start_ist = end_ist - timedelta(days=1)
 
     # Convert back to UTC for DB queries
@@ -274,7 +268,7 @@ async def run_daily_metrics(
     message = "\n\n".join(message_parts) if message_parts else None
 
     await send_slack_alert(
-        title=f"Daily Metrics — {metrics.start_ist.strftime('%Y-%m-%d')} (10AM–10AM IST)",
+        title=f"Daily Metrics — {metrics.start_ist.strftime('%Y-%m-%d')} (8AM–8AM IST)",
         fields=fields,
         message=message,
         notify_here=False,  # informational, not actionable
