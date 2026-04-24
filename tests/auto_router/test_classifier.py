@@ -159,7 +159,6 @@ class TestCallClassifier:
         assert "model_id" in usage
         assert "prompt_tokens" in usage
         assert "completion_tokens" in usage
-        assert "cost" in usage
 
     async def test_timeout_returns_none_and_classifier_timeout(self):
         from app.auto_router.classifier import call_classifier

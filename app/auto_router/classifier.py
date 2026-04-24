@@ -123,7 +123,6 @@ async def call_classifier(
             "provider": provider,
             "prompt_tokens": raw_usage.get("prompt_tokens"),
             "completion_tokens": raw_usage.get("completion_tokens"),
-            "cost": raw_usage.get("cost"),
         }
 
         logger.info(
@@ -134,7 +133,6 @@ async def call_classifier(
             elapsed_ms=elapsed_ms,
             prompt_tokens=usage["prompt_tokens"],
             completion_tokens=usage["completion_tokens"],
-            cost_usd=usage["cost"],
         )
         return content, "", usage
 

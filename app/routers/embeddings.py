@@ -15,12 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.config_resolver import resolve_embeddings_config
 from app.auth.dependencies import get_authenticated_key
-from app.auto_router.service import (
-    AutoRouteResult,
-    _inject_auto_route_meta,
-    _is_auto,
-    resolve_auto_model,
-)
+from app.auto_router.service import _is_auto
 from app.cache.rate_limiter import check_free_model_rate_limits, check_rate_limits
 from app.config import settings
 from app.db.models import ApiKey
@@ -37,14 +32,6 @@ from app.usage.spend_cap import check_spend_cap
 router = APIRouter()
 logger = structlog.get_logger()
 
-
-def _extract_embeddings_content(input_) -> str:
-    """Return representative text from an embeddings input for classifier routing."""
-    if isinstance(input_, str):
-        return input_[:2000]
-    if isinstance(input_, list) and input_ and isinstance(input_[0], str):
-        return input_[0][:2000]
-    return ""  # token ID arrays — not meaningful text for routing
 
 
 @router.post(
@@ -244,37 +231,11 @@ async def create_embeddings(
 
     body = resolve_embeddings_config(raw_body, key)
 
-    # ── Auto Router: resolve model="auto" to a concrete model ID ─────────────
-    auto_route_result: AutoRouteResult | None = None
     if _is_auto(body.model):
-        if not settings.auto_router_enabled:
-            raise UnprocessableEntityError(
-                "model='auto' is not supported. The Auto Router is disabled on this gateway.",
-                status_code=400,
-            )
-        user_content = _extract_embeddings_content(body.input)
-        auto_route_result = await resolve_auto_model(
-            user_content, "embeddings", db=db, request_id=request_id, owner=key.owner
+        raise UnprocessableEntityError(
+            "model='auto' is not supported for embeddings.",
+            status_code=400,
         )
-        body = body.model_copy(update={"model": auto_route_result.resolved_model_id})
-        for _cu in auto_route_result.classifier_usages:
-            fire_usage_log(
-                owner=key.owner,
-                key_id=str(key.id),
-                request_id=request_id,
-                model=_cu.model_id,
-                provider=_cu.provider,
-                template_id=None,
-                stream=False,
-                prompt_tokens=_cu.prompt_tokens,
-                completion_tokens=_cu.completion_tokens,
-                cached_tokens=None,
-                upstream_cost=_cu.cost,
-                latency_ms=None,
-                status="success",
-                error_code=None,
-            )
-    # ─────────────────────────────────────────────────────────────────────────
 
     is_free_model = await check_balance(key.owner, body.model, db)
     if is_free_model:
@@ -350,9 +311,6 @@ async def create_embeddings(
         model_used=response_body.get("model", body.model),
         prompt_tokens=usage.get("prompt_tokens"),
     )
-
-    if auto_route_result is not None and response_body is not None:
-        _inject_auto_route_meta(response_body, auto_route_result)
 
     return JSONResponse(
         content=response_body,

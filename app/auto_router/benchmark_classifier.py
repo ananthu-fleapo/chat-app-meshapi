@@ -46,14 +46,16 @@ _CATEGORIES_BLOCK = "Categories:\n" + "\n".join(f"- {c}" for c in SUPERMODE_CATE
 
 
 def _build_benchmark_user_message(user_content: str) -> str:
-    return "\n".join([
-        _CATEGORIES_BLOCK,
-        "",
-        "User request:",
-        '"""',
-        user_content[:2000],
-        '"""',
-    ])
+    return "\n".join(
+        [
+            _CATEGORIES_BLOCK,
+            "",
+            "User request:",
+            '"""',
+            user_content[:2000],
+            '"""',
+        ]
+    )
 
 
 async def call_benchmark_classifier(
@@ -118,7 +120,6 @@ async def call_benchmark_classifier(
             "provider": provider,
             "prompt_tokens": raw_usage.get("prompt_tokens"),
             "completion_tokens": raw_usage.get("completion_tokens"),
-            "cost": raw_usage.get("cost"),
         }
 
         logger.info(
@@ -129,7 +130,6 @@ async def call_benchmark_classifier(
             elapsed_ms=elapsed_ms,
             prompt_tokens=usage["prompt_tokens"],
             completion_tokens=usage["completion_tokens"],
-            cost_usd=usage["cost"],
         )
         return content, "", usage
 
@@ -185,7 +185,7 @@ def parse_benchmark_response(raw: str | None) -> tuple[str | None, str]:
         mode = "premium"
     else:
         category = stripped[:last_comma].strip()
-        mode_raw = stripped[last_comma + 1:].strip().lower()
+        mode_raw = stripped[last_comma + 1 :].strip().lower()
         mode = mode_raw if mode_raw in _VALID_MODES else "premium"
 
     if category not in _CATEGORIES_SET:

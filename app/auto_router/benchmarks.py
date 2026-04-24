@@ -172,30 +172,40 @@ SUPERMODE_CATEGORIES = list(SUPERMODE_BENCHMARKS.keys())
 
 # Update values here when a better premium model version becomes available.
 BENCHMARK_BRAND_TO_PREMIUM_MODEL_ID: dict[str, str] = {
-    "chatgpt":    "openai/gpt-5.4",
-    "claude":     "anthropic/claude-sonnet-4-6",
-    "gemini":     "google/gemini-3.1-pro-preview",    # openrouter
-    "deepseek":   "deepseek/deepseek-r1",
-    "grok":       "x-ai/grok-4",                      # openrouter
-    "perplexity": "perplexity/sonar-pro",              # openrouter
-    "mistral":    "mistralai/mistral-medium-3.1",      # openrouter
-    "qwen":       "qwen/qwen3-max",
-    "moonshot":   "moonshotai/kimi-k2-thinking",
-    "bytedance":  "bytedance-seed/seed-2.0-lite",
+    "chatgpt": "openai/gpt-5.4",
+    "claude": "anthropic/claude-sonnet-4-6",
+    "gemini": "google/gemini-3.1-pro-preview",  # openrouter
+    "deepseek": "deepseek/deepseek-r1",
+    "grok": "x-ai/grok-4",  # openrouter
+    "perplexity": "perplexity/sonar-pro",  # openrouter
+    "mistral": "mistralai/mistral-medium-3.1",  # openrouter
+    "qwen": "qwen/qwen3-max",
+    "moonshot": "moonshotai/kimi-k2-thinking",
+    "bytedance": "bytedance-seed/seed-2.0-lite",
 }
 
 # Update values here when a better standard model version becomes available.
 BENCHMARK_BRAND_TO_STANDARD_MODEL_ID: dict[str, str] = {
-    "chatgpt":    "openai/gpt-5.4-mini",
-    "claude":     "anthropic/claude-haiku-4.5",
-    "gemini":     "google/gemini-3-flash",
-    "deepseek":   "deepseek/deepseek-chat",
-    "grok":       "x-ai/grok-4-1-fast",
+    "chatgpt": "openai/gpt-5.4-mini",
+    "claude": "anthropic/claude-haiku-4.5",
+    "gemini": "google/gemini-3-flash-preview",
+    "deepseek": "deepseek/deepseek-chat-v3-0324",
+    "grok": "x-ai/grok-4.1-fast",
     "perplexity": "perplexity/sonar",
-    "mistral":    "mistralai/mistral-medium-latest",
-    "qwen":       "qwen/qwen-flash",
-    "moonshot":   "moonshotai/kimi-k2.5",
-    "bytedance":  "bytedance-seed/seed-2.0-mini",
+    "mistral": "mistralai/mistral-medium-3.1",
+    "qwen": "qwen/qwen-flash",
+    "moonshot": "moonshotai/kimi-k2.5",
+    "bytedance": "bytedance-seed/seed-2.0-mini",
+}
+
+BENCHMARK_BRAND_RESPONSES_API_SUPPORTED_STANDARD = {
+    "chatgpt": "openai/gpt-5.4-mini",
+    "qwen": "qwen/qwen-flash",
+}
+
+BENCHMARK_BRAND_RESPONSES_API_SUPPORTED_PREMIUM = {
+    "chatgpt": "openai/gpt-5.4",
+    "qwen": "qwen/qwen3-max",
 }
 
 # Inverted maps: model_id → brand, built once at import time.
@@ -232,9 +242,14 @@ def resolve_from_benchmark_category(
     category: str,
     mode: str = "premium",
     supermode_index: int = 0,
+    responses_api: bool = False,
 ) -> str | None:
     """
     Given a classified CATEGORY, MODE, and supermode_index, return a model ID.
+
+    When responses_api=True, walks the full ranking in order and returns the first
+    brand that appears in BENCHMARK_BRAND_RESPONSES_API_SUPPORTED_*. Returns None
+    if no responses-capable brand exists in the ranking (caller falls back to default).
 
     Mirrors getModelsFromClassification() in service/src/chat/model-classifier.service.ts:
       1. Look up SUPERMODE_BENCHMARKS[category]; use DEFAULT_FALLBACK_BRAND if missing.
@@ -245,6 +260,20 @@ def resolve_from_benchmark_category(
          (matches the `sample(candidates)` behaviour in the TS implementation).
       5. Unknown mode defaults to premium.
     """
+    if responses_api:
+        responses_mapping = (
+            BENCHMARK_BRAND_RESPONSES_API_SUPPORTED_STANDARD
+            if mode == "standard"
+            else BENCHMARK_BRAND_RESPONSES_API_SUPPORTED_PREMIUM
+        )
+        ranking = SUPERMODE_BENCHMARKS.get(category, [])
+        for entry in ranking:
+            brands = [entry] if isinstance(entry, str) else entry
+            for brand in brands:
+                if brand in responses_mapping:
+                    return responses_mapping[brand]
+        return None
+
     mapping = (
         BENCHMARK_BRAND_TO_STANDARD_MODEL_ID
         if mode == "standard"

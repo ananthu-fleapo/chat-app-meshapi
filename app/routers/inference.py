@@ -9,7 +9,6 @@ Phase additions per phase:
   Phase 5 → spend cap enforcement, usage logging (non-stream + SSE-parsed stream)
 """
 
-import asyncio
 import json
 import time
 
@@ -44,6 +43,39 @@ from app.usage.spend_cap import check_spend_cap
 
 router = APIRouter()
 logger = structlog.get_logger()
+
+
+def _augment_usage_chunk(chunk: bytes, classifier_usages: list) -> bytes:
+    """
+    If chunk is an SSE usage frame, add classifier token counts to the usage object
+    and adjust the totals before forwarding to the client.
+    """
+    if not classifier_usages or b'"usage"' not in chunk:
+        return chunk
+    classifier_prompt = sum(cu.prompt_tokens or 0 for cu in classifier_usages)
+    classifier_completion = sum(cu.completion_tokens or 0 for cu in classifier_usages)
+    try:
+        lines = chunk.split(b"\n")
+        new_lines = []
+        for line in lines:
+            if line.startswith(b"data: "):
+                payload = line[6:].strip()
+                if payload and payload != b"[DONE]":
+                    obj = json.loads(payload)
+                    if obj.get("usage"):
+                        u = obj["usage"]
+                        u["classifier_prompt_tokens"] = classifier_prompt
+                        u["classifier_completion_tokens"] = classifier_completion
+                        u["prompt_tokens"] = (u.get("prompt_tokens") or 0) + classifier_prompt
+                        u["completion_tokens"] = (
+                            (u.get("completion_tokens") or 0) + classifier_completion
+                        )
+                        u["total_tokens"] = u["prompt_tokens"] + u["completion_tokens"]
+                        line = b"data: " + json.dumps(obj).encode()
+            new_lines.append(line)
+        return b"\n".join(new_lines)
+    except (json.JSONDecodeError, KeyError):
+        return chunk
 
 
 def _scan_sse_buf(buf: bytes, current_usage: dict | None) -> tuple[dict | None, bytes]:
@@ -427,6 +459,10 @@ async def chat_completions(
                     # Phase 5: scan complete SSE frames for usage metadata.
                     usage_data, buf = _scan_sse_buf(buf, usage_data)
 
+                    if auto_route_result is not None:
+                        chunk = _augment_usage_chunk(
+                            chunk, auto_route_result.classifier_usages
+                        )
                     yield chunk
 
             except Exception as exc:
@@ -548,6 +584,21 @@ async def chat_completions(
 
     if auto_route_result is not None and response_body is not None:
         _inject_auto_route_meta(response_body, auto_route_result)
+        if auto_route_result.classifier_usages and isinstance(
+            response_body.get("usage"), dict
+        ):
+            classifier_prompt = sum(
+                cu.prompt_tokens or 0 for cu in auto_route_result.classifier_usages
+            )
+            classifier_completion = sum(
+                cu.completion_tokens or 0 for cu in auto_route_result.classifier_usages
+            )
+            u = response_body["usage"]
+            u["classifier_prompt_tokens"] = classifier_prompt
+            u["classifier_completion_tokens"] = classifier_completion
+            u["prompt_tokens"] = (u.get("prompt_tokens") or 0) + classifier_prompt
+            u["completion_tokens"] = (u.get("completion_tokens") or 0) + classifier_completion
+            u["total_tokens"] = u["prompt_tokens"] + u["completion_tokens"]
 
     return JSONResponse(
         content=response_body,

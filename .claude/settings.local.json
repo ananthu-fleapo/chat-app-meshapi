@@ -73,7 +73,9 @@
       "Bash(pytest tests/test_auth_dependencies.py -v --tb=short)",
       "Bash(pytest tests/test_providers.py::TestBedrockModelTranslation -v --tb=short)",
       "Bash(python -m pytest tests/ -q --tb=short)",
-      "Bash(python -m pytest tests/ -x -q)"
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(ruff check *)",
+      "Bash(git checkout *)"
     ]
   }
 }

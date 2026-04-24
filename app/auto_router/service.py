@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Literal
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -138,7 +137,7 @@ async def resolve_auto_model(
 
     if settings.auto_router_use_benchmarks:
         return await _resolve_via_benchmarks(
-            user_content, db=db, request_id=request_id, owner=owner
+            user_content, api_type=api_type, db=db, request_id=request_id, owner=owner
         )
 
     # ── Registry path ─────────────────────────────────────────────────────────
@@ -248,6 +247,7 @@ async def resolve_auto_model(
 async def _resolve_via_benchmarks(
     user_content: str,
     *,
+    api_type: ApiType,
     db,
     request_id: str,
     owner: str,
@@ -284,7 +284,9 @@ async def _resolve_via_benchmarks(
     category, mode = parse_benchmark_response(raw)
 
     if category:
-        model_id = resolve_from_benchmark_category(category, mode)
+        model_id = resolve_from_benchmark_category(
+            category, mode, responses_api=(api_type == "responses")
+        )
         if model_id:
             logger.info(
                 "auto_router.model_resolved",
@@ -311,7 +313,9 @@ async def _resolve_via_benchmarks(
         category2, mode2 = parse_benchmark_response(raw2)
 
         if category2:
-            model_id2 = resolve_from_benchmark_category(category2, mode2)
+            model_id2 = resolve_from_benchmark_category(
+                category2, mode2, responses_api=(api_type == "responses")
+            )
             if model_id2:
                 logger.info(
                     "auto_router.model_resolved",
