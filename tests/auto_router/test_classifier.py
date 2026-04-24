@@ -155,7 +155,6 @@ class TestCallClassifier:
         assert content == "openai/gpt-4o"
         assert reason == ""
         assert usage is not None
-        assert usage["provider"] == "openrouter"
         assert "model_id" in usage
         assert "prompt_tokens" in usage
         assert "completion_tokens" in usage

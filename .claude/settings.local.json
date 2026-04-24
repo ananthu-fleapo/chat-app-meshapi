@@ -75,7 +75,8 @@
       "Bash(python -m pytest tests/ -q --tb=short)",
       "Bash(python -m pytest tests/ -x -q)",
       "Bash(ruff check *)",
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "Bash(pytest tests/auto_router/test_classifier.py -xvs)"
     ]
   }
 }

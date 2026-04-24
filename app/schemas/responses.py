@@ -31,9 +31,9 @@ class ResponsesRequest(BaseModel):
     input: str | list
 
     # ── RouterV extensions (stripped before upstream forwarding) ──────────────
-    template: str | None = None               # reserved for future template support
-    variables: dict[str, str] | None = None   # {{slot}} → value
-    session_id: str | None = None             # groups related requests
+    template: str | None = None  # reserved for future template support
+    variables: dict[str, str] | None = None  # {{slot}} → value
+    session_id: str | None = None  # groups related requests
 
     # ── Standard inference params (all Optional for config resolver layering) ─
     stream: bool = False
@@ -44,10 +44,10 @@ class ResponsesRequest(BaseModel):
 
     # ── Responses API-specific fields ─────────────────────────────────────────
     # Enables chain-of-thought reasoning; effort controls depth vs. token cost.
-    reasoning: dict | None = None             # {"effort": "minimal|low|medium|high"}
-    tools: list[Tool] | None = None           # function tool definitions (OpenAI format)
-    tool_choice: str | dict | None = None     # "auto" | "none" | specific tool
-    response_format: dict | None = None       # {"type": "json_object"} or json_schema
+    reasoning: dict | None = None  # {"effort": "minimal|low|medium|high"}
+    tools: list[Tool] | None = None  # function tool definitions (OpenAI format)
+    tool_choice: str | dict | None = None  # "auto" | "none" | specific tool
+    response_format: dict | None = None  # {"type": "json_object"} or json_schema
 
     # Web search via plugins (deprecated by OpenRouter — prefer tools with
     # "openrouter:web_search" server tool, but still accepted for compatibility).

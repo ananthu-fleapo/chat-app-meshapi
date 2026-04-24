@@ -21,6 +21,7 @@ ROUTERV_ONLY_FIELDS: set[str] = {"template", "variables", "session_id"}
 
 # ── Sub-models ────────────────────────────────────────────────────────────────
 
+
 class ImageUrl(BaseModel):
     url: str
     detail: Literal["auto", "low", "high"] = "auto"
@@ -53,11 +54,12 @@ class Message(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
     content: str | list[ContentPart] | None = None
     name: str | None = None
-    tool_call_id: str | None = None   # present when role=="tool"
+    tool_call_id: str | None = None  # present when role=="tool"
     tool_calls: list[ToolCall] | None = None  # present when role=="assistant" with tool use
 
 
 # ── Request ───────────────────────────────────────────────────────────────────
+
 
 class ChatCompletionRequest(BaseModel):
     # model is Optional — Phase 2 fills it from per-key defaults.
@@ -66,9 +68,9 @@ class ChatCompletionRequest(BaseModel):
     messages: list[Message]
 
     # ── RouterV extensions (stripped before upstream forwarding) ──────────────
-    template: str | None = None               # template name/id
-    variables: dict[str, str] | None = None   # {{slot}} → value
-    session_id: str | None = None             # groups related requests
+    template: str | None = None  # template name/id
+    variables: dict[str, str] | None = None  # {{slot}} → value
+    session_id: str | None = None  # groups related requests
 
     # ── Standard inference params (all Optional for config resolver layering) ─
     stream: bool = False
@@ -97,6 +99,7 @@ class ChatCompletionRequest(BaseModel):
 
 # ── Response ──────────────────────────────────────────────────────────────────
 
+
 class UsageInfo(BaseModel):
     prompt_tokens: int
     completion_tokens: int
@@ -106,7 +109,7 @@ class UsageInfo(BaseModel):
 class Choice(BaseModel):
     index: int
     message: Message | None = None
-    delta: dict | None = None        # populated in streaming chunks
+    delta: dict | None = None  # populated in streaming chunks
     finish_reason: str | None = None
     logprobs: dict | None = None
 

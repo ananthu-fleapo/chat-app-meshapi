@@ -66,10 +66,11 @@ def _augment_usage_chunk(chunk: bytes, classifier_usages: list) -> bytes:
                         u = obj["usage"]
                         u["classifier_prompt_tokens"] = classifier_prompt
                         u["classifier_completion_tokens"] = classifier_completion
+                        u["classifier_tokens"] = classifier_prompt + classifier_completion
                         u["prompt_tokens"] = (u.get("prompt_tokens") or 0) + classifier_prompt
                         u["completion_tokens"] = (
-                            (u.get("completion_tokens") or 0) + classifier_completion
-                        )
+                            u.get("completion_tokens") or 0
+                        ) + classifier_completion
                         u["total_tokens"] = u["prompt_tokens"] + u["completion_tokens"]
                         line = b"data: " + json.dumps(obj).encode()
             new_lines.append(line)
@@ -139,7 +140,8 @@ def _extract_completions_content(messages: list[Message]) -> str:
                     "example": {
                         "error": {
                             "code": "model_capability_not_supported",
-                            "message": "Model 'text-embedding-3-small' does not support the chat/completions API.",
+                            "message": "Model 'text-embedding-3-small' does not support"
+                            " the chat/completions API.",
                         },
                         "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                     }
@@ -170,7 +172,10 @@ def _extract_completions_content(messages: list[Message]) -> str:
                             "value": {
                                 "error": {
                                     "code": "spend_limit_exceeded",
-                                    "message": "Spend cap of $10.0000 reached. Current spend: $10.0023. Contact your administrator to increase the cap.",
+                                    "message": (
+                                        "Spend cap of $10.0000 reached. Current spend: $10.0023."
+                                        " Contact your administrator to increase the cap."
+                                    ),
                                 },
                                 "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                             },
@@ -180,7 +185,8 @@ def _extract_completions_content(messages: list[Message]) -> str:
                             "value": {
                                 "error": {
                                     "code": "spend_limit_exceeded",
-                                    "message": "Insufficient balance. Top up your account to use paid models.",
+                                    "message": "Insufficient balance."
+                                    " Top up your account to use paid models.",
                                 },
                                 "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                             },
@@ -278,7 +284,10 @@ def _extract_completions_content(messages: list[Message]) -> str:
                                 "error": {
                                     "code": "upstream_error",
                                     "message": "Upstream provider returned an error.",
-                                    "upstream_detail": '{"error":{"message":"No endpoints found that match your data policy","code":400}}',
+                                    "upstream_detail": (
+                                        '{"error":{"message":"No endpoints found that'
+                                        ' match your data policy","code":400}}'
+                                    ),
                                 },
                                 "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                             },
@@ -294,7 +303,8 @@ def _extract_completions_content(messages: list[Message]) -> str:
                             },
                         },
                         "internal_error": {
-                            "summary": "Internal platform error (DB failure — FastAPI default format)",
+                            "summary": "Internal platform error"
+                            " (DB failure — FastAPI default format)",
                             "value": {"detail": "Internal Server Error"},
                         },
                     }
@@ -302,13 +312,15 @@ def _extract_completions_content(messages: list[Message]) -> str:
             },
         },
         503: {
-            "description": "Upstream provider not available — required credentials not configured on this server",
+            "description": "Upstream provider not available —"
+            " required credentials not configured on this server",
             "content": {
                 "application/json": {
                     "example": {
                         "error": {
                             "code": "provider_not_available",
-                            "message": "Provider 'vertex' is not available. The required credentials may not be configured on this server.",
+                            "message": "Provider 'vertex' is not available."
+                            " The required credentials may not be configured on this server.",
                         },
                         "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                     }
@@ -320,8 +332,8 @@ def _extract_completions_content(messages: list[Message]) -> str:
 async def chat_completions(
     raw_body: ChatCompletionRequest,
     request: Request,
-    key: ApiKey = Depends(get_authenticated_key),
-    db: AsyncSession = Depends(get_db_session),
+    key: ApiKey = Depends(get_authenticated_key),  # noqa: B008
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     OpenAI-compatible chat completions endpoint.
@@ -391,6 +403,8 @@ async def chat_completions(
                 error_code=None,
             )
     # ─────────────────────────────────────────────────────────────────────────
+    if not body.model:
+        raise UnprocessableEntityError("'model' is required.", status_code=422)
 
     # ── Balance check + free-model rate limit ────────────────────────────────
     is_free_model = await check_balance(key.owner, body.model, db)
@@ -460,9 +474,7 @@ async def chat_completions(
                     usage_data, buf = _scan_sse_buf(buf, usage_data)
 
                     if auto_route_result is not None:
-                        chunk = _augment_usage_chunk(
-                            chunk, auto_route_result.classifier_usages
-                        )
+                        chunk = _augment_usage_chunk(chunk, auto_route_result.classifier_usages)
                     yield chunk
 
             except Exception as exc:
@@ -472,9 +484,7 @@ async def chat_completions(
                 log.error("stream_error", error_code=error_code_val, error=str(exc))
                 # Headers (200 + text/event-stream) already sent — can't change
                 # status code. Yield an SSE error frame so clients can handle it.
-                err_payload = json.dumps(
-                    {"error": {"code": error_code_val, "message": msg}}
-                )
+                err_payload = json.dumps({"error": {"code": error_code_val, "message": msg}})
                 yield f"data: {err_payload}\n\ndata: [DONE]\n\n".encode()
 
             finally:
@@ -484,12 +494,8 @@ async def chat_completions(
                     bytes_sent=byte_count,
                     latency_ms=latency_ms,
                     status=status,
-                    prompt_tokens=(
-                        usage_data.get("prompt_tokens") if usage_data else None
-                    ),
-                    completion_tokens=(
-                        usage_data.get("completion_tokens") if usage_data else None
-                    ),
+                    prompt_tokens=(usage_data.get("prompt_tokens") if usage_data else None),
+                    completion_tokens=(usage_data.get("completion_tokens") if usage_data else None),
                 )
                 fire_usage_log(
                     owner=key.owner,
@@ -499,16 +505,10 @@ async def chat_completions(
                     provider=provider,
                     template_id=template_id,
                     stream=True,
-                    prompt_tokens=(
-                        usage_data.get("prompt_tokens") if usage_data else None
-                    ),
-                    completion_tokens=(
-                        usage_data.get("completion_tokens") if usage_data else None
-                    ),
+                    prompt_tokens=(usage_data.get("prompt_tokens") if usage_data else None),
+                    completion_tokens=(usage_data.get("completion_tokens") if usage_data else None),
                     cached_tokens=(
-                        (usage_data.get("prompt_tokens_details") or {}).get(
-                            "cached_tokens"
-                        )
+                        (usage_data.get("prompt_tokens_details") or {}).get("cached_tokens")
                         if usage_data
                         else None
                     ),
@@ -525,11 +525,7 @@ async def chat_completions(
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
                 "X-Request-Id": request_id,
-                **(
-                    _auto_route_headers(auto_route_result)
-                    if auto_route_result is not None
-                    else {}
-                ),
+                **(_auto_route_headers(auto_route_result) if auto_route_result is not None else {}),
             },
         )
 
@@ -565,9 +561,7 @@ async def chat_completions(
             stream=False,
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
-            cached_tokens=(usage.get("prompt_tokens_details") or {}).get(
-                "cached_tokens"
-            ),
+            cached_tokens=(usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
             upstream_cost=usage.get("cost"),
             latency_ms=latency_ms,
             status=status,
@@ -577,16 +571,14 @@ async def chat_completions(
     log.info(
         "inference_complete",
         latency_ms=latency_ms,
-        model_used=response_body.get("model", body.model),
+        model_used=(response_body or {}).get("model") or body.model,
         prompt_tokens=usage.get("prompt_tokens"),
         completion_tokens=usage.get("completion_tokens"),
     )
 
     if auto_route_result is not None and response_body is not None:
         _inject_auto_route_meta(response_body, auto_route_result)
-        if auto_route_result.classifier_usages and isinstance(
-            response_body.get("usage"), dict
-        ):
+        if auto_route_result.classifier_usages and isinstance(response_body.get("usage"), dict):
             classifier_prompt = sum(
                 cu.prompt_tokens or 0 for cu in auto_route_result.classifier_usages
             )
@@ -596,6 +588,7 @@ async def chat_completions(
             u = response_body["usage"]
             u["classifier_prompt_tokens"] = classifier_prompt
             u["classifier_completion_tokens"] = classifier_completion
+            u["classifier_tokens"] = classifier_prompt + classifier_completion
             u["prompt_tokens"] = (u.get("prompt_tokens") or 0) + classifier_prompt
             u["completion_tokens"] = (u.get("completion_tokens") or 0) + classifier_completion
             u["total_tokens"] = u["prompt_tokens"] + u["completion_tokens"]

@@ -61,6 +61,34 @@ def _extract_responses_content(input_: str | list) -> str:
     return ""
 
 
+def _patch_responses_sse_chunk(chunk: bytes, classifier_tokens: int) -> bytes:
+    """Inject classifier_tokens and update total_tokens in a Responses API SSE chunk."""
+    if not classifier_tokens or b'"usage"' not in chunk:
+        return chunk
+    try:
+        lines = chunk.split(b"\n")
+        new_lines = []
+        for line in lines:
+            if line.startswith(b"data: "):
+                payload = line[6:].strip()
+                if payload and payload != b"[DONE]":
+                    obj = json.loads(payload)
+                    # OpenRouter: usage at top level; OpenAI: usage inside response.completed
+                    u: dict | None = None
+                    if obj.get("usage") and not obj.get("choices"):
+                        u = obj["usage"]
+                    elif obj.get("type") == "response.completed":
+                        u = (obj.get("response") or {}).get("usage")
+                    if u is not None:
+                        u["classifier_tokens"] = classifier_tokens
+                        u["total_tokens"] = (u.get("total_tokens") or 0) + classifier_tokens
+                        line = b"data: " + json.dumps(obj).encode()
+            new_lines.append(line)
+        return b"\n".join(new_lines)
+    except (json.JSONDecodeError, KeyError):
+        return chunk
+
+
 def _normalize_usage(raw: dict) -> dict:
     """
     Normalize provider-specific usage field names to RouterV canonical names.
@@ -88,7 +116,8 @@ def _normalize_usage(raw: dict) -> dict:
                     "example": {
                         "error": {
                             "code": "model_capability_not_supported",
-                            "message": "Model 'meta-llama/llama-3.1-8b-instruct' does not support the responses API.",
+                            "message": "Model 'meta-llama/llama-3.1-8b-instruct' does not support"
+                            " the responses API.",
                         },
                         "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                     }
@@ -119,7 +148,10 @@ def _normalize_usage(raw: dict) -> dict:
                             "value": {
                                 "error": {
                                     "code": "spend_limit_exceeded",
-                                    "message": "Spend cap of $10.0000 reached. Current spend: $10.0023. Contact your administrator to increase the cap.",
+                                    "message": (
+                                        "Spend cap of $10.0000 reached. Current spend: $10.0023."
+                                        " Contact your administrator to increase the cap."
+                                    ),
                                 },
                                 "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                             },
@@ -129,7 +161,8 @@ def _normalize_usage(raw: dict) -> dict:
                             "value": {
                                 "error": {
                                     "code": "spend_limit_exceeded",
-                                    "message": "Insufficient balance. Top up your account to use paid models.",
+                                    "message": "Insufficient balance."
+                                    " Top up your account to use paid models.",
                                 },
                                 "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                             },
@@ -213,7 +246,9 @@ def _normalize_usage(raw: dict) -> dict:
                                 "error": {
                                     "code": "upstream_error",
                                     "message": "Upstream provider returned an error.",
-                                    "upstream_detail": '{"error":{"message":"model_not_found","code":404}}',
+                                    "upstream_detail": (
+                                        '{"error":{"message":"model_not_found","code":404}}'
+                                    ),
                                 },
                                 "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                             },
@@ -229,7 +264,8 @@ def _normalize_usage(raw: dict) -> dict:
                             },
                         },
                         "internal_error": {
-                            "summary": "Internal platform error (DB failure — FastAPI default format)",
+                            "summary": "Internal platform error"
+                            " (DB failure — FastAPI default format)",
                             "value": {"detail": "Internal Server Error"},
                         },
                     }
@@ -247,13 +283,15 @@ def _normalize_usage(raw: dict) -> dict:
             },
         },
         503: {
-            "description": "Upstream provider not available — required credentials not configured on this server",
+            "description": "Upstream provider not available —"
+            " required credentials not configured on this server",
             "content": {
                 "application/json": {
                     "example": {
                         "error": {
                             "code": "provider_not_available",
-                            "message": "Provider 'bedrock' is not available. The required credentials may not be configured on this server.",
+                            "message": "Provider 'bedrock' is not available."
+                            " The required credentials may not be configured on this server.",
                         },
                         "request_id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                     }
@@ -265,8 +303,8 @@ def _normalize_usage(raw: dict) -> dict:
 async def create_response(
     raw_body: ResponsesRequest,
     request: Request,
-    key: ApiKey = Depends(get_authenticated_key),
-    db: AsyncSession = Depends(get_db_session),
+    key: ApiKey = Depends(get_authenticated_key),  # noqa: B008
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     Responses API endpoint — provider resolved dynamically from DB.
@@ -328,6 +366,8 @@ async def create_response(
                 error_code=None,
             )
     # ─────────────────────────────────────────────────────────────────────────
+    if not body.model:
+        raise UnprocessableEntityError("'model' is required.", status_code=422)
 
     # ── Balance check + free-model rate limit ─────────────────────────────────
     is_free_model = await check_balance(key.owner, body.model, db)
@@ -339,9 +379,7 @@ async def create_response(
         )
 
     # ── Provider routing (DB-driven, same as inference.py) ────────────────────
-    provider, provider_model_id, responses_provider_model_id = await resolve_routing(
-        body.model, db
-    )
+    provider, provider_model_id, responses_provider_model_id = await resolve_routing(body.model, db)
     effective_model_id = responses_provider_model_id or provider_model_id
 
     # ── Capability check: model+provider must support responses API ───────────
@@ -425,18 +463,20 @@ async def create_response(
                             except (json.JSONDecodeError, KeyError):
                                 pass
 
+                    if auto_route_result is not None and auto_route_result.classifier_usages:
+                        classifier_tokens = sum(
+                            (cu.prompt_tokens or 0) + (cu.completion_tokens or 0)
+                            for cu in auto_route_result.classifier_usages
+                        )
+                        chunk = _patch_responses_sse_chunk(chunk, classifier_tokens)
                     yield chunk
 
             except Exception as exc:
                 status = "error"
                 error_code_val = getattr(exc, "error_code", "upstream_error")
                 msg = getattr(exc, "message", "An upstream error occurred.")
-                logger.error(
-                    "responses_stream_error", error_code=error_code_val, error=str(exc)
-                )
-                err_payload = json.dumps(
-                    {"error": {"code": error_code_val, "message": msg}}
-                )
+                logger.error("responses_stream_error", error_code=error_code_val, error=str(exc))
+                err_payload = json.dumps({"error": {"code": error_code_val, "message": msg}})
                 yield f"data: {err_payload}\n\ndata: [DONE]\n\n".encode()
 
             finally:
@@ -451,12 +491,8 @@ async def create_response(
                     bytes_sent=byte_count,
                     latency_ms=latency_ms,
                     status=status,
-                    prompt_tokens=(
-                        usage_data.get("prompt_tokens") if usage_data else None
-                    ),
-                    completion_tokens=(
-                        usage_data.get("completion_tokens") if usage_data else None
-                    ),
+                    prompt_tokens=(usage_data.get("prompt_tokens") if usage_data else None),
+                    completion_tokens=(usage_data.get("completion_tokens") if usage_data else None),
                 )
                 fire_usage_log(
                     owner=key.owner,
@@ -466,16 +502,10 @@ async def create_response(
                     provider=provider,
                     template_id=None,
                     stream=True,
-                    prompt_tokens=(
-                        usage_data.get("prompt_tokens") if usage_data else None
-                    ),
-                    completion_tokens=(
-                        usage_data.get("completion_tokens") if usage_data else None
-                    ),
+                    prompt_tokens=(usage_data.get("prompt_tokens") if usage_data else None),
+                    completion_tokens=(usage_data.get("completion_tokens") if usage_data else None),
                     cached_tokens=(
-                        (usage_data.get("prompt_tokens_details") or {}).get(
-                            "cached_tokens"
-                        )
+                        (usage_data.get("prompt_tokens_details") or {}).get("cached_tokens")
                         if usage_data
                         else None
                     ),
@@ -492,11 +522,7 @@ async def create_response(
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
                 "X-Request-Id": request_id,
-                **(
-                    _auto_route_headers(auto_route_result)
-                    if auto_route_result is not None
-                    else {}
-                ),
+                **(_auto_route_headers(auto_route_result) if auto_route_result is not None else {}),
             },
         )
 
@@ -532,9 +558,7 @@ async def create_response(
             stream=False,
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
-            cached_tokens=(usage.get("prompt_tokens_details") or {}).get(
-                "cached_tokens"
-            ),
+            cached_tokens=(usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
             upstream_cost=usage.get("cost"),
             latency_ms=latency_ms,
             status=status,
@@ -551,6 +575,14 @@ async def create_response(
 
     if auto_route_result is not None and response_body is not None:
         _inject_auto_route_meta(response_body, auto_route_result)
+        if auto_route_result.classifier_usages and isinstance(response_body.get("usage"), dict):
+            classifier_tokens = sum(
+                (cu.prompt_tokens or 0) + (cu.completion_tokens or 0)
+                for cu in auto_route_result.classifier_usages
+            )
+            u = response_body["usage"]
+            u["classifier_tokens"] = classifier_tokens
+            u["total_tokens"] = (u.get("total_tokens") or 0) + classifier_tokens
 
     return JSONResponse(
         content=response_body,
