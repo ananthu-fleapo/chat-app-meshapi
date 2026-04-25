@@ -38,9 +38,8 @@ from pydantic import BaseModel
 from app.auth.dependencies import verify_webhook_key
 from app.config import settings
 from app.db.engine import get_session_factory
-from app.db.models import Model
-from app.pricing.resolver import list_all_provider_price_rows
 from app.notifications.slack import send_slack_alert
+from app.pricing.resolver import list_all_provider_price_rows
 from app.storage.gcs import upload_csv
 
 logger = structlog.get_logger()
@@ -154,8 +153,8 @@ class ModelHealthResult(BaseModel):
     test_type: str = "completions"  # "completions" | "responses" | "embeddings"
     status: str  # "pass" | "fail" | "timeout" | "degraded"
     latency_ms: int
-    provider_latency_ms: int = 0   # time spent in upstream provider call
-    platform_latency_ms: int = 0   # our overhead = total - provider
+    provider_latency_ms: int = 0  # time spent in upstream provider call
+    platform_latency_ms: int = 0  # our overhead = total - provider
     error: str | None = None
     provider: str | None = None
     upstream_status: int | None = None
@@ -168,9 +167,7 @@ class ModelHealthResponse(BaseModel):
     failed: int
     pass_rate: str
     avg_latency_ms: int
-    latency_by_model_type: dict[
-        str, dict
-    ]  # {"text/completions": {"p50":..,"p95":..,"count":..}}
+    latency_by_model_type: dict[str, dict]  # {"text/completions": {"p50":..,"p95":..,"count":..}}
     results: list[ModelHealthResult]
 
 
@@ -180,7 +177,7 @@ class ModelHealthResponse(BaseModel):
 def _extract_upstream_status(exc: Exception) -> int | None:
     # httpx.HTTPStatusError carries .response directly
     if hasattr(exc, "response"):
-        return getattr(exc.response, "status_code", None)
+        return getattr(exc.response, "status_code", None)  # type: ignore[union-attr]
     cause = getattr(exc, "__cause__", None)
     return getattr(getattr(cause, "response", None), "status_code", None)
 
@@ -315,9 +312,7 @@ def _build_csv(results: list[ModelHealthResult], run_ts: datetime) -> str:
                 "latency_ms": r.latency_ms,
                 "provider_latency_ms": r.provider_latency_ms,
                 "platform_latency_ms": r.platform_latency_ms,
-                "upstream_status": (
-                    r.upstream_status if r.upstream_status is not None else ""
-                ),
+                "upstream_status": (r.upstream_status if r.upstream_status is not None else ""),
                 "upstream_body": r.upstream_body or "",
                 "error": r.error or "",
             }
@@ -325,9 +320,7 @@ def _build_csv(results: list[ModelHealthResult], run_ts: datetime) -> str:
     return buf.getvalue()
 
 
-async def _upload_results_csv(
-    results: list[ModelHealthResult], run_ts: datetime
-) -> str | None:
+async def _upload_results_csv(results: list[ModelHealthResult], run_ts: datetime) -> str | None:
     """Build and upload the results CSV; return the GCS URL or None on failure."""
     bucket = settings.gcs_health_check_bucket
     if not bucket:
@@ -398,7 +391,7 @@ async def run_model_health(
         )
         raise HTTPException(
             status_code=503,
-            detail="HEALTH_CHECK_SELF_URL and HEALTH_CHECK_API_KEY are required for model health checks",
+            detail="HEALTH_CHECK_SELF_URL and HEALTH_CHECK_API_KEY are required for model health checks",  # noqa: E501
         )
 
     # Query all enabled models with ALL their provider price rows so that
@@ -410,8 +403,7 @@ async def run_model_health(
 
     # Build a flat list of (ctx, test_type, coro) tuples.
     rate_limiter = _RateLimiter(settings.health_check_rpm)
-    Task = tuple[ModelTestContext, str, Coroutine]
-    tasks: list[Task] = []
+    tasks: list[tuple[ModelTestContext, str, Coroutine]] = []
     for m, price_row in model_rows:
         ctx = ModelTestContext(
             model_id=m.model_id,
@@ -521,14 +513,8 @@ async def run_model_health(
                 detail += f" → HTTP {r.upstream_status}"
             if r.status == "timeout":
                 detail += f" ({_TIMEOUT_S}s timeout)"
-            err_str = (
-                f": {r.error}"
-                if r.error and r.status not in ("timeout", "degraded")
-                else ""
-            )
-            slack_lines.append(
-                f"• `{r.model_id}` [{r.test_type}] [{r.status}]{detail}{err_str}"
-            )
+            err_str = f": {r.error}" if r.error and r.status not in ("timeout", "degraded") else ""
+            slack_lines.append(f"• `{r.model_id}` [{r.test_type}] [{r.status}]{detail}{err_str}")
 
     if slowest:
         slack_lines.append("")
@@ -554,7 +540,11 @@ async def run_model_health(
         fields.append(
             {
                 "label": f"Latency — {key.upper()}",
-                "value": f"p50: {stats['p50']}ms | p95: {stats['p95']}ms | n={stats['count']}",
+                "value": (
+                    f"total p50: {stats['p50']}ms | p95: {stats['p95']}ms | n={stats['count']}"
+                    f" | provider p50: {stats['provider_p50']}ms | p95: {stats['provider_p95']}ms"
+                    f" | platform p50: {stats['platform_p50']}ms | p95: {stats['platform_p95']}ms"
+                ),
             }
         )
     if csv_url:
@@ -564,9 +554,7 @@ async def run_model_health(
         title=f"Model Health Check — {len(passed)}/{total} passed",
         fields=fields,
         message=slack_body,
-        notify_here=bool(
-            not_working
-        ),  # only page for genuine failures/timeouts, not 429s
+        notify_here=bool(not_working),  # only page for genuine failures/timeouts, not 429s
     )
 
     return ModelHealthResponse(
