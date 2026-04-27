@@ -62,7 +62,6 @@ class Message(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    # model is Optional — Phase 2 fills it from per-key defaults.
     model: str | None = None
 
     messages: list[Message]

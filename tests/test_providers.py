@@ -366,26 +366,6 @@ class TestQwenAdapter:
 # Vertex AI — model translation
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestVertexModelTranslation:
-
-    def test_known_claude_model_translated(self):
-        from app.providers.vertex_ai import _vertex_model_id
-        # Vertex OpenAI endpoint requires anthropic/<model>@<version> format
-        assert _vertex_model_id("anthropic/claude-3-5-sonnet") == "anthropic/claude-3-5-sonnet@20241022"
-
-    def test_known_claude_haiku_translated(self):
-        from app.providers.vertex_ai import _vertex_model_id
-        assert _vertex_model_id("anthropic/claude-3-5-haiku") == "anthropic/claude-3-5-haiku@20241022"
-
-    def test_known_gemini_flash_translated(self):
-        from app.providers.vertex_ai import _vertex_model_id
-        # Vertex OpenAI endpoint requires google/<model> format
-        assert _vertex_model_id("google/gemini-flash-1.5") == "google/gemini-1.5-flash-002"
-
-    def test_unknown_model_passthrough(self):
-        from app.providers.vertex_ai import _vertex_model_id
-        assert _vertex_model_id("google/gemini-future") == "google/gemini-future"
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Vertex AI — token refresh
@@ -480,7 +460,7 @@ class TestVertexAIAdapter:
 
         assert result["id"] == "vertex-1"
         payload_model = adapter._client.post.call_args.kwargs["json"]["model"]
-        assert payload_model == "anthropic/claude-3-5-sonnet@20241022"
+        assert payload_model == "anthropic/claude-3-5-sonnet"
 
     async def test_chat_completion_http_error_raises_upstream(self):
         from app.providers.vertex_ai import VertexAIAdapter

@@ -1,10 +1,18 @@
 """
 Vertex AI provider adapter.
 
-Vertex AI exposes an OpenAI-compatible REST endpoint, so the HTTP layer is
-nearly identical to OpenRouterAdapter.  The key difference is authentication:
-instead of a static API key, we use a short-lived Google OAuth2 Bearer token
-derived from a service account JSON credential.
+Two distinct API surfaces are used depending on the model publisher:
+
+- **Google models** (``google/`` prefix) — native Gemini API:
+    POST https://aiplatform.googleapis.com/v1/projects/{project}/locations/global
+         /publishers/google/models/{model_id}:(generate|stream)GenerateContent
+  Request/response use the Gemini ``contents`` / ``candidates`` schema.
+  Streaming returns a JSON array of ``GenerateContentResponse`` objects.
+
+- **Non-Google models** (e.g. Anthropic Claude) — OpenAI-compatible endpoint:
+    POST https://{location}-aiplatform.googleapis.com/v1beta1/projects/{project}
+         /locations/{location}/endpoints/openapi/chat/completions
+  Request/response follow the OpenAI schema; SSE works out of the box.
 
 Token lifecycle
 --------------
@@ -13,14 +21,9 @@ Token lifecycle
 - Refresh is blocking (runs in a thread pool) so it doesn't block the event
   loop while making an outbound HTTP call to Google's token endpoint.
 
-Endpoint
---------
-https://{location}-aiplatform.googleapis.com/v1beta1/projects/{project_id}
-    /locations/{location}/endpoints/openapi
-
 Model translation
 -----------------
-Clients use canonical RouterV model names (e.g. "anthropic/claude-3-5-sonnet").
+Clients use canonical RouterV model names (e.g. "google/gemini-2.5-pro").
 This adapter translates them to Vertex AI model IDs before forwarding.
 """
 
@@ -43,61 +46,217 @@ from app.schemas.embeddings import EmbeddingsRequest
 
 logger = structlog.get_logger()
 
+def _is_google_model(vertex_model_id: str) -> bool:
+    return vertex_model_id.startswith("google/")
 
-# Canonical model name → Vertex AI model ID.
-#
-# Vertex AI's OpenAI-compatible endpoint (/endpoints/openapi/chat/completions)
-# requires the model in "<publisher>/<model>" format for ALL models:
-#   - Google models:    google/gemini-2.0-flash-001
-#   - Anthropic models: anthropic/claude-3-5-sonnet@20241022
-#
-# The fallback in _vertex_model_id() prepends "google/" when no mapping exists
-# and the canonical name doesn't already contain a slash, covering new Gemini
-# previews that haven't been explicitly mapped yet.
-_MODEL_MAP: dict[str, str] = {
-    # ── Anthropic Claude on Vertex ────────────────────────────────────────────
-    "anthropic/claude-3-5-sonnet": "anthropic/claude-3-5-sonnet@20241022",
-    "anthropic/claude-3-5-sonnet-20241022": "anthropic/claude-3-5-sonnet@20241022",
-    "anthropic/claude-3-5-haiku": "anthropic/claude-3-5-haiku@20241022",
-    "anthropic/claude-3-5-haiku-20241022": "anthropic/claude-3-5-haiku@20241022",
-    "anthropic/claude-3-opus": "anthropic/claude-3-opus@20240229",
-    "anthropic/claude-3-opus-20240229": "anthropic/claude-3-opus@20240229",
-    "anthropic/claude-3-sonnet": "anthropic/claude-3-sonnet@20240229",
-    "anthropic/claude-3-haiku": "anthropic/claude-3-haiku@20240307",
-    # ── Google Gemini 1.5 ─────────────────────────────────────────────────────
-    "google/gemini-pro-1.5": "google/gemini-1.5-pro-002",
-    "google/gemini-flash-1.5": "google/gemini-1.5-flash-002",
-    # ── Google Gemini 2.0 ─────────────────────────────────────────────────────
-    "google/gemini-2.0-flash": "google/gemini-2.0-flash-001",
-    "google/gemini-2.0-flash-exp": "google/gemini-2.0-flash-exp",
-    "google/gemini-2.0-flash-lite": "google/gemini-2.0-flash-lite-001",
-    # ── Google Gemini 2.5 ─────────────────────────────────────────────────────
-    "google/gemini-2.5-pro": "google/gemini-2.5-pro-preview-05-06",
-    "google/gemini-2.5-flash": "google/gemini-2.5-flash-preview-04-17",
-    # ── Google Gemini 3 ───────────────────────────────────────────────────────
-    "google/gemini-3-flash-preview": "google/gemini-3-flash-preview",
-    "gemini-3-flash-preview": "google/gemini-3-flash-preview",
-    "google/gemini-3.1-pro-preview": "google/gemini-3.1-pro-preview",
-    "gemini-3.1-pro-preview": "google/gemini-3.1-pro-preview",
+
+def _gemini_url(project_id: str, vertex_model_id: str, *, stream: bool) -> str:
+    """Build the native Gemini API URL for a google/ model."""
+    action = "streamGenerateContent" if stream else "generateContent"
+    return (
+        f"https://aiplatform.googleapis.com/v1"
+        f"/projects/{project_id}/locations/global"
+        f"/publishers/google/models/{vertex_model_id}:{action}"
+    )
+
+
+def _to_gemini_payload(request: ChatCompletionRequest) -> dict:
+    """Translate a ChatCompletionRequest into a Gemini generateContent payload."""
+    system_parts: list[dict] = []
+    contents: list[dict] = []
+
+    for msg in request.messages:
+        role = msg.role
+        content = msg.content
+
+        if role == "system":
+            text = content if isinstance(content, str) else " ".join(
+                p["text"] for p in content if isinstance(p, dict) and p.get("type") == "text"
+            )
+            system_parts.append({"text": text})
+            continue
+
+        gemini_role = "model" if role == "assistant" else "user"
+        if isinstance(content, str):
+            parts = [{"text": content}]
+        elif isinstance(content, list):
+            parts = [
+                {"text": p["text"]}
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+        else:
+            parts = [{"text": str(content)}]
+
+        contents.append({"role": gemini_role, "parts": parts})
+
+    payload: dict = {"contents": contents}
+
+    if system_parts:
+        payload["systemInstruction"] = {"parts": system_parts}
+
+    gen_config: dict = {}
+    if request.temperature is not None:
+        gen_config["temperature"] = request.temperature
+    if request.max_tokens is not None:
+        gen_config["maxOutputTokens"] = request.max_tokens
+    if request.top_p is not None:
+        gen_config["topP"] = request.top_p
+    if request.stop is not None:
+        gen_config["stopSequences"] = (
+            request.stop if isinstance(request.stop, list) else [request.stop]
+        )
+    if gen_config:
+        payload["generationConfig"] = gen_config
+
+    return payload
+
+
+def _gemini_usage(usage_meta: dict) -> dict:
+    """Translate Gemini usageMetadata to OpenAI usage shape.
+
+    thoughtsTokenCount (Gemini 2.5 thinking tokens) is billed output but not
+    included in candidatesTokenCount, so we add it into completion_tokens and
+    expose it via completion_tokens_details.reasoning_tokens (OpenAI o1/o3 convention).
+    """
+    prompt_tokens = usage_meta.get("promptTokenCount", 0)
+    candidate_tokens = usage_meta.get("candidatesTokenCount", 0)
+    thinking_tokens = usage_meta.get("thoughtsTokenCount", 0)
+
+    result: dict = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": candidate_tokens + thinking_tokens,
+        "total_tokens": usage_meta.get("totalTokenCount", 0),
+    }
+    if thinking_tokens:
+        result["completion_tokens_details"] = {"reasoning_tokens": thinking_tokens}
+    cached = usage_meta.get("cachedContentTokenCount", 0)
+    if cached:
+        result["prompt_tokens_details"] = {"cached_tokens": cached}
+    return result
+
+
+_FINISH_REASON_MAP: dict[str, str] = {
+    "STOP": "stop",
+    "MAX_TOKENS": "length",
+    "SAFETY": "content_filter",
+    "RECITATION": "content_filter",
+    "OTHER": "stop",
 }
 
 
-def _vertex_model_id(canonical: str) -> str:
-    """
-    Translate a canonical RouterV model name to a Vertex AI model ID.
+def _from_gemini_response(body: dict, model: str) -> dict:
+    """Convert a Gemini generateContent response to OpenAI chat completion shape."""
+    candidates = body.get("candidates", [])
+    usage = body.get("usageMetadata", {})
+    choices = []
+    for i, candidate in enumerate(candidates):
+        parts = candidate.get("content", {}).get("parts", [])
+        text = "".join(p.get("text", "") for p in parts)
+        finish = _FINISH_REASON_MAP.get(candidate.get("finishReason", "STOP"), "stop")
+        choices.append({
+            "index": i,
+            "message": {"role": "assistant", "content": text},
+            "finish_reason": finish,
+            "logprobs": None,
+        })
+    return {
+        "id": f"chatcmpl-gemini-{int(time.time())}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": choices,
+        "usage": _gemini_usage(usage),
+    }
 
-    Vertex's OpenAI-compatible endpoint requires '<publisher>/<model>' format.
-    If the canonical name isn't in _MODEL_MAP and doesn't contain a '/', assume
-    it's a Google model and prepend 'google/' so new previews work without
-    explicit mapping.
+
+def _gemini_obj_to_sse_chunk(obj: dict, model: str, cid: str, created: int) -> bytes:
+    """Convert one streamed Gemini GenerateContentResponse to an OpenAI SSE chunk."""
+    candidates = obj.get("candidates", [])
+    if not candidates:
+        return b""
+
+    candidate = candidates[0]
+    parts = candidate.get("content", {}).get("parts", [])
+    text = "".join(p.get("text", "") for p in parts)
+    finish_reason_raw = candidate.get("finishReason")
+    finish_reason = _FINISH_REASON_MAP.get(finish_reason_raw, "stop") if finish_reason_raw else None
+
+    delta: dict = {}
+    if text:
+        delta["content"] = text
+    if not delta and finish_reason is None:
+        return b""
+
+    chunk: dict = {
+        "id": cid,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason,
+            "logprobs": None,
+        }],
+    }
+    return b"data: " + json.dumps(chunk).encode() + b"\n\n"
+
+
+async def _parse_gemini_stream(
+    response: httpx.Response,
+    model: str,
+) -> AsyncGenerator[bytes, None]:
     """
-    if canonical in _MODEL_MAP:
-        return _MODEL_MAP[canonical]
-    # Already in publisher/model format (e.g. "google/gemini-2.5-pro-exp-03-25")
-    if "/" in canonical:
-        return canonical
-    # Bare name — assume Google model
-    return f"google/{canonical}"
+    Consume a Gemini streamGenerateContent response and yield OpenAI SSE bytes.
+
+    Vertex streams the body as a JSON array: ``[obj,\\nobj,\\n...]``.
+    We use JSONDecoder.raw_decode() to peel off complete objects incrementally.
+
+    Usage is emitted as a dedicated final chunk before [DONE] rather than
+    per-content-chunk, because intermediate Gemini chunks report per-chunk
+    candidatesTokenCount (not cumulative) while totalTokenCount is a running
+    total — so the numbers only add up correctly on the final aggregated object.
+    """
+    cid = f"chatcmpl-gemini-{int(time.time())}"
+    created = int(time.time())
+    decoder = json.JSONDecoder()
+    buffer = ""
+    final_usage: dict | None = None
+
+    async for text in response.aiter_text():
+        buffer += text
+        while True:
+            # Strip leading whitespace, array brackets, and commas
+            clean = buffer.lstrip(" \n\r\t,[")
+            if not clean or clean == "]":
+                buffer = ""
+                break
+            try:
+                obj, idx = decoder.raw_decode(clean)
+                buffer = clean[idx:]
+            except json.JSONDecodeError:
+                break  # wait for more data
+            # Always overwrite — the last object in the stream has complete totals.
+            if obj.get("usageMetadata"):
+                final_usage = obj["usageMetadata"]
+            chunk = _gemini_obj_to_sse_chunk(obj, model, cid, created)
+            if chunk:
+                yield chunk
+
+    # Emit a usage-only chunk so _scan_sse_buf in inference.py captures accurate counts.
+    if final_usage:
+        usage_chunk: dict = {
+            "id": cid,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [],
+            "usage": _gemini_usage(final_usage),
+        }
+        yield b"data: " + json.dumps(usage_chunk).encode() + b"\n\n"
+
+    yield b"data: [DONE]\n\n"
 
 
 # input_type → Vertex AI task_type
@@ -205,12 +364,17 @@ class VertexAIAdapter(ProviderAdapter):
         self._project_id = project_id
         self._location = location
 
+        # OpenAI-compatible endpoint — used for non-Google models (e.g. Anthropic)
         base_url = (
             f"https://{location}-aiplatform.googleapis.com/v1beta1"
             f"/projects/{project_id}/locations/{location}/endpoints/openapi"
         )
         self._client = httpx.AsyncClient(
             base_url=base_url,
+            timeout=httpx.Timeout(timeout),
+        )
+        # Native Gemini endpoint — used for google/ models
+        self._google_client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
         )
 
@@ -249,6 +413,7 @@ class VertexAIAdapter(ProviderAdapter):
     async def close(cls) -> None:
         if cls._instance is not None:
             await cls._instance._client.aclose()
+            await cls._instance._google_client.aclose()
             cls._instance = None
 
     # ── Auth ──────────────────────────────────────────────────────────────────
@@ -278,23 +443,28 @@ class VertexAIAdapter(ProviderAdapter):
         owner: str | None = None,
         provider_model_id: str | None = None,
     ) -> dict:
-        payload = _build_payload(request, stream=False, owner=owner)
-        payload["model"] = _vertex_model_id(provider_model_id or payload["model"])
-        log = logger.bind(model=request.model, vertex_model=payload["model"])
+        vertex_model = provider_model_id or request.model
+        log = logger.bind(model=request.model, vertex_model=vertex_model)
 
         try:
             headers = await self._auth_headers()
-            response = await self._client.post(
-                "/chat/completions",
-                json=payload,
-                headers=headers,
-            )
+
+            if _is_google_model(request.model):
+                url = _gemini_url(self._project_id, vertex_model, stream=False)
+                payload = _to_gemini_payload(request)
+                response = await self._google_client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                return _from_gemini_response(response.json(), vertex_model)
+
+            payload = _build_payload(request, stream=False, owner=owner)
+            payload["model"] = vertex_model
+            response = await self._client.post("/chat/completions", json=payload, headers=headers)
             response.raise_for_status()
             return response.json()
 
         except httpx.HTTPStatusError as exc:
             body = exc.response.text[:300]
-            log.warning("vertex_http_error", status=exc.response.status_code, body=body)
+            log.error("vertex_http_error", status=exc.response.status_code, body=body, error=str(exc))
             _classify_vertex_error(exc.response.status_code, body)
 
         except httpx.TimeoutException as exc:
@@ -309,32 +479,43 @@ class VertexAIAdapter(ProviderAdapter):
         owner: str | None = None,
         provider_model_id: str | None = None,
     ) -> AsyncGenerator[bytes, None]:
-        payload = _build_payload(request, stream=True, owner=owner)
-        payload["model"] = _vertex_model_id(provider_model_id or payload["model"])
-        # Vertex AI does not support stream_options (OpenRouter/OpenAI extension)
-        payload.pop("stream_options", None)
-        log = logger.bind(model=request.model, vertex_model=payload["model"])
+        vertex_model = provider_model_id or request.model
+        log = logger.bind(model=request.model, vertex_model=vertex_model)
 
         try:
             headers = await self._auth_headers()
-            # Disable gzip compression — Vertex returns compressed SSE by default,
-            # and aiter_raw() proxies raw bytes without decompressing.
+
+            if _is_google_model(request.model):
+                url = _gemini_url(self._project_id, vertex_model, stream=True)
+                payload = _to_gemini_payload(request)
+                log.debug("vertex_gemini_stream_open")
+                async with self._google_client.stream(
+                    "POST", url, json=payload, headers=headers
+                ) as response:
+                    if response.status_code >= 400:
+                        await response.aread()
+                        body = response.text[:300]
+                        log.warning("vertex_gemini_stream_error", status=response.status_code, body=body)
+                        _classify_vertex_error(response.status_code, body)
+                    async for chunk in _parse_gemini_stream(response, vertex_model):
+                        yield chunk
+                return
+
+            payload = _build_payload(request, stream=True, owner=owner)
+            payload["model"] = vertex_model
+            # Vertex AI does not support stream_options (OpenRouter/OpenAI extension)
+            payload.pop("stream_options", None)
+            # Disable gzip — Vertex returns compressed SSE; aiter_raw() proxies raw bytes.
             headers["Accept-Encoding"] = "identity"
+            log.debug("vertex_stream_open")
             async with self._client.stream(
-                "POST",
-                "/chat/completions",
-                json=payload,
-                headers=headers,
+                "POST", "/chat/completions", json=payload, headers=headers
             ) as response:
                 if response.status_code >= 400:
                     await response.aread()
                     body = response.text[:300]
-                    log.warning(
-                        "vertex_stream_error", status=response.status_code, body=body
-                    )
+                    log.warning("vertex_stream_error", status=response.status_code, body=body)
                     _classify_vertex_error(response.status_code, body)
-
-                log.debug("vertex_stream_open")
                 async for chunk in response.aiter_raw():
                     yield chunk
 
@@ -359,7 +540,7 @@ class VertexAIAdapter(ProviderAdapter):
         owner: str | None = None,
         provider_model_id: str | None = None,
     ) -> dict:
-        vertex_model = _vertex_model_id(provider_model_id or request.model)
+        vertex_model = provider_model_id or request.model
         log = logger.bind(model=request.model, vertex_model=vertex_model)
 
         instances, parameters = _build_vertex_embed_instances(request)
@@ -381,6 +562,7 @@ class VertexAIAdapter(ProviderAdapter):
                 "vertex_embed_http_error",
                 status=exc.response.status_code,
                 body=body[:300],
+                error=str(exc)
             )
             _classify_vertex_error(exc.response.status_code, body)
 
