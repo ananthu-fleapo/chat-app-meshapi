@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     # Default system key — used when no per-owner provider key is configured.
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_timeout_s: float = 120.0
+    openrouter_timeout_s: float = 300.0
     # Management key — separate credential used ONLY for provisioning per-owner
     # keys via the OpenRouter key management API. Cannot be used for completions.
     # Create at: https://openrouter.ai/settings/management-keys
@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     # Leave all empty to disable Vertex AI routing.
 
     vertex_ai_location: str = "us-central1"
-    vertex_ai_timeout_s: float = 120.0
+    vertex_ai_timeout_s: float = 300.0
 
     # ── AWS Bedrock ───────────────────────────────────────────────────────────
     # Two auth modes (set one):
@@ -79,13 +79,13 @@ class Settings(BaseSettings):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     aws_region: str = "us-east-1"
-    bedrock_timeout_s: float = 120.0
+    bedrock_timeout_s: float = 300.0
 
     # ── OpenAI Direct ─────────────────────────────────────────────────────────
     # Set openai_api_key to route models directly to OpenAI (bypassing OpenRouter).
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
-    openai_timeout_s: float = 120.0
+    openai_timeout_s: float = 300.0
 
     # ── Qwen / DashScope ──────────────────────────────────────────────────────
     # Set qwen_api_key to route Qwen models via Alibaba Cloud DashScope API.
@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     #   https://dashscope.aliyuncs.com/compatible-mode/v1
     qwen_api_key: str = ""
     qwen_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-    qwen_timeout_s: float = 120.0
+    qwen_timeout_s: float = 300.0
 
     # ── GCP (Phase 7+) ────────────────────────────────────────────────────────
     gcp_project_id: str = ""
