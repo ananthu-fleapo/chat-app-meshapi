@@ -248,7 +248,7 @@ class TestLogUsageEvent:
              patch("app.metrics.record_inference", MagicMock()):
             await log_usage_event(**self._log_kwargs(status="success"))
 
-        mock_deduct.assert_called_once_with(OWNER, Decimal("0.01"))
+        mock_deduct.assert_called_once_with(OWNER, Decimal("0.01"), usage_event_id=None)
 
     async def test_error_status_does_not_deduct_balance(self):
         """status=error → deduct_balance is NOT called."""

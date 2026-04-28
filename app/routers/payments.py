@@ -372,7 +372,7 @@ async def create_payment(
             amount_usd=str(amount_usd),
             amount_usd_minor=int(amount_usd * 100),
         )
-        await credit_balance(body.userId, amount_usd, db)
+        await credit_balance(body.userId, amount_usd, db, payment_event_id=event.id)
 
     return {"received": True, "coupon": coupon_payload}
 

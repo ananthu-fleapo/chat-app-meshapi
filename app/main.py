@@ -19,7 +19,7 @@ from app.providers.registry import register_adapter
 from prometheus_fastapi_instrumentator import Instrumentator
 import asyncio
 
-from app.routers import admin, admin_test_completions, admin_test_embeddings, admin_test_responses, auth, balance, batch, coupons, embeddings, error_logs, fx_rates, gstin, inference, keys, metrics_daily, models, payments, responses, usage
+from app.routers import admin, admin_test_completions, admin_test_embeddings, admin_test_responses, auth, balance, batch, coupons, embeddings, error_logs, fx_rates, gstin, inference, keys, metrics_daily, models, payments, reconcile, responses, usage
 
 from fastapi.middleware.cors import CORSMiddleware 
 
@@ -285,6 +285,9 @@ def create_app() -> FastAPI:
 
     # Daily metrics summary: Cloud Scheduler endpoint, guarded by WEBHOOK_API_KEY.
     app.include_router(metrics_daily.router)
+
+    # Balance reconciliation: Cloud Scheduler endpoint, guarded by WEBHOOK_API_KEY.
+    app.include_router(reconcile.router)
 
     # GSTIN verification: user-authenticated, results cached 6 months in Redis.
     app.include_router(gstin.router)

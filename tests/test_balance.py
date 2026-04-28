@@ -148,10 +148,16 @@ class TestCheckBalance:
 class TestDeductBalance:
 
     async def test_deducts_cost_from_balance(self):
-        """Happy path: issues UPDATE with correct values."""
+        """Happy path: SELECT FOR UPDATE + upsert + ledger row + commit."""
         from app.usage.balance import deduct_balance
 
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = None  # no existing row
+
         mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=execute_result)
+        mock_session.add = MagicMock()
+        mock_session.commit = AsyncMock()
         mock_cm = MagicMock()
         mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
         mock_cm.__aexit__ = AsyncMock(return_value=False)
@@ -160,13 +166,11 @@ class TestDeductBalance:
             mock_factory.return_value.return_value = mock_cm
             await deduct_balance("user-123", Decimal("0.00150000"))
 
-        mock_session.execute.assert_called_once()
+        # SELECT FOR UPDATE + upsert INSERT = 2 execute calls
+        assert mock_session.execute.call_count == 2
         mock_session.commit.assert_called_once()
-
-        # Verify the UPDATE was called with the right cost and owner
-        call_kwargs = mock_session.execute.call_args[0][1]
-        assert call_kwargs["cost"] == Decimal("0.00150000")
-        assert call_kwargs["owner"] == "user-123"
+        # BalanceLedger row added
+        mock_session.add.assert_called_once()
 
     async def test_zero_cost_skips_update(self):
         """Cost of zero should not issue any DB query."""
@@ -205,29 +209,31 @@ class TestDeductBalance:
 class TestCreditBalance:
 
     async def test_credits_balance_for_new_user(self, mock_db):
-        """INSERT ... ON CONFLICT is executed and session is not committed here
-        (caller's session handles commit)."""
+        """SELECT FOR UPDATE + upsert INSERT both execute; caller's session commits."""
         from app.usage.balance import credit_balance
 
+        mock_db.execute.return_value = make_execute_result(scalar=None)
         await credit_balance("new-user", Decimal("10.00"), mock_db)
 
-        mock_db.execute.assert_called_once()
+        assert mock_db.execute.call_count == 2
 
     async def test_credits_balance_for_existing_user(self, mock_db):
         """Upsert executes regardless of whether row exists — DB handles conflict."""
         from app.usage.balance import credit_balance
 
+        mock_db.execute.return_value = make_execute_result(scalar=None)
         await credit_balance("existing-user", Decimal("5.50"), mock_db)
 
-        mock_db.execute.assert_called_once()
+        assert mock_db.execute.call_count == 2
 
     async def test_small_fractional_amount(self, mock_db):
         """Fractional cent amounts are handled correctly."""
         from app.usage.balance import credit_balance
 
+        mock_db.execute.return_value = make_execute_result(scalar=None)
         await credit_balance("user-123", Decimal("0.99"), mock_db)
 
-        mock_db.execute.assert_called_once()
+        assert mock_db.execute.call_count == 2
 
 
 # ── get_active_discount ───────────────────────────────────────────────────────

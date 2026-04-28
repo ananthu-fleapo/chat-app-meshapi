@@ -120,6 +120,7 @@ async def _deduct_with_fallback(
     completion_tokens: int | None,
     provider: str,
     status: str,
+    usage_event_id: uuid.UUID | None = None,
 ) -> None:
     """
     Attempt balance deduction. On failure, persist to MongoDB balance_failures
@@ -129,7 +130,7 @@ async def _deduct_with_fallback(
     """
     from app.usage.balance import deduct_balance
     try:
-        await deduct_balance(owner, cost)
+        await deduct_balance(owner, cost, usage_event_id=usage_event_id)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "balance_deduction_failed",
@@ -221,6 +222,7 @@ async def log_usage_event(
 
     # ── 1. Postgres write (best-effort) ───────────────────────────────────────
     postgres_ok = False
+    usage_event_id: uuid.UUID | None = None
     try:
         async with get_session_factory()() as session:
             event = UsageEvent(
@@ -242,6 +244,8 @@ async def log_usage_event(
                 error_code=error_code,
             )
             session.add(event)
+            await session.flush()   # populates event.id via asyncpg RETURNING
+            usage_event_id = event.id
             await session.commit()
         postgres_ok = True
     except Exception as exc:  # noqa: BLE001
@@ -327,6 +331,7 @@ async def log_usage_event(
             completion_tokens=completion_tokens,
             provider=provider,
             status=status,
+            usage_event_id=usage_event_id,
         )
     else:
         logger.warning("balance_deduction_skipped", status=status, cost=cost)

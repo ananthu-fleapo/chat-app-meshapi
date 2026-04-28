@@ -326,6 +326,60 @@ class UserBalance(Base):
         return f"<UserBalance user_id={self.user_id!r} balance={self.balance_usd}>"
 
 
+class BalanceLedger(Base):
+    """
+    Append-only transaction log for user balance changes.
+
+    Every credit and debit writes one row here atomically with the
+    corresponding user_balances update. Never updated after insert.
+
+    Columns
+    -------
+    user_id         Matches user_balances.user_id. No DB FK to avoid write
+                    overhead on high-volume debit path.
+    txn_type        'credit' | 'debit'
+    amount_usd      Absolute magnitude (always positive). txn_type carries sign.
+    balance_before  Snapshot of balance_usd before this transaction.
+    balance_after   Snapshot of balance_usd after this transaction.
+    reference_id    UUID of source event: usage_events.id or payment_events.id.
+    reference_type  'usage_event' | 'payment_event'
+    reason          Optional human-readable note.
+    """
+
+    __tablename__ = "balance_ledger"
+    __table_args__ = (
+        Index("ix_balance_ledger_user_created", "user_id", "created_at"),
+        Index("ix_balance_ledger_reference", "reference_id"),
+        Index("ix_balance_ledger_txn_type", "txn_type"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    txn_type: Mapped[str] = mapped_column(Text, nullable=False)
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False)
+    balance_before: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    balance_after: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    reference_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    reference_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<BalanceLedger id={self.id} user={self.user_id!r} "
+            f"type={self.txn_type!r} amount={self.amount_usd}>"
+        )
+
+
 class Model(Base):
     """
     Admin-managed model registry — the canonical whitelist for GET /v1/models.

@@ -9,18 +9,20 @@ check_balance(owner, model, db)
     Free models always pass regardless of balance.
     Models not in model_prices are treated as paid (safe default).
 
-deduct_balance(owner, cost_usd)
-    Post-inference deduction. Atomically decrements user_balances.balance_usd.
-    Opens its own DB session — safe to call from background tasks.
-    Silently logs on failure — never raises (must not affect response delivery).
+deduct_balance(owner, cost_usd, *, usage_event_id)
+    Post-inference deduction. Atomically decrements user_balances.balance_usd
+    and appends a BalanceLedger row. Opens its own DB session — safe to call
+    from background tasks. Silently logs on failure — never raises.
 
-credit_balance(user_id, amount_usd, db)
-    Upserts user_balances, adding amount_usd to the current balance.
+credit_balance(user_id, amount_usd, db, *, payment_event_id)
+    Upserts user_balances, adding amount_usd to the current balance, and
+    appends a BalanceLedger row within the caller's session.
     Called by the payment webhook handler.
 """
 
 from __future__ import annotations
 
+import uuid
 from decimal import Decimal
 
 import structlog
@@ -31,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import UTC, datetime
 
 from app.db.engine import get_session_factory
-from app.db.models import Discount, UserBalance
+from app.db.models import BalanceLedger, Discount, ModelPrice, UserBalance
 from app.exceptions import PaymentRequiredError
 from app.pricing.resolver import PriceRow, get_default_price_row
 
@@ -126,9 +128,14 @@ async def check_balance(owner: str, model: str, db: AsyncSession) -> bool:
     return False  # paid model, balance OK
 
 
-async def deduct_balance(owner: str, cost_usd: Decimal) -> None:
+async def deduct_balance(
+    owner: str,
+    cost_usd: Decimal,
+    *,
+    usage_event_id: uuid.UUID | None = None,
+) -> None:
     """
-    Atomically deduct cost_usd from user_balances.
+    Atomically deduct cost_usd from user_balances and append a ledger row.
 
     Fire-and-forget — opens its own session, never raises.
     """
@@ -136,16 +143,42 @@ async def deduct_balance(owner: str, cost_usd: Decimal) -> None:
         return
     try:
         async with get_session_factory()() as session:
-            await session.execute(
-                text(
-                    "UPDATE user_balances "
-                    "SET balance_usd = balance_usd - :cost, updated_at = now() "
-                    "WHERE user_id = :owner"
-                ),
-                {"cost": cost_usd, "owner": owner},
+            # Lock row and read current balance for snapshot.
+            result = await session.execute(
+                select(UserBalance)
+                .where(UserBalance.user_id == owner)
+                .with_for_update()
             )
+            existing = result.scalar_one_or_none()
+            balance_before = existing.balance_usd if existing is not None else Decimal("0")
+            balance_after = balance_before - cost_usd
+
+            await session.execute(
+                insert(UserBalance)
+                .values(user_id=owner, balance_usd=balance_after)
+                .on_conflict_do_update(
+                    index_elements=["user_id"],
+                    set_={"balance_usd": balance_after, "updated_at": text("now()")},
+                )
+            )
+            session.add(BalanceLedger(
+                user_id=owner,
+                txn_type="debit",
+                amount_usd=cost_usd,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                reference_id=usage_event_id,
+                reference_type="usage_event" if usage_event_id is not None else None,
+            ))
             await session.commit()
-        logger.debug("balance_deducted", owner=owner, cost_usd=str(cost_usd))
+        logger.debug(
+            "balance_deducted",
+            owner=owner,
+            cost_usd=str(cost_usd),
+            balance_before=str(balance_before),
+            balance_after=str(balance_after),
+            usage_event_id=str(usage_event_id) if usage_event_id is not None else None,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.error("balance_deduct_failed", owner=owner, cost_usd=str(cost_usd), error=str(exc))
 
@@ -189,19 +222,51 @@ async def get_active_discount(owner: str, model: str, db: AsyncSession) -> Decim
     return d.discount_pct
 
 
-async def credit_balance(user_id: str, amount_usd: Decimal, db: AsyncSession) -> None:
+async def credit_balance(
+    user_id: str,
+    amount_usd: Decimal,
+    db: AsyncSession,
+    *,
+    payment_event_id: uuid.UUID | None = None,
+) -> None:
     """
-    Add amount_usd to user_balances, creating the row if it doesn't exist.
+    Add amount_usd to user_balances and append a ledger row.
 
-    Uses PostgreSQL INSERT ... ON CONFLICT DO UPDATE for atomicity.
+    Uses SELECT FOR UPDATE to capture balance_before, then upserts.
+    Caller's session commits — the ledger row and balance update are atomic.
     """
+    result = await db.execute(
+        select(UserBalance)
+        .where(UserBalance.user_id == user_id)
+        .with_for_update()
+    )
+    existing = result.scalar_one_or_none()
+    balance_before = existing.balance_usd if existing is not None else Decimal("0")
+    balance_after = balance_before + amount_usd
+
     stmt = (
         insert(UserBalance)
-        .values(user_id=user_id, balance_usd=amount_usd)
+        .values(user_id=user_id, balance_usd=balance_after)
         .on_conflict_do_update(
             index_elements=["user_id"],
-            set_={"balance_usd": UserBalance.balance_usd + amount_usd, "updated_at": text("now()")},
+            set_={"balance_usd": balance_after, "updated_at": text("now()")},
         )
     )
     await db.execute(stmt)
-    logger.info("balance_credited", user_id=user_id, amount_usd=str(amount_usd))
+    db.add(BalanceLedger(
+        user_id=user_id,
+        txn_type="credit",
+        amount_usd=amount_usd,
+        balance_before=balance_before,
+        balance_after=balance_after,
+        reference_id=payment_event_id,
+        reference_type="payment_event" if payment_event_id is not None else None,
+    ))
+    logger.info(
+        "balance_credited",
+        user_id=user_id,
+        amount_usd=str(amount_usd),
+        balance_before=str(balance_before),
+        balance_after=str(balance_after),
+        payment_event_id=str(payment_event_id) if payment_event_id is not None else None,
+    )
