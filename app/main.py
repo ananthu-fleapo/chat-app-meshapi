@@ -19,7 +19,7 @@ from app.providers.registry import register_adapter
 from prometheus_fastapi_instrumentator import Instrumentator
 import asyncio
 
-from app.routers import admin, admin_test_completions, admin_test_embeddings, admin_test_responses, auth, balance, batch, coupons, embeddings, error_logs, fx_rates, gstin, inference, keys, metrics_daily, models, payments, reconcile, responses, usage
+from app.routers import admin, admin_test_completions, admin_test_embeddings, admin_test_responses, auth, balance, batch, coupons, embeddings, error_logs, fx_rates, gstin, inference, keys, metrics_daily, model_requests, models, payments, reconcile, responses, usage
 
 from fastapi.middleware.cors import CORSMiddleware 
 
@@ -271,6 +271,9 @@ def create_app() -> FastAPI:
 
     # Models listing: unauthenticated, public info.
     app.include_router(models.router)
+
+    # Model requests: users submit requests for new models to be added.
+    app.include_router(model_requests.router)
 
     # Public status page endpoint — no auth, Prometheus-backed.
     from app.routers import status as status_router

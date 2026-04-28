@@ -1013,3 +1013,34 @@ class BatchFile(Base):
 
     def __repr__(self) -> str:
         return f"<BatchFile file_id={self.file_id!r} model={self.model!r} provider={self.provider!r}>"
+
+
+class ModelRequest(Base):
+    """
+    A user-submitted request to add a model to the platform.
+
+    Columns
+    -------
+    owner       RouterV owner label (from JWT) — scopes the request to its submitter.
+    model_name  The model the user wants added (free text, e.g. "meta-llama/llama-4-scout").
+    use_case    Optional description of why they need it.
+    status      "pending" → "approved" | "rejected" — managed by admins.
+    """
+
+    __tablename__ = "model_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    owner: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    model_name: Mapped[str] = mapped_column(Text, nullable=False)
+    use_case: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<ModelRequest id={self.id} owner={self.owner!r} model_name={self.model_name!r} status={self.status!r}>"
