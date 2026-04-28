@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.control_plane import ControlPlaneIdentity, get_admin_user, get_control_plane_user
 from app.cache.redis_client import get_redis
-from app.db.models import ModelRequest
+from app.db.models import ModelRequest, User
 from app.db.session import get_db_session
 from app.exceptions import NotFoundError, RateLimitError
 
@@ -109,6 +109,7 @@ class SubmitModelRequestBody(BaseModel):
 class ModelRequestOut(BaseModel):
     id: str
     owner: str
+    email: str | None
     model_name: str
     use_case: str | None
     status: str
@@ -127,10 +128,11 @@ class UpdateModelRequestBody(BaseModel):
         return v
 
 
-def _fmt(req: ModelRequest) -> ModelRequestOut:
+def _fmt(req: ModelRequest, *, email: str | None = None) -> ModelRequestOut:
     return ModelRequestOut(
         id=str(req.id),
         owner=req.owner,
+        email=email,
         model_name=req.model_name,
         use_case=req.use_case,
         status=req.status,
@@ -187,8 +189,17 @@ async def list_all_model_requests(
     if status:
         q = q.where(ModelRequest.status == status)
     q = q.limit(limit).offset(offset)
-    rows = await db.execute(q)
-    return [_fmt(r) for r in rows.scalars()]
+    reqs = list((await db.execute(q)).scalars())
+
+    email_by_owner: dict[str, str] = {}
+    if reqs:
+        owner_ids = list({r.owner for r in reqs})
+        email_rows = await db.execute(
+            select(User.id, User.email).where(User.id.in_(owner_ids))
+        )
+        email_by_owner = {row.id: row.email for row in email_rows.all()}
+
+    return [_fmt(r, email=email_by_owner.get(r.owner)) for r in reqs]
 
 
 @router.patch("/admin/{request_id}")
