@@ -7,6 +7,7 @@ record in the local DB on successful verification.
 Requires SUPABASE_URL and SUPABASE_ANON_KEY to be set.
 """
 
+import asyncio
 import structlog
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -76,6 +77,26 @@ def _check_email_allowed(email: str) -> None:
     domain = email.rsplit("@", 1)[-1].lower()
     if domain not in _DEV_ALLOWED_DOMAINS:
         raise HTTPException(status_code=403, detail="Email domain not allowed in dev environment")
+
+
+# ── Email ─────────────────────────────────────────────────────────────────────
+
+async def _send_welcome_email(email: str) -> None:
+    if not settings.mailmodo_webhook_url:
+        return
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                settings.mailmodo_webhook_url,
+                json={"email": email, "data": {}},
+                timeout=10.0,
+            )
+        if resp.status_code not in (200, 201):
+            logger.warning("mailmodo_welcome_failed", status=resp.status_code, email=email, body=resp.text)
+        else:
+            logger.info("mailmodo_welcome_sent", email=email)
+    except Exception:
+        logger.exception("mailmodo_welcome_error", email=email)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -161,6 +182,7 @@ async def verify_otp(
 
         if user is None:
             db.add(User(id=session.user.id, email=session.user.email))
+            asyncio.create_task(_send_welcome_email(session.user.email))
         else:
             user.email = session.user.email
 

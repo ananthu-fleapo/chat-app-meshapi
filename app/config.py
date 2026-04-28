@@ -245,5 +245,8 @@ class Settings(BaseSettings):
     # Leave empty to disable Slack alerts.
     slack_webhook_url: str = ""
 
+    # ── Mailmodo ──────────────────────────────────────────────────────────────
+    mailmodo_webhook_url: str = ""
+
 
 settings = Settings()
