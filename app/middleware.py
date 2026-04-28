@@ -396,11 +396,19 @@ async def _write_request_log(
     All errors are caught and logged — must never affect the request path.
     """
     try:
+        from app.cache.zdr_cache import get_owner_zdr
         from app.db.mongo import get_mongo_db
+
+        owner_zdr = await get_owner_zdr(owner) if owner else False
+        effective_log_bodies = log_bodies and not owner_zdr
+        if owner_zdr:
+            logger.debug("zdr_bodies_suppressed", request_id=request_id, owner=owner)
+
+
 
         # ── Parse request body ────────────────────────────────────────────────
         request_body_doc = None
-        if log_bodies and request_body:
+        if effective_log_bodies and request_body:
             content_type = request_headers.get("content-type", "")
             if "application/json" in content_type:
                 try:
@@ -415,7 +423,7 @@ async def _write_request_log(
 
         # ── Parse response body ───────────────────────────────────────────────
         response_body_doc = None
-        if log_bodies and response_body:
+        if effective_log_bodies and response_body:
             resp_content_type = response_headers.get("content-type", "")
             if "application/json" in resp_content_type:
                 try:

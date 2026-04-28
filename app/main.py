@@ -256,6 +256,9 @@ def create_app() -> FastAPI:
     app.include_router(keys.router)
     app.include_router(balance.router)
     app.include_router(usage.router)
+
+    from app.routers import settings as settings_router
+    app.include_router(settings_router.router)
     app.include_router(payments.router)
     app.include_router(coupons.router)
     app.include_router(coupons.admin_router)
