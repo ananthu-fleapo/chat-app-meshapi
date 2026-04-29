@@ -26,35 +26,54 @@ Phase 6: admin provider key management
 import hashlib
 import json
 import uuid
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
-
 from typing import Literal
+
 import structlog
-from structlog.contextvars import bind_contextvars
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, func, or_, select, text, update
 from pydantic import BaseModel, field_validator, model_validator
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.contextvars import bind_contextvars
 from ulid import ULID
 
+from app.analytics.payment_exprs import discount_usd_expr, usd_amount_expr
 from app.auth.control_plane import get_admin_user
+from app.cache.analytics_cache import get_analytics_cached, set_analytics_cached
 from app.cache.key_cache import invalidate_cached_key
 from app.cache.redis_client import get_redis
 from app.config import settings
-from app.db.models import ApiKey, CheckoutCoupon, CurrencyConversionRate, Discount, Model, ModelPrice, ModelPricing, PaymentEvent, ProviderKey, Template, UsageEvent, UserBalance, User
-from app.cache.analytics_cache import get_analytics_cached, set_analytics_cached
-from app.routers.usage import UsageEventOut, UsageEventsPage, _parse_dt, _split_model, _tokens_per_second
+from app.db.models import (
+    ApiKey,
+    CheckoutCoupon,
+    Discount,
+    Model,
+    ModelPrice,
+    ModelPricing,
+    PaymentEvent,
+    ProviderKey,
+    Template,
+    UsageEvent,
+    User,
+    UserBalance,
+)
 from app.db.session import get_db_session
 from app.exceptions import NotFoundError
 from app.providers.provisioner import (
     ProvisionedKey,
     create_or_key,
     delete_or_key,
-    disable_or_key,
 )
-from app.providers.secret_manager import fetch_secret, invalidate_secret_cache, store_secret 
+from app.providers.secret_manager import fetch_secret, invalidate_secret_cache, store_secret
+from app.routers.usage import (
+    UsageEventOut,
+    UsageEventsPage,
+    _parse_dt,
+    _split_model,
+    _tokens_per_second,
+)
 
 logger = structlog.get_logger()
 
@@ -62,6 +81,7 @@ router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_ad
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _generate_key() -> str:
     return f"rsk_{ULID()}"
@@ -74,11 +94,12 @@ def _hash_key(raw: str) -> str:
 def _parse_uuid(value: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
-    except ValueError:
-        raise HTTPException(status_code=422, detail=f"Invalid UUID: {value!r}")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid UUID: {value!r}") from exc
 
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
+
 
 def _clamp_rate_limits(rpm: int | None, rpd: int | None) -> tuple[int | None, int | None]:
     """Clamp rpm/rpd to system maximums. Raises 422 if a value exceeds the cap."""
@@ -107,7 +128,7 @@ class CreateKeyRequest(BaseModel):
 
 class CreateKeyResponse(BaseModel):
     id: str
-    key: str          # plaintext — shown ONCE, not stored
+    key: str  # plaintext — shown ONCE, not stored
     owner: str
     status: str
     default_model: str | None
@@ -124,7 +145,7 @@ class KeySummary(BaseModel):
     default_params: dict | None
     rpm_limit: int | None
     rpd_limit: int | None
-    spend_cap_usd: str | None   # Decimal serialised as string to avoid float precision loss
+    spend_cap_usd: str | None  # Decimal serialised as string to avoid float precision loss
     created_at: str
     updated_at: str
 
@@ -140,6 +161,7 @@ class UpdateKeyRequest(BaseModel):
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+
 
 async def _auto_provision_for_owner(
     owner: str,
@@ -160,11 +182,13 @@ async def _auto_provision_for_owner(
     """
     # Skip if owner already has a provider key configured.
     existing = await db.execute(
-        select(ProviderKey).where(
+        select(ProviderKey)
+        .where(
             ProviderKey.owner == owner,
             ProviderKey.provider == "openrouter",
             ProviderKey.is_active.is_(True),
-        ).limit(1)
+        )
+        .limit(1)
     )
     if existing.scalar_one_or_none() is not None:
         logger.debug("auto_provision_skipped_existing", owner=owner)
@@ -178,6 +202,7 @@ async def _auto_provision_for_owner(
     if provisioned is None:
         logger.error("auto_provision_failed", owner=owner)
         from app.exceptions import RouterVError
+
         raise RouterVError("Key provisioning failed. Please try again or contact support.")
 
     # Prefer GCP Secret Manager; fall back to storing the plaintext inline.
@@ -216,7 +241,7 @@ async def _auto_provision_for_owner(
 @router.post("/keys", response_model=CreateKeyResponse, status_code=201)
 async def create_key(
     body: CreateKeyRequest,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     Create a new RouterV API key.
@@ -267,7 +292,7 @@ async def create_key(
 
 @router.get("/keys", response_model=list[KeySummary])
 async def list_keys(
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     result = await db.execute(select(ApiKey).order_by(ApiKey.created_at.desc()))
     keys = result.scalars().all()
@@ -283,7 +308,7 @@ async def list_keys(
 async def update_key(
     key_id: str,
     body: UpdateKeyRequest,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     key = await _get_or_404(db, key_id)
 
@@ -319,7 +344,7 @@ async def update_key(
 @router.delete("/keys/{key_id}", status_code=204)
 async def delete_key(
     key_id: str,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     key = await _get_or_404(db, key_id)
 
@@ -330,6 +355,7 @@ async def delete_key(
 
 
 # ── Usage reporting (Phase 5) ─────────────────────────────────────────────────
+
 
 class KeyModelBreakdown(BaseModel):
     model: str
@@ -363,7 +389,7 @@ class SystemUsageSummary(BaseModel):
 @router.get("/keys/{key_id}/usage", response_model=KeyUsageSummary)
 async def get_key_usage(
     key_id: str,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Lifetime usage summary for a single key."""
     key = await _get_or_404(db, key_id)
@@ -393,11 +419,7 @@ async def get_key_usage(
     )
 
     total_cost = Decimal(str(r.cost))
-    remaining = (
-        (key.spend_cap_usd - total_cost)
-        if key.spend_cap_usd is not None
-        else None
-    )
+    remaining = (key.spend_cap_usd - total_cost) if key.spend_cap_usd is not None else None
 
     return KeyUsageSummary(
         key_id=key_id,
@@ -419,6 +441,7 @@ async def get_key_usage(
 
 # ── Users list ────────────────────────────────────────────────────────────────
 
+
 class UserSummary(BaseModel):
     user_id: str
     email: str | None = None
@@ -433,7 +456,7 @@ class UserSummary(BaseModel):
 
 @router.get("/users", response_model=list[UserSummary])
 async def list_users(
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     List all users from the users table, enriched with balance and spend.
@@ -493,22 +516,26 @@ async def list_users(
         balance = Decimal(str(bal.balance_usd)) if bal else Decimal(0)
         total_spent = max(total_recharged - balance, Decimal(0))
         last_activity = activity_by_user.get(u.id)
-        results.append(UserSummary(
-            user_id=u.id,
-            email=u.email,
-            display_name=u.display_name,
-            key_count=keys_row.key_count if keys_row else 0,
-            active_key_count=keys_row.active_key_count if keys_row else 0,
-            total_spent_usd=str(total_spent),
-            balance_usd=str(bal.balance_usd) if bal else None,
-            last_activity=last_activity.isoformat() if last_activity else None,
-            created_at=u.created_at.isoformat(),
-        ))
+        results.append(
+            UserSummary(
+                user_id=u.id,
+                email=u.email,
+                display_name=u.display_name,
+                key_count=keys_row.key_count if keys_row else 0,
+                active_key_count=keys_row.active_key_count if keys_row else 0,
+                total_spent_usd=str(total_spent),
+                balance_usd=str(bal.balance_usd) if bal else None,
+                last_activity=last_activity.isoformat() if last_activity else None,
+                created_at=u.created_at.isoformat(),
+            )
+        )
 
     results.sort(key=lambda x: x.last_activity or "", reverse=True)
     return results
 
+
 # ── Usage breakdowns ──────────────────────────────────────────────────────────
+
 
 class ModelUsageRow(BaseModel):
     model: str
@@ -529,7 +556,7 @@ class OwnerUsageRow(BaseModel):
 
 @router.get("/usage/by-model", response_model=list[ModelUsageRow])
 async def get_usage_by_model(
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Usage breakdown grouped by model, sorted by cost descending."""
     rows = await db.execute(
@@ -539,7 +566,9 @@ async def get_usage_by_model(
             func.count(UsageEvent.id).filter(UsageEvent.status == "success").label("success"),
             func.coalesce(func.sum(UsageEvent.total_tokens), 0).label("tokens"),
             func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("cost"),
-        ).group_by(UsageEvent.model).order_by(func.sum(UsageEvent.cost_usd).desc().nulls_last())
+        )
+        .group_by(UsageEvent.model)
+        .order_by(func.sum(UsageEvent.cost_usd).desc().nulls_last())
     )
     return [
         ModelUsageRow(
@@ -555,7 +584,7 @@ async def get_usage_by_model(
 
 @router.get("/usage/by-owner", response_model=list[OwnerUsageRow])
 async def get_usage_by_owner(
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Usage breakdown grouped by key owner, sorted by cost descending."""
     rows = await db.execute(
@@ -591,7 +620,7 @@ async def get_usage_by_owner(
 
 @router.get("/usage/summary", response_model=SystemUsageSummary)
 async def get_usage_summary(
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """System-wide lifetime usage summary across all keys."""
     row = await db.execute(
@@ -599,9 +628,7 @@ async def get_usage_summary(
             func.count(UsageEvent.id).label("total"),
             func.coalesce(func.sum(UsageEvent.total_tokens), 0).label("tokens"),
             func.coalesce(func.sum(UsageEvent.cost_usd), 0).label("cost"),
-            func.count(UsageEvent.id).filter(
-                UsageEvent.status == "success"
-            ).label("success")
+            func.count(UsageEvent.id).filter(UsageEvent.status == "success").label("success"),
         )
     )
     r = row.one()
@@ -621,6 +648,7 @@ async def get_usage_summary(
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
+
 
 async def _get_or_404(db: AsyncSession, key_id: str) -> ApiKey:
     uid = _parse_uuid(key_id)
@@ -650,6 +678,7 @@ def _to_summary(k: ApiKey, *, email: str | None = None) -> KeySummary:
 # ── Admin: provider key management ───────────────────────────────────────────
 # Dev-only convenience endpoints — no bearer auth needed here because the
 # entire admin router is gated behind ENV=dev.
+
 
 class AdminCreateProviderKeyRequest(BaseModel):
     owner: str
@@ -695,7 +724,7 @@ def _to_pk_out(
 @router.post("/provider-keys", response_model=AdminProviderKeyOut, status_code=201)
 async def admin_create_provider_key(
     body: AdminCreateProviderKeyRequest,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     Create a provider key record for any owner (dev admin convenience).
@@ -716,12 +745,10 @@ async def admin_create_provider_key(
 
 @router.get("/provider-keys", response_model=list[AdminProviderKeyOut])
 async def admin_list_provider_keys(
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """List all provider keys across all owners."""
-    result = await db.execute(
-        select(ProviderKey).order_by(ProviderKey.created_at.desc())
-    )
+    result = await db.execute(select(ProviderKey).order_by(ProviderKey.created_at.desc()))
     pks = result.scalars().all()
     owner_ids = list({pk.owner for pk in pks})
     email_by_owner: dict[str, str] = {}
@@ -734,7 +761,7 @@ async def admin_list_provider_keys(
 @router.get("/provider-keys/{pk_id}", response_model=AdminProviderKeyOut)
 async def admin_get_provider_key(
     pk_id: str,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Get a single provider key by ID and probe its Secret Manager reference."""
     uid = _parse_uuid(pk_id)
@@ -750,7 +777,7 @@ async def admin_get_provider_key(
 @router.delete("/provider-keys/{pk_id}", status_code=204)
 async def admin_delete_provider_key(
     pk_id: str,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Hard-delete a provider key and evict its Secret Manager cache."""
     uid = _parse_uuid(pk_id)
@@ -767,7 +794,7 @@ async def admin_delete_provider_key(
 @router.post("/provider-keys/{pk_id}/rotate", response_model=AdminProviderKeyOut)
 async def admin_rotate_provider_key(
     pk_id: str,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     Zero-downtime rotation of a provider key.
@@ -810,9 +837,7 @@ async def admin_rotate_provider_key(
 
     # 3. Update the row — /versions/latest always resolves to newest version.
     if new_version_ref:
-        pk.secret_ref = (
-            f"projects/{settings.gcp_project_id}/secrets/{secret_id}/versions/latest"
-        )
+        pk.secret_ref = f"projects/{settings.gcp_project_id}/secrets/{secret_id}/versions/latest"
     pk.or_key_hash = new_provisioned.or_hash
 
     await db.flush()
@@ -830,6 +855,7 @@ async def admin_rotate_provider_key(
 
 
 # ── Admin: model pricing ──────────────────────────────────────────────────────
+
 
 def _per_1m(per_1k: Decimal | None) -> str | None:
     """Convert a stored per-1K price to per-1M for API responses. Exact Decimal arithmetic."""
@@ -864,7 +890,7 @@ class ModelPriceIn(BaseModel):
     completion_usd_per_1m: float | None = None
     is_free: bool = False
     # Optional: create a model-level discount (applies to all users) in the same request.
-    discount_pct: float | None = None   # 0–100; None = no discount created
+    discount_pct: float | None = None  # 0–100; None = no discount created
     # What the upstream provider charges us — used to calculate upstream_cost_usd
     # in usage_events for providers that don't report cost in their API response
     # (Vertex AI, Bedrock, OpenAI Direct, Qwen).  Leave unset for OpenRouter
@@ -885,12 +911,14 @@ class ModelPriceIn(BaseModel):
             ("prompt", self.prompt_usd_per_1k, self.prompt_usd_per_1m),
             ("completion", self.completion_usd_per_1k, self.completion_usd_per_1m),
             ("upstream_prompt", self.upstream_prompt_usd_per_1k, self.upstream_prompt_usd_per_1m),
-            ("upstream_completion", self.upstream_completion_usd_per_1k, self.upstream_completion_usd_per_1m),
+            (
+                "upstream_completion",
+                self.upstream_completion_usd_per_1k,
+                self.upstream_completion_usd_per_1m,
+            ),
         ]:
             if per_1k is not None and per_1m is not None:
-                raise ValueError(
-                    f"Provide '{field}' price in either per-1K or per-1M, not both"
-                )
+                raise ValueError(f"Provide '{field}' price in either per-1K or per-1M, not both")
         # Enforce is_free invariant: non-zero explicit prices are forbidden on a free model.
         if self.is_free:
             for field, per_1k, per_1m in [
@@ -899,28 +927,36 @@ class ModelPriceIn(BaseModel):
             ]:
                 val = per_1k if per_1k is not None else per_1m
                 if val is not None and val != 0:
-                    raise ValueError(
-                        f"Cannot set non-zero '{field}' price when is_free=True"
-                    )
+                    raise ValueError(f"Cannot set non-zero '{field}' price when is_free=True")
         return self
 
     def resolved_prompt(self) -> Decimal:
         v = _resolve_per_1k(self.prompt_usd_per_1k, self.prompt_usd_per_1m, "prompt")
         if v is None:
-            raise ValueError("prompt price is required (provide prompt_usd_per_1k or prompt_usd_per_1m)")
+            raise ValueError(
+                "prompt price is required (provide prompt_usd_per_1k or prompt_usd_per_1m)"
+            )
         return v
 
     def resolved_completion(self) -> Decimal:
         v = _resolve_per_1k(self.completion_usd_per_1k, self.completion_usd_per_1m, "completion")
         if v is None:
-            raise ValueError("completion price is required (provide completion_usd_per_1k or completion_usd_per_1m)")
+            raise ValueError(
+                "completion price is required (provide completion_usd_per_1k or completion_usd_per_1m)"  # noqa: E501
+            )
         return v
 
     def resolved_upstream_prompt(self) -> Decimal | None:
-        return _resolve_per_1k(self.upstream_prompt_usd_per_1k, self.upstream_prompt_usd_per_1m, "upstream_prompt")
+        return _resolve_per_1k(
+            self.upstream_prompt_usd_per_1k, self.upstream_prompt_usd_per_1m, "upstream_prompt"
+        )
 
     def resolved_upstream_completion(self) -> Decimal | None:
-        return _resolve_per_1k(self.upstream_completion_usd_per_1k, self.upstream_completion_usd_per_1m, "upstream_completion")
+        return _resolve_per_1k(
+            self.upstream_completion_usd_per_1k,
+            self.upstream_completion_usd_per_1m,
+            "upstream_completion",
+        )
 
 
 class ModelPriceUpdateIn(BaseModel):
@@ -947,12 +983,14 @@ class ModelPriceUpdateIn(BaseModel):
             ("prompt", self.prompt_usd_per_1k, self.prompt_usd_per_1m),
             ("completion", self.completion_usd_per_1k, self.completion_usd_per_1m),
             ("upstream_prompt", self.upstream_prompt_usd_per_1k, self.upstream_prompt_usd_per_1m),
-            ("upstream_completion", self.upstream_completion_usd_per_1k, self.upstream_completion_usd_per_1m),
+            (
+                "upstream_completion",
+                self.upstream_completion_usd_per_1k,
+                self.upstream_completion_usd_per_1m,
+            ),
         ]:
             if per_1k is not None and per_1m is not None:
-                raise ValueError(
-                    f"Provide '{field}' price in either per-1K or per-1M, not both"
-                )
+                raise ValueError(f"Provide '{field}' price in either per-1K or per-1M, not both")
         # Body-level is_free guard (full enforcement against existing DB row happens in handler).
         if self.is_free is True:
             for field, per_1k, per_1m in [
@@ -961,9 +999,7 @@ class ModelPriceUpdateIn(BaseModel):
             ]:
                 val = per_1k if per_1k is not None else per_1m
                 if val is not None and val != 0:
-                    raise ValueError(
-                        f"Cannot set non-zero '{field}' price when is_free=True"
-                    )
+                    raise ValueError(f"Cannot set non-zero '{field}' price when is_free=True")
         return self
 
     def resolved_prompt(self) -> Decimal | None:
@@ -973,10 +1009,16 @@ class ModelPriceUpdateIn(BaseModel):
         return _resolve_per_1k(self.completion_usd_per_1k, self.completion_usd_per_1m, "completion")
 
     def resolved_upstream_prompt(self) -> Decimal | None:
-        return _resolve_per_1k(self.upstream_prompt_usd_per_1k, self.upstream_prompt_usd_per_1m, "upstream_prompt")
+        return _resolve_per_1k(
+            self.upstream_prompt_usd_per_1k, self.upstream_prompt_usd_per_1m, "upstream_prompt"
+        )
 
     def resolved_upstream_completion(self) -> Decimal | None:
-        return _resolve_per_1k(self.upstream_completion_usd_per_1k, self.upstream_completion_usd_per_1m, "upstream_completion")
+        return _resolve_per_1k(
+            self.upstream_completion_usd_per_1k,
+            self.upstream_completion_usd_per_1m,
+            "upstream_completion",
+        )
 
 
 class ModelPriceOut(BaseModel):
@@ -1002,10 +1044,12 @@ class ModelPriceOut(BaseModel):
 def _to_price_out(p: ModelPrice | ModelPricing) -> ModelPriceOut:
     if isinstance(p, ModelPricing):
         unit = p.pricing_unit or "per_1k_tokens"
+
         def _norm(cost: Decimal | None) -> Decimal:
             if cost is None:
                 return Decimal("0")
             return Decimal(str(cost)) / 1000 if unit == "per_1m_tokens" else Decimal(str(cost))
+
         prompt = _norm(p.input_cost)
         completion = _norm(p.output_cost)
         return ModelPriceOut(
@@ -1040,8 +1084,12 @@ def _to_price_out(p: ModelPrice | ModelPricing) -> ModelPriceOut:
         supports_responses_api=p.supports_responses_api,
         supports_batching=p.supports_batching,
         is_free=p.is_free,
-        upstream_prompt_usd_per_1k=str(p.upstream_prompt_usd_per_1k) if p.upstream_prompt_usd_per_1k is not None else None,
-        upstream_completion_usd_per_1k=str(p.upstream_completion_usd_per_1k) if p.upstream_completion_usd_per_1k is not None else None,
+        upstream_prompt_usd_per_1k=str(p.upstream_prompt_usd_per_1k)
+        if p.upstream_prompt_usd_per_1k is not None
+        else None,
+        upstream_completion_usd_per_1k=str(p.upstream_completion_usd_per_1k)
+        if p.upstream_completion_usd_per_1k is not None
+        else None,
         upstream_prompt_usd_per_1m=_per_1m(p.upstream_prompt_usd_per_1k),
         upstream_completion_usd_per_1m=_per_1m(p.upstream_completion_usd_per_1k),
         updated_at=p.updated_at.isoformat(),
@@ -1057,6 +1105,7 @@ async def _invalidate_models_cache() -> None:
     changes are visible within seconds rather than waiting for the 5-min TTL.
     """
     from app.models.cache import invalidate_models_cache
+
     await invalidate_models_cache()
 
 
@@ -1077,7 +1126,7 @@ async def _clear_default(model_id: str, db: AsyncSession) -> None:
 @router.post("/model-prices", response_model=ModelPriceOut, status_code=201)
 async def create_model_price(
     body: ModelPriceIn,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     Create or replace pricing for a (model_id, provider) pair.
@@ -1137,6 +1186,7 @@ async def create_model_price(
 
     # ── Write to model_pricing (v2) ────────────────────────────────────────
     from datetime import date as _date
+
     existing_v2 = await db.execute(
         select(ModelPricing).where(
             ModelPricing.model_id == body.model_id,
@@ -1180,7 +1230,9 @@ async def create_model_price(
 
     # Optionally create a model-level discount (user_id=None = all users) in the same transaction.
     if body.discount_pct is not None:
-        from datetime import UTC, datetime as _dt
+        from datetime import UTC
+        from datetime import datetime as _dt
+
         if not (0 <= body.discount_pct <= 100):
             raise HTTPException(status_code=422, detail="discount_pct must be between 0 and 100")
         _now = _dt.now(UTC)
@@ -1197,7 +1249,9 @@ async def create_model_price(
             d_old.valid_until = _now
             d_old.ended_at = _now
             d_old.ended_reason = "replaced"
-            logger.info("discount_expired_before_replace", model_id=body.model_id, discount_id=str(d_old.id))
+            logger.info(
+                "discount_expired_before_replace", model_id=body.model_id, discount_id=str(d_old.id)
+            )
         discount = Discount(
             user_id=None,
             model_id=body.model_id,
@@ -1223,7 +1277,7 @@ async def create_model_price(
 
 @router.get("/model-prices", response_model=list[ModelPriceOut])
 async def list_model_prices(
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """List all model prices (all providers per model)."""
     if settings.pricing_v2:
@@ -1239,13 +1293,12 @@ async def list_model_prices(
     return [_to_price_out(p) for p in result.scalars().all()]
 
 
-
 @router.patch("/model-prices/{model_id:path}/{provider}", response_model=ModelPriceOut)
 async def update_model_price(
     model_id: str,
     provider: str,
     body: ModelPriceUpdateIn,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     Update pricing fields for an existing (model_id, provider) row.
@@ -1345,7 +1398,7 @@ async def update_model_price(
 async def delete_model_price(
     model_id: str,
     provider: str,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Remove a (model_id, provider) row from both price tables.
 
@@ -1386,11 +1439,13 @@ async def delete_model_price(
 
 # ── Admin: model registry ─────────────────────────────────────────────────────
 
+
 class Modality(str, Enum):
     TEXT = "text"
     IMAGE = "image"
     AUDIO = "audio"
     VIDEO = "video"
+
 
 class ModelIn(BaseModel):
     model_id: str
@@ -1455,7 +1510,7 @@ def _to_model_out(
 @router.post("/models", response_model=ModelRegistryOut, status_code=201)
 async def create_model(
     body: ModelIn,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     Register a model in the discovery whitelist.
@@ -1491,22 +1546,19 @@ async def create_model(
 async def list_models_admin(
     is_enabled: bool | None = Query(
         default=None,
-        description="Filter by enabled status: true = enabled only, false = disabled only, omit = all",
+        description="Filter by enabled status: true = enabled only, false = disabled only, omit = all",  # noqa: E501
     ),
     type: Literal["text", "embedding", "image", "audio", "video"] | None = Query(
         default=None,
         description="Filter by model_type: text, embedding, image, audio, video",
     ),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
-    """List all models (including disabled) with their pricing rows. For the public listing use GET /v1/models."""
+    """List all models (including disabled) with their pricing rows. For the public listing use GET /v1/models."""  # noqa: E501
     if settings.pricing_v2:
-        query = (
-            select(Model, ModelPricing)
-            .outerjoin(
-                ModelPricing,
-                (ModelPricing.model_id == Model.model_id) & ModelPricing.is_active.is_(True),
-            )
+        query = select(Model, ModelPricing).outerjoin(
+            ModelPricing,
+            (ModelPricing.model_id == Model.model_id) & ModelPricing.is_active.is_(True),
         )
         if is_enabled is not None:
             query = query.where(Model.is_enabled.is_(is_enabled))
@@ -1514,9 +1566,8 @@ async def list_models_admin(
             query = query.where(Model.model_type == type)
         result = await db.execute(query.order_by(Model.model_id, ModelPricing.provider))
     else:
-        query = (
-            select(Model, ModelPrice)
-            .outerjoin(ModelPrice, ModelPrice.model_id == Model.model_id)
+        query = select(Model, ModelPrice).outerjoin(
+            ModelPrice, ModelPrice.model_id == Model.model_id
         )
         if is_enabled is not None:
             query = query.where(Model.is_enabled.is_(is_enabled))
@@ -1531,7 +1582,7 @@ async def list_models_admin(
         if mp is not None:
             models_map[m.model_id][1].append(mp)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     active_filter = [
         Discount.ended_at.is_(None),
         Discount.valid_from <= now,
@@ -1548,8 +1599,9 @@ async def list_models_admin(
 
     # Max account-level discount (no model_id) — applies to every model
     account_row = await db.execute(
-        select(func.max(Discount.discount_pct).label("max_pct"))
-        .where(Discount.model_id.is_(None), *active_filter)
+        select(func.max(Discount.discount_pct).label("max_pct")).where(
+            Discount.model_id.is_(None), *active_filter
+        )
     )
     global_max: Decimal | None = account_row.scalar_one_or_none()
 
@@ -1567,7 +1619,7 @@ async def list_models_admin(
 async def update_model(
     model_id: str,
     body: ModelUpdateIn,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     Update model metadata or toggle visibility.
@@ -1605,7 +1657,7 @@ async def update_model(
 @router.delete("/models/{model_id:path}", status_code=204)
 async def delete_model(
     model_id: str,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     Hard-delete a model from the registry.
@@ -1628,14 +1680,14 @@ async def delete_model(
 class DiscountEndedReason(str, Enum):
     DISABLED = "disabled"  # Admin manually deactivated via "Expire Now"
     REPLACED = "replaced"  # Admin expired to create a replacement discount
-    EXPIRED = "expired"    # Discount reached its valid_until timestamp
+    EXPIRED = "expired"  # Discount reached its valid_until timestamp
 
 
 class DiscountIn(BaseModel):
-    user_id: str | None = None           # None = applies to all users for the given model
-    model_id: str | None = None          # None = account-level (all models for this user)
-    discount_pct: float                  # 0–100
-    valid_from: datetime | None = None   # ISO8601 with timezone; defaults to now() if omitted
+    user_id: str | None = None  # None = applies to all users for the given model
+    model_id: str | None = None  # None = account-level (all models for this user)
+    discount_pct: float  # 0–100
+    valid_from: datetime | None = None  # ISO8601 with timezone; defaults to now() if omitted
     valid_until: datetime | None = None  # ISO8601 with timezone; None = no expiry
     label: str | None = None
 
@@ -1649,7 +1701,7 @@ class DiscountIn(BaseModel):
 
 class DiscountUpdateIn(BaseModel):
     discount_pct: float | None = None
-    valid_from: datetime | None = None   # ISO8601 with timezone; only editable for future discounts
+    valid_from: datetime | None = None  # ISO8601 with timezone; only editable for future discounts
     valid_until: datetime | None = None  # ISO8601 with timezone
     ended_reason: DiscountEndedReason | None = None
     label: str | None = None
@@ -1695,7 +1747,7 @@ def _to_discount_out(d: Discount, *, email: str | None = None) -> DiscountOut:
 @router.post("/discounts", response_model=DiscountOut, status_code=201)
 async def create_discount(
     body: DiscountIn,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Create a discount. model_id=null = all models; user_id=null = all users.
     Returns 409 if an active (non-expired) discount already exists for the same scope key."""
@@ -1720,7 +1772,7 @@ async def create_discount(
         raise HTTPException(
             status_code=409,
             detail={
-                "message": "Active discount already exists for this scope. Expire the existing discount first.",
+                "message": "Active discount already exists for this scope. Expire the existing discount first.",  # noqa: E501
                 "conflicts": [_to_discount_out(c).model_dump() for c in conflicts],
             },
         )
@@ -1737,7 +1789,9 @@ async def create_discount(
     await db.flush()
     await db.refresh(d)
     bind_contextvars(user_id=body.user_id, model_id=body.model_id)
-    logger.info("discount_created", user_id=body.user_id, model_id=body.model_id, pct=body.discount_pct)
+    logger.info(
+        "discount_created", user_id=body.user_id, model_id=body.model_id, pct=body.discount_pct
+    )
     return _to_discount_out(d)
 
 
@@ -1745,7 +1799,7 @@ async def create_discount(
 async def list_discounts(
     user_id: str | None = None,
     model_id: str | None = None,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """List discounts. Filter by ?user_id= or ?model_id=."""
     q = select(Discount).order_by(Discount.created_at.desc())
@@ -1767,7 +1821,7 @@ async def list_discounts(
 async def update_discount(
     discount_id: str,
     body: DiscountUpdateIn,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Update discount percentage, expiry, or label.
     Setting valid_until to now-or-past retires the discount and stamps ended_at/ended_reason."""
@@ -1831,10 +1885,11 @@ async def update_discount(
 @router.delete("/discounts/{discount_id}", status_code=204)
 async def delete_discount(
     discount_id: str,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Hard delete a discount."""
     import uuid as _uuid
+
     result = await db.execute(select(Discount).where(Discount.id == _uuid.UUID(discount_id)))
     d = result.scalar_one_or_none()
     if d is None:
@@ -1844,6 +1899,7 @@ async def delete_discount(
 
 
 # ── Balance monitoring ────────────────────────────────────────────────────────
+
 
 class BalanceSummary(BaseModel):
     user_id: str
@@ -1859,30 +1915,34 @@ class BalanceDetail(BaseModel):
     balance_usd: str
     updated_at: str
     total_spent_usd: str
-    by_model: list[dict]   # [{model, requests, cost_usd}]
+    by_model: list[dict]  # [{model, requests, cost_usd}]
 
 
 @router.get("/balances", response_model=list[BalanceSummary])
-async def list_balances(db: AsyncSession = Depends(get_db_session)):
+async def list_balances(db: AsyncSession = Depends(get_db_session)):  # noqa: B008
     """
     List all user balances with total spend and last activity.
     Sorted by balance ascending (lowest first — easy to spot who needs top-up).
     """
-    from sqlalchemy import cast, Float, literal_column, text as sa_text
+    from sqlalchemy import text as sa_text
 
-    rows = await db.execute(sa_text("""
+    rows = await db.execute(
+        sa_text("""
         SELECT
             ub.user_id,
             u.email,
             ub.balance_usd,
             ub.updated_at,
-            GREATEST((COALESCE(SUM(pe.amount_usd), 0) / 100.0) - ub.balance_usd, 0) AS total_spent_usd
+            GREATEST(
+                (COALESCE(SUM(pe.amount_usd), 0) / 100.0) - ub.balance_usd, 0
+            ) AS total_spent_usd
         FROM user_balances ub
         LEFT JOIN users u ON u.id = ub.user_id
         LEFT JOIN payment_events pe ON pe.user_id = ub.user_id
         GROUP BY ub.user_id, u.email, ub.balance_usd, ub.updated_at
         ORDER BY ub.balance_usd ASC
-    """))
+    """)
+    )
 
     return [
         BalanceSummary(
@@ -1898,20 +1958,19 @@ async def list_balances(db: AsyncSession = Depends(get_db_session)):
 
 
 @router.get("/balances/{user_id}", response_model=BalanceDetail)
-async def get_balance(user_id: str, db: AsyncSession = Depends(get_db_session)):
+async def get_balance(user_id: str, db: AsyncSession = Depends(get_db_session)):  # noqa: B008
     """
     Detailed balance for a specific user: current balance + spend broken down by model.
     """
     from sqlalchemy import text as sa_text
 
-    balance_row = await db.execute(
-        select(UserBalance).where(UserBalance.user_id == user_id)
-    )
+    balance_row = await db.execute(select(UserBalance).where(UserBalance.user_id == user_id))
     balance = balance_row.scalar_one_or_none()
     if balance is None:
         raise NotFoundError(f"No balance record found for user '{user_id}'.")
 
-    by_model_rows = await db.execute(sa_text("""
+    by_model_rows = await db.execute(
+        sa_text("""
         SELECT
             ue.model,
             COUNT(*)                        AS requests,
@@ -1921,12 +1980,15 @@ async def get_balance(user_id: str, db: AsyncSession = Depends(get_db_session)):
         WHERE ak.owner = :user_id AND ue.status = 'success'
         GROUP BY ue.model
         ORDER BY cost_usd DESC
-    """), {"user_id": user_id})
+    """),
+        {"user_id": user_id},
+    )
 
     total_spent = sum(r.cost_usd for r in by_model_rows)
 
     # Re-run (rows consumed above)
-    by_model_rows2 = await db.execute(sa_text("""
+    by_model_rows2 = await db.execute(
+        sa_text("""
         SELECT
             ue.model,
             COUNT(*)                        AS requests,
@@ -1936,7 +1998,9 @@ async def get_balance(user_id: str, db: AsyncSession = Depends(get_db_session)):
         WHERE ak.owner = :user_id AND ue.status = 'success'
         GROUP BY ue.model
         ORDER BY cost_usd DESC
-    """), {"user_id": user_id})
+    """),
+        {"user_id": user_id},
+    )
 
     return BalanceDetail(
         user_id=user_id,
@@ -2009,11 +2073,9 @@ def _global_template_to_summary(t: Template) -> GlobalTemplateSummary:
 async def _get_global_or_404(db: AsyncSession, template_id: str) -> Template:
     try:
         uid = uuid.UUID(template_id)
-    except ValueError:
-        raise NotFoundError(f"Template '{template_id}' not found.")
-    result = await db.execute(
-        select(Template).where(Template.id == uid, Template.owner.is_(None))
-    )
+    except ValueError as exc:
+        raise NotFoundError(f"Template '{template_id}' not found.") from exc
+    result = await db.execute(select(Template).where(Template.id == uid, Template.owner.is_(None)))
     t = result.scalar_one_or_none()
     if t is None:
         raise NotFoundError(f"Template '{template_id}' not found.")
@@ -2023,7 +2085,7 @@ async def _get_global_or_404(db: AsyncSession, template_id: str) -> Template:
 @router.post("/templates", response_model=GlobalTemplateSummary, status_code=201)
 async def create_global_template(
     body: GlobalTemplateRequest,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Create a global template (owner=NULL) usable by all API keys."""
     from sqlalchemy.exc import IntegrityError
@@ -2042,12 +2104,12 @@ async def create_global_template(
     try:
         await db.flush()
         await db.refresh(template)
-    except IntegrityError:
+    except IntegrityError as exc:
         await db.rollback()
         raise HTTPException(
             status_code=409,
             detail=f"A global template named '{body.name}' already exists.",
-        )
+        ) from exc
 
     logger.info("global_template_created", template_id=str(template.id), name=template.name)
     return _global_template_to_summary(template)
@@ -2055,13 +2117,11 @@ async def create_global_template(
 
 @router.get("/templates", response_model=list[GlobalTemplateSummary])
 async def list_global_templates(
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """List all global templates."""
     result = await db.execute(
-        select(Template)
-        .where(Template.owner.is_(None))
-        .order_by(Template.created_at.desc())
+        select(Template).where(Template.owner.is_(None)).order_by(Template.created_at.desc())
     )
     return [_global_template_to_summary(t) for t in result.scalars().all()]
 
@@ -2070,7 +2130,7 @@ async def list_global_templates(
 async def update_global_template(
     template_id: str,
     body: GlobalTemplateUpdateRequest,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Update a global template."""
     from sqlalchemy.exc import IntegrityError
@@ -2095,12 +2155,12 @@ async def update_global_template(
     try:
         await db.flush()
         await db.refresh(template)
-    except IntegrityError:
+    except IntegrityError as exc:
         await db.rollback()
         raise HTTPException(
             status_code=409,
             detail=f"A global template named '{body.name}' already exists.",
-        )
+        ) from exc
 
     logger.info("global_template_updated", template_id=str(template.id), name=template.name)
     return _global_template_to_summary(template)
@@ -2109,13 +2169,16 @@ async def update_global_template(
 @router.delete("/templates/{template_id}", status_code=204)
 async def delete_global_template(
     template_id: str,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Hard delete a global template."""
     template = await _get_global_or_404(db, template_id)
     await db.delete(template)
     logger.info("global_template_deleted", template_id=str(template.id), name=template.name)
+
+
 # ── User detail analytics ─────────────────────────────────────────────────────
+
 
 class UserDetailSummary(BaseModel):
     user_id: str
@@ -2132,13 +2195,13 @@ class UserDetailSummary(BaseModel):
 
 
 class UsageTimeSeries(BaseModel):
-    bucket: str   # ISO 8601 datetime string
+    bucket: str  # ISO 8601 datetime string
     requests: int
     cost_usd: str
 
 
 def _range_since(range_: str) -> datetime:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if range_ == "24h":
         return now - timedelta(hours=24)
     if range_ == "7d":
@@ -2149,7 +2212,7 @@ def _range_since(range_: str) -> datetime:
 @router.get("/users/{user_id}/summary", response_model=UserDetailSummary)
 async def get_user_summary(
     user_id: str,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Per-user summary card data. Cached for 5 minutes."""
     redis = get_redis()
@@ -2170,9 +2233,7 @@ async def get_user_summary(
     )
     keys_row = keys_result.one()
 
-    key_ids_result = await db.execute(
-        select(ApiKey.id).where(ApiKey.owner == user_id)
-    )
+    key_ids_result = await db.execute(select(ApiKey.id).where(ApiKey.owner == user_id))
     key_ids = [r[0] for r in key_ids_result.all()]
 
     if key_ids:
@@ -2184,7 +2245,9 @@ async def get_user_summary(
         )
         activity_row = activity_result.one()
         api_calls = activity_row.api_calls or 0
-        last_activity = activity_row.last_activity.isoformat() if activity_row.last_activity else None
+        last_activity = (
+            activity_row.last_activity.isoformat() if activity_row.last_activity else None
+        )
     else:
         api_calls = 0
         last_activity = None
@@ -2195,22 +2258,22 @@ async def get_user_summary(
     bal = bal_result.scalar_one_or_none()
 
     recharge_result = await db.execute(
-        select(func.coalesce(func.sum(PaymentEvent.amount_usd), 0))
-        .where(PaymentEvent.user_id == user_id)
+        select(func.coalesce(func.sum(PaymentEvent.amount_usd), 0)).where(
+            PaymentEvent.user_id == user_id
+        )
     )
     total_recharged = Decimal(recharge_result.scalar_one() or 0) / 100
     balance = bal if bal is not None else Decimal(0)
     total_spent = max(total_recharged - balance, Decimal(0))
 
-    user_result = await db.execute(
-        select(User.email, User.display_name).where(User.id == user_id)
-    )
+    user_result = await db.execute(select(User.email, User.display_name).where(User.id == user_id))
     user_rec = user_result.one_or_none()
 
     # Total paid by this user, using accurate per-payment USD conversion
     paid_result = await db.execute(
-        select(func.coalesce(func.sum(_usd_amount_expr()), 0).label("total_paid"))
-        .where(PaymentEvent.user_id == user_id)
+        select(func.coalesce(func.sum(usd_amount_expr()), 0).label("total_paid")).where(
+            PaymentEvent.user_id == user_id
+        )
     )
     total_paid_raw = paid_result.scalar_one()
     total_paid_usd = str(Decimal(str(total_paid_raw)).quantize(Decimal("0.0001")))
@@ -2226,7 +2289,9 @@ async def get_user_summary(
         total_paid_usd=total_paid_usd,
         balance_usd=str(bal) if bal is not None else None,
         last_activity=last_activity,
-        created_at=keys_row.created_at.isoformat() if keys_row.created_at else datetime.now(timezone.utc).isoformat(),
+        created_at=keys_row.created_at.isoformat()
+        if keys_row.created_at
+        else datetime.now(UTC).isoformat(),
     )
 
     if redis is not None:
@@ -2239,7 +2304,7 @@ async def get_user_summary(
 async def get_user_usage_timeseries(
     user_id: str,
     range: str = "7d",
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     Requests + cost grouped by hour (24h) or day (7d/30d) for a single user.
@@ -2256,9 +2321,7 @@ async def get_user_usage_timeseries(
     since = _range_since(range)
     group_by = "hour" if range == "24h" else "day"
 
-    key_ids_result = await db.execute(
-        select(ApiKey.id).where(ApiKey.owner == user_id)
-    )
+    key_ids_result = await db.execute(select(ApiKey.id).where(ApiKey.owner == user_id))
     key_ids = [r[0] for r in key_ids_result.all()]
 
     if not key_ids:
@@ -2295,7 +2358,7 @@ async def get_user_usage_timeseries(
 @router.get("/users/{user_id}/models", response_model=list[ModelUsageRow])
 async def get_user_model_breakdown(
     user_id: str,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Model usage breakdown for a single user. Cached for 5 minutes."""
     redis = get_redis()
@@ -2306,9 +2369,7 @@ async def get_user_model_breakdown(
         if cached is not None:
             return [ModelUsageRow(**r) for r in json.loads(cached)]
 
-    key_ids_result = await db.execute(
-        select(ApiKey.id).where(ApiKey.owner == user_id)
-    )
+    key_ids_result = await db.execute(select(ApiKey.id).where(ApiKey.owner == user_id))
     key_ids = [r[0] for r in key_ids_result.all()]
 
     if not key_ids:
@@ -2353,12 +2414,10 @@ async def get_user_events(
     until: str | None = None,
     model: str | None = None,
     status: str | None = None,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Paginated usage event log for a single user (admin-scoped)."""
-    key_ids_result = await db.execute(
-        select(ApiKey.id, ApiKey.meta).where(ApiKey.owner == user_id)
-    )
+    key_ids_result = await db.execute(select(ApiKey.id, ApiKey.meta).where(ApiKey.owner == user_id))
     key_rows = key_ids_result.all()
     key_map = {row[0]: (row[1] or {}).get("label") for row in key_rows}
     key_ids = list(key_map)
@@ -2386,9 +2445,11 @@ async def get_user_events(
         count_base = count_base.where(UsageEvent.status == status)
 
     total = (await db.execute(count_base)).scalar_one()
-    events = (await db.execute(
-        base.order_by(UsageEvent.created_at.desc()).offset(offset).limit(limit)
-    )).scalars().all()
+    events = (
+        (await db.execute(base.order_by(UsageEvent.created_at.desc()).offset(offset).limit(limit)))
+        .scalars()
+        .all()
+    )
 
     return UsageEventsPage(
         events=[
@@ -2421,10 +2482,11 @@ async def get_user_events(
 
 # ── System-wide usage time-series ─────────────────────────────────────────────
 
+
 @router.get("/usage/timeseries", response_model=list[UsageTimeSeries])
 async def get_usage_timeseries(
     range: str = "7d",
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     System-wide requests + cost grouped by hour (24h) or day (7d/30d).
@@ -2469,33 +2531,8 @@ async def get_usage_timeseries(
 
 
 # ── Payment analytics ─────────────────────────────────────────────────────────
-
-def _usd_amount_expr():
-    """
-    Returns a SQLAlchemy expression for the USD value of a payment_events row.
-
-    Priority:
-      1. amount_usd column (pre-computed in cents at webhook ingestion time) — most
-         accurate because it captures the exact rate used at payment time.
-      2. Fallback for older rows where amount_usd IS NULL: divide the raw amount by
-         the FX rate that was in effect at or before the payment's created_at.
-         Uses a time-bounded correlated subquery with the composite index
-         ix_currency_conversion_rates_currency_created.
-    """
-    from sqlalchemy import case as sa_case
-
-    time_bounded_rate_sq = (
-        select(CurrencyConversionRate.total_rate)
-        .where(CurrencyConversionRate.currency == PaymentEvent.currency)
-        .where(CurrencyConversionRate.created_at <= PaymentEvent.created_at)
-        .order_by(CurrencyConversionRate.created_at.desc())
-        .limit(1)
-        .scalar_subquery()
-    )
-    return sa_case(
-        (PaymentEvent.amount_usd.isnot(None), PaymentEvent.amount_usd / 100.0),
-        else_=func.coalesce(PaymentEvent.amount, 0) / 100.0 / func.coalesce(time_bounded_rate_sq, 1.0),
-    )
+# usd_amount_expr() and discount_usd_expr() are imported from
+# app.analytics.payment_exprs at the top of this file.
 
 
 class PaymentSummary(BaseModel):
@@ -2504,6 +2541,9 @@ class PaymentSummary(BaseModel):
     month_revenue: str
     total_transactions: int = 0
     avg_transaction_usd: str | None = None
+    total_coupon_discounts: str = "0.0000"
+    today_coupon_discounts: str = "0.0000"
+    month_coupon_discounts: str = "0.0000"
 
 
 class PaymentTransactionOut(BaseModel):
@@ -2516,7 +2556,7 @@ class PaymentTransactionOut(BaseModel):
     currency: str | None
     amount_raw: int | None
     amount_display: str | None
-    amount_usd_display: str | None   # pre-computed USD at payment time; None for older records
+    amount_usd_display: str | None  # pre-computed USD at payment time; None for older records
     coupon_code: str | None = None
     discount_amount_raw: int | None = None
     discount_amount_display: str | None = None
@@ -2531,49 +2571,62 @@ class PaymentTransactionsPage(BaseModel):
 
 
 class RevenueTimeSeries(BaseModel):
-    date: str        # ISO 8601 date string
-    amount: str      # USD, e.g. "12.50"
+    date: str  # ISO 8601 date string
+    amount: str  # USD, e.g. "12.50"
     currency: str
 
 
 class CountryBreakdown(BaseModel):
-    country: str     # ISO 3166-1 alpha-2 or "Unknown"
+    country: str  # ISO 3166-1 alpha-2 or "Unknown"
     count: int
-    amount: str      # USD
+    amount: str  # USD
 
 
 @router.get("/payments/summary", response_model=PaymentSummary)
 async def get_payment_summary(
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Total, today, and this-month revenue from payment_events. Cached for 5 minutes."""
     redis = get_redis()
-    cache_key = "routerv:analytics:payment_summary"
+    cache_key = "routerv:analytics:payment_summary_v2"
 
     if redis is not None:
         cached = await get_analytics_cached(redis, cache_key)
         if cached is not None:
             return PaymentSummary(**json.loads(cached))
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    usd_amount = _usd_amount_expr()
+    usd_amount = usd_amount_expr()
+    discount_usd = discount_usd_expr()
+    coupon_filter = PaymentEvent.coupon_code.isnot(None)
 
-    total_result = await db.execute(
-        select(func.coalesce(func.sum(usd_amount), 0).label("total"))
-    )
+    total_result = await db.execute(select(func.coalesce(func.sum(usd_amount), 0).label("total")))
     today_result = await db.execute(
-        select(func.coalesce(func.sum(usd_amount), 0).label("total"))
-        .where(PaymentEvent.created_at >= today_start)
+        select(func.coalesce(func.sum(usd_amount), 0).label("total")).where(
+            PaymentEvent.created_at >= today_start
+        )
     )
     month_result = await db.execute(
-        select(func.coalesce(func.sum(usd_amount), 0).label("total"))
-        .where(PaymentEvent.created_at >= month_start)
+        select(func.coalesce(func.sum(usd_amount), 0).label("total")).where(
+            PaymentEvent.created_at >= month_start
+        )
     )
-    count_result = await db.execute(
-        select(func.count(PaymentEvent.id).label("total"))
+    count_result = await db.execute(select(func.count(PaymentEvent.id).label("total")))
+    total_disc_result = await db.execute(
+        select(func.coalesce(func.sum(discount_usd), 0)).where(coupon_filter)
+    )
+    today_disc_result = await db.execute(
+        select(func.coalesce(func.sum(discount_usd), 0)).where(
+            coupon_filter, PaymentEvent.created_at >= today_start
+        )
+    )
+    month_disc_result = await db.execute(
+        select(func.coalesce(func.sum(discount_usd), 0)).where(
+            coupon_filter, PaymentEvent.created_at >= month_start
+        )
     )
 
     def _to_usd_str(raw: Decimal | float) -> str:
@@ -2591,6 +2644,9 @@ async def get_payment_summary(
         month_revenue=_to_usd_str(month_result.scalar_one()),
         total_transactions=total_transactions,
         avg_transaction_usd=avg_transaction_usd,
+        total_coupon_discounts=_to_usd_str(total_disc_result.scalar_one()),
+        today_coupon_discounts=_to_usd_str(today_disc_result.scalar_one()),
+        month_coupon_discounts=_to_usd_str(month_disc_result.scalar_one()),
     )
 
     if redis is not None:
@@ -2602,7 +2658,7 @@ async def get_payment_summary(
 @router.get("/payments/revenue", response_model=list[RevenueTimeSeries])
 async def get_payment_revenue(
     range: str = "30d",
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Daily revenue in USD (all currencies converted). Cached for 5 minutes."""
     redis = get_redis()
@@ -2613,7 +2669,7 @@ async def get_payment_revenue(
         if cached is not None:
             return [RevenueTimeSeries(**r) for r in json.loads(cached)]
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if range == "7d":
         since = now - timedelta(days=7)
     elif range == "90d":
@@ -2621,7 +2677,7 @@ async def get_payment_revenue(
     else:
         since = now - timedelta(days=30)
 
-    usd_amount = _usd_amount_expr()
+    usd_amount = usd_amount_expr()
 
     day_unit = text("'day'")
     rows = await db.execute(
@@ -2651,7 +2707,7 @@ async def get_payment_revenue(
 
 @router.get("/payments/countries", response_model=list[CountryBreakdown])
 async def get_payment_countries(
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     Revenue grouped by the country column on payment_events.
@@ -2666,7 +2722,7 @@ async def get_payment_countries(
             return [CountryBreakdown(**r) for r in json.loads(cached)]
 
     country_expr = func.coalesce(PaymentEvent.country, "Unknown")
-    usd_amount = _usd_amount_expr()
+    usd_amount = usd_amount_expr()
 
     rows = await db.execute(
         select(
@@ -2696,7 +2752,7 @@ async def get_payment_countries(
 @router.get("/payments/top-users", response_model=list[OwnerUsageRow])
 async def get_payment_top_users(
     limit: int = 10,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Top users by total payment amount. Cached for 5 minutes."""
     redis = get_redis()
@@ -2707,7 +2763,7 @@ async def get_payment_top_users(
         if cached is not None:
             return [OwnerUsageRow(**r) for r in json.loads(cached)]
 
-    usd_amount = _usd_amount_expr()
+    usd_amount = usd_amount_expr()
 
     rows = await db.execute(
         select(
@@ -2760,7 +2816,7 @@ class CurrencyBreakdown(BaseModel):
 
 @router.get("/payments/by-provider", response_model=list[ProviderBreakdown])
 async def get_payment_by_provider(
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Revenue grouped by payment provider/gateway. Cached for 5 minutes."""
     redis = get_redis()
@@ -2771,7 +2827,7 @@ async def get_payment_by_provider(
         if cached is not None:
             return [ProviderBreakdown(**r) for r in json.loads(cached)]
 
-    usd_amount = _usd_amount_expr()
+    usd_amount = usd_amount_expr()
     rows = await db.execute(
         select(
             PaymentEvent.provider.label("provider"),
@@ -2802,7 +2858,7 @@ async def get_payment_by_provider(
 
 @router.get("/payments/by-currency", response_model=list[CurrencyBreakdown])
 async def get_payment_by_currency(
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Transaction count and USD total grouped by original currency. Cached for 5 minutes."""
     redis = get_redis()
@@ -2813,7 +2869,7 @@ async def get_payment_by_currency(
         if cached is not None:
             return [CurrencyBreakdown(**r) for r in json.loads(cached)]
 
-    usd_amount = _usd_amount_expr()
+    usd_amount = usd_amount_expr()
     currency_expr = func.coalesce(PaymentEvent.currency, "Unknown")
     rows = await db.execute(
         select(
@@ -2876,10 +2932,14 @@ async def _load_coupon_code_map(
             func.lower(CheckoutCoupon.code).in_([code.lower() for code in coupon_codes])
         )
     )
-    return {str(code).strip().upper(): str(code).strip().upper() for (code,) in result.all() if code}
+    return {
+        str(code).strip().upper(): str(code).strip().upper() for (code,) in result.all() if code
+    }
 
 
-def _payment_to_out(e: PaymentEvent, coupon_code_map: dict[str, str] | None = None, email: str | None = None) -> PaymentTransactionOut:
+def _payment_to_out(
+    e: PaymentEvent, coupon_code_map: dict[str, str] | None = None, email: str | None = None
+) -> PaymentTransactionOut:
     normalized_coupon_code = str(e.coupon_code).strip().upper() if e.coupon_code else None
     discount_amount_raw = _extract_discount_amount_raw(e)
     return PaymentTransactionOut(
@@ -2905,7 +2965,7 @@ async def get_user_payments(
     user_id: str,
     limit: int = 50,
     offset: int = 0,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Paginated payment transactions for a single user, newest first."""
     total_result = await db.execute(
@@ -2940,7 +3000,7 @@ async def get_payment_transactions(
     coupon_code: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """Paginated list of all payment transactions across all users, newest first."""
     base_q = select(PaymentEvent)
@@ -2961,8 +3021,14 @@ async def get_payment_transactions(
 
     total = (await db.execute(count_q)).scalar_one() or 0
     events = (
-        await db.execute(base_q.order_by(PaymentEvent.created_at.desc()).offset(offset).limit(limit))
-    ).scalars().all()
+        (
+            await db.execute(
+                base_q.order_by(PaymentEvent.created_at.desc()).offset(offset).limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
     coupon_code_map = await _load_coupon_code_map(
         db,
         {event.coupon_code for event in events if event.coupon_code},
@@ -2973,9 +3039,27 @@ async def get_payment_transactions(
         email_q = await db.execute(select(User.id, User.email).where(User.id.in_(user_ids)))
         email_by_user = {row.id: row.email for row in email_q.all()}
     return PaymentTransactionsPage(
-        transactions=[_payment_to_out(e, coupon_code_map, email=email_by_user.get(e.user_id)) for e in events],
+        transactions=[
+            _payment_to_out(e, coupon_code_map, email=email_by_user.get(e.user_id)) for e in events
+        ],
         total=total,
         limit=limit,
         offset=offset,
     )
 
+
+class UsedCouponCodesOut(BaseModel):
+    coupon_codes: list[str]
+
+
+@router.get("/payments/used-coupons", response_model=UsedCouponCodesOut)
+async def get_used_coupon_codes(
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
+):
+    """All distinct coupon codes that have been applied to at least one payment."""
+    result = await db.execute(
+        select(func.distinct(PaymentEvent.coupon_code))
+        .where(PaymentEvent.coupon_code.isnot(None))
+        .order_by(PaymentEvent.coupon_code)
+    )
+    return UsedCouponCodesOut(coupon_codes=list(result.scalars().all()))

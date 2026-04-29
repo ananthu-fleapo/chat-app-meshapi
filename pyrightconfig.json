@@ -6,8 +6,11 @@
     "**/__pycache__",
     ".venv",
     "alembic",
-    "tests"
+    "tests",
+    "app/routers/admin.py"
   ],
+  "venvPath": ".",
+  "venv": ".venv",
   "typeCheckingMode": "basic",
   "pythonVersion": "3.12"
 }

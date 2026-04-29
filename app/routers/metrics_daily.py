@@ -21,11 +21,12 @@ from zoneinfo import ZoneInfo
 import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import func, select, case
+from sqlalchemy import func, select
 
+from app.analytics.payment_exprs import fx_rate_subquery
 from app.auth.dependencies import verify_webhook_key
 from app.db.engine import get_session_factory
-from app.db.models import PaymentEvent, User, UsageEvent, CurrencyConversionRate, Model
+from app.db.models import Model, PaymentEvent, UsageEvent, User
 from app.notifications.slack import send_slack_alert
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -36,24 +37,28 @@ router = APIRouter(tags=["metrics"])
 
 # ── Response schema ───────────────────────────────────────────────────────────
 
+
 class DailySummaryMetrics(BaseModel):
     users_onboarded: int
+    unique_active_users: int
     requests_processed: int
     successful_requests: int
     failed_requests: int
     pending_requests: int
-    success_rate: str          # e.g., "98.5%"
+    success_rate: str  # e.g., "98.5%"
     failure_rate: str
     pending_rate: str
     revenue_usd: float
     payments_received_usd: float
+    coupon_discounts_usd: float
     error_code_counts: dict[str, int]  # error_code → count, sorted by count desc
     latency_by_model_type: dict[str, dict] = {}  # model_type → {p50, p95, count}
     timestamp: datetime
-    start_ist: datetime        # Start of the 10AM–10AM IST window
+    start_ist: datetime  # Start of the 10AM–10AM IST window
 
 
 # ── Internals ─────────────────────────────────────────────────────────────────
+
 
 async def _get_daily_metrics() -> DailySummaryMetrics:
     """Fetch all daily metrics from database.
@@ -76,11 +81,20 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
         # Query 1: Users onboarded today
         users_result = await session.execute(
             select(func.count(User.id)).where(
-                User.created_at >= today_start,
-                User.created_at < today_end
+                User.created_at >= today_start, User.created_at < today_end
             )
         )
         users_onboarded = users_result.scalar() or 0
+
+        # Query 1b: Unique users who made at least one request
+        unique_users_result = await session.execute(
+            select(func.count(func.distinct(UsageEvent.user_id))).where(
+                UsageEvent.created_at >= today_start,
+                UsageEvent.created_at < today_end,
+                UsageEvent.user_id.isnot(None),
+            )
+        )
+        unique_active_users = unique_users_result.scalar() or 0
 
         # Query 2: Requests and success/failure rates
         usage_result = await session.execute(
@@ -89,10 +103,7 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
                 func.count(UsageEvent.id).filter(UsageEvent.status == "success").label("success"),
                 func.count(UsageEvent.id).filter(UsageEvent.status == "error").label("failed"),
                 func.count(UsageEvent.id).filter(UsageEvent.status == "pending").label("pending"),
-            ).where(
-                UsageEvent.created_at >= today_start,
-                UsageEvent.created_at < today_end
-            )
+            ).where(UsageEvent.created_at >= today_start, UsageEvent.created_at < today_end)
         )
         usage_row = usage_result.one()
         requests_processed = usage_row.total or 0
@@ -131,42 +142,44 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
         # Query 4: Revenue (all requests)
         revenue_result = await session.execute(
             select(func.sum(UsageEvent.cost_usd)).where(
-                UsageEvent.created_at >= today_start,
-                UsageEvent.created_at < today_end
+                UsageEvent.created_at >= today_start, UsageEvent.created_at < today_end
             )
         )
         revenue_usd = float(revenue_result.scalar() or 0)
 
         # Query 5: Payments received
-        # Get latest INR rate for conversion
-        inr_rate_result = await session.execute(
-            select(CurrencyConversionRate.total_rate)
-            .where(CurrencyConversionRate.currency == "INR")
-            .order_by(CurrencyConversionRate.created_at.desc())
-            .limit(1)
+        # fx_rate_subquery() returns the FX rate in effect at each payment's
+        # created_at, matching the approach used across admin.py analytics.
+        # For currencies not in the table (e.g. already-USD rows) it returns
+        # NULL; coalesce(..., 1.0) below treats those as a 1:1 rate.
+        fx_rate_sq = fx_rate_subquery()
+
+        net_amount_usd = (
+            (PaymentEvent.amount - func.coalesce(PaymentEvent.discount_amount, 0))
+            / 100.0
+            / func.coalesce(fx_rate_sq, 1.0)
         )
-        inr_rate = float(inr_rate_result.scalar() or 83.0)
 
-        net_amount = PaymentEvent.amount - func.coalesce(PaymentEvent.discount_amount, 0)
-        amount_in_major = net_amount / 100
-
-        payments_query = select(
-            func.sum(
-                case(
-                    (
-                        PaymentEvent.currency == "INR",
-                        amount_in_major / inr_rate
-                    ),
-                    else_=amount_in_major
-                )
-            )
-        ).where(
+        payments_query = select(func.sum(net_amount_usd)).where(
             PaymentEvent.created_at >= today_start,
-            PaymentEvent.created_at < today_end
+            PaymentEvent.created_at < today_end,
         )
 
         payments_result = await session.execute(payments_query)
         payments_received_usd = float(payments_result.scalar() or 0)
+
+        # Query 5b: Coupon discount credits (sum of discount_amount for couponed transactions)
+        discount_amount_usd = (
+            func.coalesce(PaymentEvent.discount_amount, 0) / 100.0 / func.coalesce(fx_rate_sq, 1.0)
+        )
+
+        coupon_discounts_query = select(func.sum(discount_amount_usd)).where(
+            PaymentEvent.created_at >= today_start,
+            PaymentEvent.created_at < today_end,
+            PaymentEvent.coupon_code.isnot(None),
+            PaymentEvent.discount_amount > 0,
+        )
+        coupon_discounts_usd = float((await session.execute(coupon_discounts_query)).scalar() or 0)
 
         # Query 6: p50/p95 latency per model type (successful requests only)
         latency_result = await session.execute(
@@ -193,6 +206,7 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
 
     return DailySummaryMetrics(
         users_onboarded=users_onboarded,
+        unique_active_users=unique_active_users,
         requests_processed=requests_processed,
         successful_requests=successful_requests,
         failed_requests=failed_requests,
@@ -202,6 +216,7 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
         pending_rate=pending_rate,
         revenue_usd=revenue_usd,
         payments_received_usd=payments_received_usd,
+        coupon_discounts_usd=coupon_discounts_usd,
         error_code_counts=error_code_counts,
         latency_by_model_type=latency_by_model_type,
         timestamp=datetime.now(UTC),
@@ -210,6 +225,7 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
+
 
 @router.post("/v1/metrics/daily-summary", response_model=DailySummaryMetrics)
 async def run_daily_metrics(
@@ -235,18 +251,22 @@ async def run_daily_metrics(
     fields = [
         {"label": "Timestamp", "value": metrics.timestamp.isoformat()},
         {"label": "Users Onboarded", "value": str(metrics.users_onboarded)},
+        {"label": "Unique Active Users", "value": str(metrics.unique_active_users)},
         {"label": "Requests Processed", "value": str(metrics.requests_processed)},
         {"label": "Successful", "value": f"{metrics.successful_requests} ({metrics.success_rate})"},
         {"label": "Failed", "value": f"{metrics.failed_requests} ({metrics.failure_rate})"},
         {"label": "Pending", "value": f"{metrics.pending_requests} ({metrics.pending_rate})"},
         {"label": "Revenue (USD)", "value": f"${metrics.revenue_usd:.4f}"},
         {"label": "Payments Received (USD)", "value": f"${metrics.payments_received_usd:.4f}"},
+        {"label": "Coupon Credits Given (USD)", "value": f"${metrics.coupon_discounts_usd:.4f}"},
     ]
     for model_type, stats in sorted(metrics.latency_by_model_type.items()):
-        fields.append({
-            "label": f"Latency — {model_type.upper()}",
-            "value": f"p50: {stats['p50']}ms | p95: {stats['p95']}ms | n={stats['count']}",
-        })
+        fields.append(
+            {
+                "label": f"Latency — {model_type.upper()}",
+                "value": f"p50: {stats['p50']}ms | p95: {stats['p95']}ms | n={stats['count']}",
+            }
+        )
 
     # Optional message: low success rate warning + error code breakdown
     message_parts: list[str] = []
@@ -255,7 +275,9 @@ async def run_daily_metrics(
         try:
             success_pct = float(metrics.success_rate.rstrip("%"))
             if success_pct < 95:
-                message_parts.append(f"⚠️ Success rate is {metrics.success_rate} — lower than expected")
+                message_parts.append(
+                    f"⚠️ Success rate is {metrics.success_rate} — lower than expected"
+                )
         except (ValueError, AttributeError):
             pass
 

@@ -344,6 +344,9 @@ class TestPaymentSummary:
             make_execute_result(scalar=0.0),  # today revenue
             make_execute_result(scalar=0.0),  # month revenue
             make_execute_result(scalar=0),    # total transactions count
+            make_execute_result(scalar=0.0),  # total coupon discounts
+            make_execute_result(scalar=0.0),  # today coupon discounts
+            make_execute_result(scalar=0.0),  # month coupon discounts
         ]
         resp = client.get("/admin/payments/summary", headers=ADMIN_HEADERS)
         assert resp.status_code == 200
@@ -351,6 +354,9 @@ class TestPaymentSummary:
         assert float(data["total_revenue"]) == pytest.approx(0.0)
         assert float(data["today_revenue"]) == pytest.approx(0.0)
         assert float(data["month_revenue"]) == pytest.approx(0.0)
+        assert float(data["total_coupon_discounts"]) == pytest.approx(0.0)
+        assert float(data["today_coupon_discounts"]) == pytest.approx(0.0)
+        assert float(data["month_coupon_discounts"]) == pytest.approx(0.0)
 
     def test_payment_today_appears_in_all_buckets(self, client, mock_db):
         # The SQL expression returns amounts already converted to USD.
@@ -360,6 +366,9 @@ class TestPaymentSummary:
             make_execute_result(scalar=10.0),  # today revenue
             make_execute_result(scalar=10.0),  # month revenue
             make_execute_result(scalar=1),     # total transactions count
+            make_execute_result(scalar=2.0),   # total coupon discounts
+            make_execute_result(scalar=2.0),   # today coupon discounts
+            make_execute_result(scalar=2.0),   # month coupon discounts
         ]
         resp = client.get("/admin/payments/summary", headers=ADMIN_HEADERS)
         assert resp.status_code == 200
@@ -367,6 +376,9 @@ class TestPaymentSummary:
         assert float(data["total_revenue"]) == pytest.approx(10.0)
         assert float(data["today_revenue"]) == pytest.approx(10.0)
         assert float(data["month_revenue"]) == pytest.approx(10.0)
+        assert float(data["total_coupon_discounts"]) == pytest.approx(2.0)
+        assert float(data["today_coupon_discounts"]) == pytest.approx(2.0)
+        assert float(data["month_coupon_discounts"]) == pytest.approx(2.0)
 
 
 # ── /admin/payments/revenue ───────────────────────────────────────────────────
