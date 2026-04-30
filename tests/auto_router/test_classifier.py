@@ -163,7 +163,7 @@ class TestCallClassifier:
         from app.auto_router.classifier import call_classifier
 
         mock_adapter = MagicMock()
-        mock_adapter.chat_completion = AsyncMock()
+        mock_adapter.chat_completion = MagicMock(return_value=None)
         mock_db = AsyncMock()
 
         with _classifier_patches(mock_adapter):
@@ -178,8 +178,11 @@ class TestCallClassifier:
     async def test_adapter_exception_returns_none_and_classifier_error(self):
         from app.auto_router.classifier import call_classifier
 
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("upstream down")
+
         mock_adapter = MagicMock()
-        mock_adapter.chat_completion = AsyncMock(side_effect=RuntimeError("upstream down"))
+        mock_adapter.chat_completion = _raise
         mock_db = AsyncMock()
 
         with _classifier_patches(mock_adapter):

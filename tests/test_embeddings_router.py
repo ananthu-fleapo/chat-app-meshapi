@@ -34,7 +34,13 @@ def mock_db_session():
     session.add = MagicMock()
     session.flush = AsyncMock()
     session.commit = AsyncMock()
-    session.execute = AsyncMock()
+    # Return a proper MagicMock result so scalar_one_or_none() → None (not a coroutine).
+    # This ensures get_price_row() returns None and the capability check is skipped.
+    execute_result = MagicMock()
+    execute_result.scalar_one_or_none.return_value = None
+    execute_result.scalars.return_value.all.return_value = []
+    execute_result.all.return_value = []
+    session.execute = AsyncMock(return_value=execute_result)
     return session
 
 

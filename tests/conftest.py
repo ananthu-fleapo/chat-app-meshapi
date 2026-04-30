@@ -25,8 +25,7 @@ os.environ.setdefault("SUPABASE_JWT_SECRET", TEST_JWT_SECRET)
 os.environ.setdefault("SUPABASE_URL", "")  # prevent .env from injecting issuer check
 os.environ.setdefault("HEALTH_CHECK_SELF_URL", "http://localhost:8000")
 os.environ.setdefault("HEALTH_CHECK_API_KEY", "test-health-key")
-# Lock test suite to v1 pricing path; set PRICING_V2=true explicitly to test v2.
-os.environ.setdefault("PRICING_V2", "false")
+os.environ.setdefault("PRICING_V2", "true")
 
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock

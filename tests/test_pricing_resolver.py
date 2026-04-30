@@ -270,7 +270,7 @@ class TestGetPriceRow:
     async def test_returns_price_row_when_found(self):
         from app.pricing.resolver import get_price_row
 
-        orm = _make_v1_orm(model_id="openai/gpt-4o", provider="openrouter")
+        orm = _make_v2_orm(model_id="openai/gpt-4o", provider="openrouter")
         session = _make_db_session(scalar_value=orm)
 
         row = await get_price_row("openai/gpt-4o", "openrouter", session)
@@ -288,18 +288,18 @@ class TestGetPriceRow:
         assert row is None
 
     @pytest.mark.asyncio
-    async def test_v2_flag_dispatches_to_model_pricing(self):
+    async def test_v1_flag_dispatches_to_model_prices(self):
         from app.pricing.resolver import get_price_row
 
-        orm = _make_v2_orm(model_id="openai/gpt-4o", provider="openrouter")
+        orm = _make_v1_orm(model_id="openai/gpt-4o", provider="openrouter")
         session = _make_db_session(scalar_value=orm)
 
         with patch("app.pricing.resolver.settings") as mock_settings:
-            mock_settings.pricing_v2 = True
+            mock_settings.pricing_v2 = False
             row = await get_price_row("openai/gpt-4o", "openrouter", session)
 
         assert isinstance(row, PriceRow)
-        assert row.upstream_prompt_usd_per_1k is None  # v2 always None
+        assert row.prompt_usd_per_1k == Decimal("0.00250000")  # v1 field populated
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -312,7 +312,7 @@ class TestGetDefaultPriceRow:
     async def test_returns_is_default_row_on_first_query(self):
         from app.pricing.resolver import get_default_price_row
 
-        orm = _make_v1_orm(is_default=True)
+        orm = _make_v2_orm(is_default=True)
         session = _make_db_session(scalar_value=orm)
 
         row = await get_default_price_row("openai/gpt-4o", session)
@@ -329,7 +329,7 @@ class TestGetDefaultPriceRow:
         no_default_result = MagicMock()
         no_default_result.scalar_one_or_none.return_value = None
 
-        fallback_orm = _make_v1_orm(is_default=False)
+        fallback_orm = _make_v2_orm(is_default=False)
         fallback_result = MagicMock()
         fallback_result.scalar_one_or_none.return_value = fallback_orm
 

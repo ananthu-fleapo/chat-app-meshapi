@@ -69,22 +69,20 @@ def _make_model_price_row(
 
 class TestCalcUpstreamCost:
 
-    async def test_returns_calculated_cost_when_upstream_rates_configured(self):
-        """upstream_*_usd_per_1k set → cost = tokens × rates."""
+    async def test_returns_none_for_non_openrouter_providers(self):
+        """v2 model_pricing has no upstream rate columns → always None for calculated upstream cost."""
         from app.usage.logger import _calc_upstream_cost
 
         row = _make_model_price_row(upstream_prompt=0.003, upstream_completion=0.015)
         session = AsyncMock()
-        # v1 resolver path uses db.get() for exact (model, provider) lookup
-        session.get = AsyncMock(return_value=row)
         session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=row)))
         sf = _make_session_factory(session)
 
         with patch("app.usage.logger.get_session_factory", sf):
             cost = await _calc_upstream_cost("anthropic/claude-3-5-sonnet", "bedrock", 1000, 500)
 
-        # (0.003 * 1000/1000) + (0.015 * 500/1000) = 0.003 + 0.0075 = 0.0105
-        assert cost == Decimal("0.01050000")
+        # v2 pricing has no upstream rate columns; upstream cost is always None
+        assert cost is None
 
     async def test_returns_none_when_no_row_found(self):
         """Model not in model_prices → None."""
@@ -100,7 +98,7 @@ class TestCalcUpstreamCost:
         assert cost is None
 
     async def test_returns_none_when_upstream_rates_not_set(self):
-        """Row exists but upstream_prompt_usd_per_1k is None → None."""
+        """Row exists but v2 has no upstream rate columns → always None."""
         from app.usage.logger import _calc_upstream_cost
 
         row = _make_model_price_row(upstream_prompt=None, upstream_completion=None)
@@ -124,21 +122,19 @@ class TestCalcUpstreamCost:
 
         assert cost is None
 
-    async def test_embeddings_uses_prompt_rate_only_when_completion_rate_zero(self):
-        """Prompt-only usage still resolves upstream cost for embeddings."""
+    async def test_embeddings_upstream_cost_returns_none_in_v2(self):
+        """v2 model_pricing has no upstream rate columns → None even for embeddings."""
         from app.usage.logger import _calc_upstream_cost
 
         row = _make_model_price_row(upstream_prompt=0.00002, upstream_completion=0)
         session = AsyncMock()
-        # v1 resolver path uses db.get() for exact (model, provider) lookup
-        session.get = AsyncMock(return_value=row)
         session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=row)))
         sf = _make_session_factory(session)
 
         with patch("app.usage.logger.get_session_factory", sf):
             cost = await _calc_upstream_cost("openai/text-embedding-3-small", "openrouter", 500, 0)
 
-        assert cost == Decimal("0.00001000")
+        assert cost is None
 
 
 class TestOurCost:

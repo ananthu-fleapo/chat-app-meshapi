@@ -231,7 +231,7 @@ class Settings(BaseSettings):
     # models listing all read from model_pricing instead of model_prices.
     # Admin endpoints still manage model_prices; flip this flag only after
     # model_pricing has been populated with equivalent data.
-    pricing_v2: bool = False
+    pricing_v2: bool = True
 
     # ── Prometheus ────────────────────────────────────────────────────────────
     # Internal URL of the Prometheus instance for status page metric queries.
