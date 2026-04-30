@@ -447,7 +447,15 @@ async def chat_completions(
     _price_row = await get_price_row(body.model, provider, db)
 
     # ── Image generation path ─────────────────────────────────────────────────
-    if body.modality == "image":
+    # Auto-detect image modality from the DB when the client doesn't set it:
+    # any model whose pricing row has "image" in modality and does not support
+    # the completions API is treated as an image-generation model.
+    _is_image_model = (
+        _price_row is not None
+        and "image" in (_price_row.modality or [])
+        and not _price_row.supports_completions_api
+    )
+    if body.modality == "image" or _is_image_model:
         if provider not in _SUPPORTED_PROVIDERS:
             raise HTTPException(
                 status_code=501,
