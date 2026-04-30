@@ -11,7 +11,7 @@ from __future__ import annotations
 import structlog
 
 from app.exceptions import _classify_openai_error
-from app.providers.response_formatter import ImageGeneratedItem
+from app.providers.response_formatter import ImageGeneratedItem, ImageGenerationResult
 from app.schemas.chat import ImageOptions
 
 logger = structlog.get_logger()
@@ -23,7 +23,7 @@ async def generate(
     provider_model_id: str,
     opts: ImageOptions,
     api_key: str | None,
-) -> list[ImageGeneratedItem]:
+) -> ImageGenerationResult:
     """
     Call OpenAI /v1/images/generations and return normalised results.
 
@@ -73,13 +73,21 @@ async def generate(
         )
         _classify_openai_error(response.status_code, raw)
 
-    data: list[dict] = response.json().get("data", [])
-    log.info("openai_image_generate_ok", count=len(data))
+    body = response.json()
+    data: list[dict] = body.get("data", [])
+    usage: dict = body.get("usage", {})
+    log.info(
+        "openai_image_generate_ok",
+        count=len(data),
+        usage=usage,
+        top_level_keys=list(body.keys()),
+    )
 
-    return [
-        ImageGeneratedItem(
-            url=item.get("url"),
-            b64_json=item.get("b64_json"),
-        )
-        for item in data
-    ]
+    return ImageGenerationResult(
+        items=[
+            ImageGeneratedItem(url=item.get("url"), b64_json=item.get("b64_json")) for item in data
+        ],
+        input_tokens=usage.get("input_tokens"),
+        output_tokens=usage.get("output_tokens"),
+        total_tokens=usage.get("total_tokens"),
+    )

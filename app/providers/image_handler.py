@@ -9,7 +9,7 @@ routes to the correct provider-specific handler; unsupported providers get a
 from __future__ import annotations
 
 from app.providers import image_handler_openai, image_handler_vertex
-from app.providers.response_formatter import ImageGeneratedItem
+from app.providers.response_formatter import ImageGenerationResult
 from app.schemas.chat import ImageOptions
 
 _SUPPORTED_PROVIDERS: frozenset[str] = frozenset({"openai", "vertex"})
@@ -22,7 +22,7 @@ async def generate_images(
     provider_model_id: str,
     opts: ImageOptions,
     api_key: str | None,
-) -> list[ImageGeneratedItem]:
+) -> ImageGenerationResult:
     """
     Dispatch image generation to the correct provider handler.
 

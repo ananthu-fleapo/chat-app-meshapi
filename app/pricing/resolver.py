@@ -66,6 +66,8 @@ class PriceRow:
     supports_embeddings_api: bool
     supports_batching: bool
     image_output_cost: Decimal | None = None
+    request_cost: Decimal | None = None
+    pricing_unit: str | None = None
     modality: list[str] | None = None
 
 
@@ -125,6 +127,8 @@ def _row_from_v2(mp) -> PriceRow:
         supports_embeddings_api=mp.supports_embeddings,
         supports_batching=mp.supports_batching,
         image_output_cost=mp.image_output_cost,
+        request_cost=mp.request_cost,
+        pricing_unit=mp.pricing_unit,
         modality=mp.modality,
     )
 

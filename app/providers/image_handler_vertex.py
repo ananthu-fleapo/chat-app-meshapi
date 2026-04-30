@@ -15,7 +15,7 @@ from __future__ import annotations
 import structlog
 
 from app.exceptions import UpstreamError
-from app.providers.response_formatter import ImageGeneratedItem
+from app.providers.response_formatter import ImageGeneratedItem, ImageGenerationResult
 from app.schemas.chat import ImageOptions
 
 logger = structlog.get_logger()
@@ -40,7 +40,7 @@ async def generate(
     provider_model_id: str,
     opts: ImageOptions,
     api_key: str | None,  # unused — Vertex uses service-account token
-) -> list[ImageGeneratedItem]:
+) -> ImageGenerationResult:
     """
     Call the Vertex Imagen :predict endpoint and return normalised results.
 
@@ -81,14 +81,23 @@ async def generate(
         )
         raise UpstreamError(f"Vertex image generation failed ({response.status_code}): {raw}")
 
-    predictions: list[dict] = response.json().get("predictions", [])
-    log.info("vertex_image_generate_ok", count=len(predictions))
+    body = response.json()
+    predictions: list[dict] = body.get("predictions", [])
+    log.info(
+        "vertex_image_generate_ok",
+        count=len(predictions),
+        top_level_keys=list(body.keys()),
+        metadata=body.get("metadata"),
+    )
 
-    return [
-        ImageGeneratedItem(
-            url=None,
-            b64_json=pred.get("bytesBase64Encoded"),
-            mime_type=pred.get("mimeType", "image/png"),
-        )
-        for pred in predictions
-    ]
+    return ImageGenerationResult(
+        items=[
+            ImageGeneratedItem(
+                url=None,
+                b64_json=pred.get("bytesBase64Encoded"),
+                mime_type=pred.get("mimeType", "image/png"),
+            )
+            for pred in predictions
+        ],
+        # Vertex Imagen does not return token counts
+    )

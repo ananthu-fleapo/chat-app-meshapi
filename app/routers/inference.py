@@ -13,6 +13,7 @@ import asyncio
 import json
 import time
 import uuid
+from decimal import ROUND_HALF_UP, Decimal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -486,7 +487,7 @@ async def chat_completions(
         opts = body.image or ImageOptions()
         start = time.monotonic()
 
-        items = await generate_images(
+        gen = await generate_images(
             prompt,
             provider=provider,
             provider_model_id=provider_model_id or (body.model or "").split("/")[-1],
@@ -495,12 +496,46 @@ async def chat_completions(
         )
         latency_ms = int((time.monotonic() - start) * 1000)
 
-        # Usage log — image cost is per-image, not per-token
-        image_cost_usd = None
-        if _price_row is not None and _price_row.image_output_cost is not None:
-            from decimal import Decimal
-
-            image_cost_usd = float(_price_row.image_output_cost * Decimal(opts.n))
+        # Cost calculation:
+        # - per_image / per_request models  → image_output_cost or request_cost × n
+        # - per_1k/per_1m token models      → use token counts returned by the provider
+        image_cost_usd: float | None = None
+        if _price_row is not None:
+            _is_token_priced = _price_row.pricing_unit in ("per_1k_tokens", "per_1m_tokens")
+            if _is_token_priced:
+                if gen.input_tokens is not None or gen.output_tokens is not None:
+                    # Input: text tokens — prompt_usd_per_1k is already normalised to per-1k
+                    _in = (
+                        (_price_row.prompt_usd_per_1k or Decimal(0))
+                        * Decimal(gen.input_tokens or 0)
+                        / 1000
+                    )
+                    # Output: image tokens — use image_output_cost (raw per-1M/1K column)
+                    # if set, otherwise fall back to the text output rate.
+                    _img_out_rate = _price_row.image_output_cost or _price_row.completion_usd_per_1k
+                    _out_divisor = (
+                        Decimal(1_000_000)
+                        if _price_row.pricing_unit == "per_1m_tokens"
+                        else Decimal(1_000)
+                    )
+                    _out = (
+                        (_img_out_rate or Decimal(0))
+                        * Decimal(gen.output_tokens or 0)
+                        / _out_divisor
+                    )
+                    image_cost_usd = float(
+                        (_in + _out).quantize(Decimal("0.0000000001"), rounding=ROUND_HALF_UP)
+                    )
+                # else: token-priced but provider didn't return token counts → cost unknown
+            else:
+                # per_image / per_request pricing: flat rate per image generated
+                _per_img = _price_row.image_output_cost or _price_row.request_cost
+                if _per_img is not None:
+                    image_cost_usd = float(
+                        (_per_img * Decimal(opts.n)).quantize(
+                            Decimal("0.0000000001"), rounding=ROUND_HALF_UP
+                        )
+                    )
 
         fire_usage_log(
             owner=key.owner,
@@ -510,8 +545,8 @@ async def chat_completions(
             provider=provider,
             template_id=str(template.id) if template else None,
             stream=False,
-            prompt_tokens=None,
-            completion_tokens=None,
+            prompt_tokens=gen.input_tokens,
+            completion_tokens=gen.output_tokens,
             cached_tokens=None,
             upstream_cost=image_cost_usd,
             latency_ms=latency_ms,
@@ -520,9 +555,11 @@ async def chat_completions(
         )
 
         result = format_image_as_chat_completion(
-            items, model_id=body.model or provider_model_id or ""
+            gen,
+            model_id=body.model or provider_model_id or "",
+            cost_usd=image_cost_usd,
         )
-        log.info("image_generation_complete", count=len(items), latency_ms=latency_ms)
+        log.info("image_generation_complete", count=len(gen.items), latency_ms=latency_ms)
         return JSONResponse(result)
 
     # Skip completions_api guard for image modality (handled above);
