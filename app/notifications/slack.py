@@ -5,8 +5,8 @@ Sends formatted block-kit alerts to a configured Slack channel.
 Requires SLACK_WEBHOOK_URL to be set; silently skips if unset.
 """
 
-import structlog
 import httpx
+import structlog
 
 from app.config import settings
 
@@ -43,26 +43,17 @@ async def send_slack_alert(
     ]
 
     if notify_here:
-        blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": "<!here>"}}
-        )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "<!here>"}})
 
-    blocks.append(
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*{f['label']}*\n`{f['value']}`"}
-                for f in fields
-            ],
-        }
-    )
+    rendered = [{"type": "mrkdwn", "text": f"*{f['label']}*\n`{f['value']}`"} for f in fields]
+    for i in range(0, max(len(rendered), 1), 10):
+        blocks.append({"type": "section", "fields": rendered[i : i + 10]})
 
     if message:
-        blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": message}}
-        )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": message}})
 
     try:
+        logger.info("slack_alert_body", blocks=blocks)
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 settings.slack_webhook_url,
@@ -70,5 +61,11 @@ async def send_slack_alert(
             )
             resp.raise_for_status()
         logger.info("slack_alert_sent", title=title)
-    except Exception as exc:
-        logger.warning("slack_alert_failed", error=str(exc))
+    except Exception:
+        logger.exception(
+            "slack_alert_failed",
+            extra={
+                "status_code": resp.status_code,
+                "response_text": resp.text,
+            },
+        )
