@@ -1,7 +1,7 @@
 """add stripe_coupon_id to checkout_coupons for promo code rows
 
-Revision ID: 0048
-Revises: 0047
+Revision ID: 0049
+Revises: 0048
 Create Date: 2026-04-30
 
 """
@@ -11,8 +11,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0048"
-down_revision: str | None = "0047"
+revision: str = "0049"
+down_revision: str | None = "0048"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
