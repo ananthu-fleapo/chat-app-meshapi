@@ -1,7 +1,7 @@
 """add model limits, tpm_limit to api_keys
 
-Revision ID: 0044
-Revises: 0043
+Revision ID: 0050
+Revises: 0049
 Create Date: 2026-04-28
 
 """
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0044"
-down_revision: str | None = "0043"
+revision: str = "0050"
+down_revision: str | None = "0049"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
