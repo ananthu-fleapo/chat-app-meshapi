@@ -1,27 +1,51 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI, Header, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Header
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 
-from app.cache.redis_client import close_redis, init_redis, get_redis
+from app.cache.redis_client import close_redis, get_redis, init_redis
 from app.config import settings
-from app.db.engine import close_db, init_db, get_engine
+from app.db.engine import close_db, get_engine, init_db
 from app.db.mongo import close_mongo, init_mongo
 from app.exceptions import RouterVError, routerv_exception_handler, validation_exception_handler
 from app.logging_config import configure_logging
+from app.metrics import (
+    PROCESS_CPU_CORES,
+    PROCESS_TOTAL_MEMORY_BYTES,
+    update_pool_metrics,
+    update_redis_metrics,
+)
 from app.middleware import CloudflareOriginGuard, RequestIdMiddleware, RequestLoggingMiddleware
-from app.metrics import update_pool_metrics, update_redis_metrics, PROCESS_CPU_CORES, PROCESS_TOTAL_MEMORY_BYTES
 from app.providers.openrouter import OpenRouterAdapter
 from app.providers.registry import register_adapter
-from prometheus_fastapi_instrumentator import Instrumentator
-import asyncio
-
-from app.routers import admin, admin_test_completions, admin_test_embeddings, admin_test_responses, auth, balance, batch, coupons, embeddings, error_logs, fx_rates, gstin, inference, keys, metrics_daily, model_requests, models, payments, reconcile, responses, usage
-
-from fastapi.middleware.cors import CORSMiddleware 
+from app.routers import (
+    admin,
+    admin_test_completions,
+    admin_test_embeddings,
+    admin_test_responses,
+    auth,
+    balance,
+    batch,
+    coupons,
+    embeddings,
+    error_logs,
+    fx_rates,
+    gstin,
+    inference,
+    keys,
+    metrics_daily,
+    model_requests,
+    models,
+    payments,
+    reconcile,
+    responses,
+    usage,
+)
 
 # Configure structlog before any logger is used.
 configure_logging()
@@ -36,6 +60,7 @@ async def lifespan(app: FastAPI):
     PROCESS_CPU_CORES.set(os.cpu_count() or 1)
     try:
         import psutil
+
         PROCESS_TOTAL_MEMORY_BYTES.set(psutil.virtual_memory().total)
     except ImportError:
         # psutil not available; use 512 MB fallback
@@ -52,6 +77,7 @@ async def lifespan(app: FastAPI):
     # Enabled only when project_id + service account JSON are both configured.
     if settings.google_project_id and settings.google_service_account_json:
         from app.providers.vertex_ai import VertexAIAdapter
+
         VertexAIAdapter.init(
             project_id=settings.google_project_id,
             location=settings.vertex_ai_location,
@@ -69,6 +95,7 @@ async def lifespan(app: FastAPI):
     # Enabled if either a bearer API key or IAM credentials are configured.
     if settings.bedrock_api_key or (settings.aws_access_key_id and settings.aws_secret_access_key):
         from app.providers.bedrock import BedrockAdapter
+
         BedrockAdapter.init(
             region=settings.aws_region,
             timeout=settings.bedrock_timeout_s,
@@ -80,12 +107,13 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(
             "bedrock_adapter_skipped",
-            hint="Set BEDROCK_API_KEY (bearer) or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (SigV4)",
+            hint="Set BEDROCK_API_KEY (bearer) or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY",
         )
 
     # ── OpenAI Direct adapter (optional) ──────────────────────────────────────
     if settings.openai_api_key:
         from app.providers.openai_direct import OpenAIDirectAdapter
+
         OpenAIDirectAdapter.init(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
@@ -101,6 +129,7 @@ async def lifespan(app: FastAPI):
     # ── Qwen / DashScope adapter (optional) ───────────────────────────────────
     if settings.qwen_api_key:
         from app.providers.qwen import QwenAdapter
+
         QwenAdapter.init(
             api_key=settings.qwen_api_key,
             base_url=settings.qwen_base_url,
@@ -154,7 +183,9 @@ async def lifespan(app: FastAPI):
             )
             raise
     else:
-        logger.warning("mongo_not_configured", hint="Set MONGODB_URL in .env to enable MongoDB logging")
+        logger.warning(
+            "mongo_not_configured", hint="Set MONGODB_URL in .env to enable MongoDB logging"
+        )
 
     # ── Background metrics task ───────────────────────────────────────────────
     # Update DB pool and Redis metrics every 10 seconds.
@@ -175,6 +206,7 @@ async def lifespan(app: FastAPI):
 
     # ── Background batch poller ───────────────────────────────────────────────
     from app.routers.batch_poller import batch_poll_loop
+
     batch_poll_task = asyncio.create_task(batch_poll_loop())
 
     yield
@@ -192,17 +224,22 @@ async def lifespan(app: FastAPI):
 
     # Close optional adapters if they were initialised
     from app.providers.registry import _REGISTRY
+
     if "vertex" in _REGISTRY:
         from app.providers.vertex_ai import VertexAIAdapter
+
         await VertexAIAdapter.close()
     if "bedrock" in _REGISTRY:
         from app.providers.bedrock import BedrockAdapter
+
         await BedrockAdapter.close()
     if "openai" in _REGISTRY:
         from app.providers.openai_direct import OpenAIDirectAdapter
+
         await OpenAIDirectAdapter.close()
     if "qwen" in _REGISTRY:
         from app.providers.qwen import QwenAdapter
+
         await QwenAdapter.close()
 
     await close_db()
@@ -240,12 +277,11 @@ def create_app() -> FastAPI:
         allow_credentials=settings.cors_origins != "*",
         allow_methods=["*"],
         allow_headers=["*"],
-    )                       
-
+    )
 
     # ── Exception handlers ────────────────────────────────────────────────────
-    app.add_exception_handler(RouterVError, routerv_exception_handler)
-    app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    app.add_exception_handler(RouterVError, routerv_exception_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
 
     # ── Routers ───────────────────────────────────────────────────────────────
     app.include_router(auth.router)
@@ -258,13 +294,18 @@ def create_app() -> FastAPI:
     app.include_router(usage.router)
 
     from app.routers import settings as settings_router
+
     app.include_router(settings_router.router)
     app.include_router(payments.router)
     app.include_router(coupons.router)
     app.include_router(coupons.admin_router)
+    # Coupon sync cron: Cloud Scheduler endpoint, guarded by WEBHOOK_API_KEY.
+    # Schedule: POST /v1/internal/coupons/sync every 30 minutes.
+    app.include_router(coupons.cron_router)
 
     # Template management: production endpoint, auth-gated, owner-scoped.
     from app.routers import templates
+
     app.include_router(templates.router)
 
     # NOTE: /v1/provider-keys is intentionally NOT registered here.
@@ -280,6 +321,7 @@ def create_app() -> FastAPI:
 
     # Public status page endpoint — no auth, Prometheus-backed.
     from app.routers import status as status_router
+
     app.include_router(status_router.router)
 
     # FX rate refresh: internal scheduler endpoint, guarded by WEBHOOK_API_KEY.
@@ -287,6 +329,7 @@ def create_app() -> FastAPI:
 
     # Model health check: Cloud Scheduler endpoint, guarded by WEBHOOK_API_KEY.
     from app.routers import model_health
+
     app.include_router(model_health.router)
 
     # Daily metrics summary: Cloud Scheduler endpoint, guarded by WEBHOOK_API_KEY.
@@ -328,6 +371,7 @@ def create_app() -> FastAPI:
         if settings.metrics_token:
             if authorization != f"Bearer {settings.metrics_token}":
                 from fastapi.responses import Response as FR
+
                 return FR(
                     content='{"error":{"code":"unauthorized","message":"Invalid metrics token."}}',
                     status_code=401,
@@ -335,6 +379,7 @@ def create_app() -> FastAPI:
                 )
 
         from fastapi.responses import Response as FR
+
         return FR(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     # ── Utility endpoints ─────────────────────────────────────────────────────
@@ -360,9 +405,10 @@ def create_app() -> FastAPI:
         Cloud Run / GKE uses this to gate traffic routing.
         Until readyz returns 200, the instance receives no traffic.
         """
+        import sqlalchemy as sa
+
         from app.cache.redis_client import get_redis
         from app.db.engine import get_engine
-        import sqlalchemy as sa
 
         checks: dict[str, str] = {}
         ok = True
@@ -384,7 +430,7 @@ def create_app() -> FastAPI:
         try:
             redis = get_redis()
             if redis is not None:
-                await redis.ping()
+                await redis.ping()  # type: ignore[misc]
                 checks["redis"] = "ok"
             else:
                 checks["redis"] = "not_configured"
@@ -394,6 +440,7 @@ def create_app() -> FastAPI:
 
         if not ok:
             from fastapi import Response
+
             return Response(
                 content=str({"status": "degraded", "checks": checks}),
                 status_code=503,

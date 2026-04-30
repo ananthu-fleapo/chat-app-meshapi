@@ -12,7 +12,7 @@ POST  /v1/payments               Ingest a payment event from a payment provider 
 GET   /v1/payments/{user_id}     List all payment events for a given user.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import structlog
@@ -24,9 +24,16 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.auth.control_plane import ControlPlaneIdentity, get_control_plane_user
 from app.auth.dependencies import verify_webhook_key
-from app.db.models import CheckoutCoupon, CurrencyConversionRate, GstinRecord, PaymentEvent
+from app.db.models import (
+    CheckoutCoupon,
+    CouponSyncIssue,
+    CurrencyConversionRate,
+    GstinRecord,
+    PaymentEvent,
+)
 from app.db.session import get_db_session
 from app.usage.balance import credit_balance
+
 from .coupon_utils import _normalize_coupon_code
 
 router = APIRouter(prefix="/v1/payments", tags=["payments"])
@@ -34,6 +41,7 @@ logger = structlog.get_logger()
 
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
+
 
 class PaymentRequest(BaseModel):
     userId: str
@@ -90,6 +98,7 @@ class MetadataUpdateRequest(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _to_out(event: PaymentEvent) -> PaymentEventOut:
     discount_amount_raw = _extract_discount_amount_raw(event)
     return PaymentEventOut(
@@ -129,7 +138,6 @@ def _convert_amount_to_usd(amount_major: Decimal, effective_rate: Decimal) -> De
     return amount_major / effective_rate
 
 
-
 def _minor_to_major(amount_minor: int | float | None) -> Decimal:
     if amount_minor is None:
         return Decimal("0.00")
@@ -161,19 +169,20 @@ async def _load_coupon_name_map(
         )
     )
     return {
-        _normalize_coupon_code(code): name
+        normalized: name
         for code, name in result.all()
-        if _normalize_coupon_code(code)
+        if (normalized := _normalize_coupon_code(code)) is not None
     }
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+
 @router.post("", response_model=PaymentOut, status_code=201)
 async def create_payment(
     body: PaymentRequest,
-    db: AsyncSession = Depends(get_db_session),
-    _: None = Depends(verify_webhook_key),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
+    _: None = Depends(verify_webhook_key),  # noqa: B008
 ):
     """
     Ingest a payment event from a payment provider webhook.
@@ -304,8 +313,9 @@ async def create_payment(
     coupon_payload: dict | None = None
     if normalized_coupon_code:
         coupon_results = await db.execute(
-            select(CheckoutCoupon)
-            .where(func.lower(CheckoutCoupon.code) == normalized_coupon_code.lower())
+            select(CheckoutCoupon).where(
+                func.lower(CheckoutCoupon.code) == normalized_coupon_code.lower()
+            )
         )
 
         coupons = coupon_results.scalars().all()
@@ -335,6 +345,35 @@ async def create_payment(
                         payment_id=body.paymentId,
                         provider=body.provider,
                     )
+
+                    # Auto-deactivate locally when the global usage limit is reached.
+                    # No API calls are made to providers — the next cron sync will
+                    # reflect the updated state, and admins are notified via sync issues.
+                    if coupon.max_uses is not None and coupon.used_count >= coupon.max_uses:
+                        coupon.is_active = False
+                        logger.info(
+                            "coupon_auto_deactivated",
+                            coupon_code=coupon.code,
+                            used_count=coupon.used_count,
+                            max_uses=coupon.max_uses,
+                        )
+                        db.add(
+                            CouponSyncIssue(
+                                coupon_id=coupon.id,
+                                coupon_code=coupon.code,
+                                provider="stripe",
+                                issue_type="auto_deactivated",
+                                details={
+                                    "used_count": coupon.used_count,
+                                    "max_uses": coupon.max_uses,
+                                    "trigger": "webhook",
+                                    "note": (
+                                        "Coupon deactivated locally. "
+                                        "Deactivate manually in the Stripe dashboard."
+                                    ),
+                                },
+                            )
+                        )
 
                     # pick one payload (or last valid one)
                     coupon_payload = {
@@ -379,8 +418,8 @@ async def create_payment(
 
 @router.get("", response_model=list[PaymentEventOut])
 async def list_payments(
-    identity: ControlPlaneIdentity = Depends(get_control_plane_user),
-    db: AsyncSession = Depends(get_db_session),
+    identity: ControlPlaneIdentity = Depends(get_control_plane_user),  # noqa: B008
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
 ):
     """
     List all payment events for the authenticated user, ordered by most recent first.
@@ -405,15 +444,16 @@ async def list_payments(
     output = []
     for event in events:
         row = _to_out(event)
-        row.coupon_name = coupon_name_map.get(_normalize_coupon_code(event.coupon_code))
+        normalized_code = _normalize_coupon_code(event.coupon_code)
+        row.coupon_name = coupon_name_map.get(normalized_code) if normalized_code else None
         output.append(row)
     return output
 
 
 @router.get("/pending-importer", response_model=list[PendingImporterPaymentOut])
 async def list_pending_importer_payments(
-    db: AsyncSession = Depends(get_db_session),
-    _: None = Depends(verify_webhook_key),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
+    _: None = Depends(verify_webhook_key),  # noqa: B008
 ):
     """
     Return cashfree payment events for which importer details have not yet been submitted.
@@ -423,8 +463,8 @@ async def list_pending_importer_payments(
 
     Auth: Authorization: Bearer <WEBHOOK_API_KEY>
     """
-    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
-    five_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=5)
+    seven_days_ago = datetime.now(UTC) - timedelta(days=7)
+    five_minutes_ago = datetime.now(UTC) - timedelta(minutes=5)
 
     result = await db.execute(
         select(PaymentEvent)
@@ -449,8 +489,8 @@ async def list_pending_importer_payments(
 async def update_payment_metadata(
     payment_id: str,
     body: MetadataUpdateRequest,
-    db: AsyncSession = Depends(get_db_session),
-    _: None = Depends(verify_webhook_key),
+    db: AsyncSession = Depends(get_db_session),  # noqa: B008
+    _: None = Depends(verify_webhook_key),  # noqa: B008
 ):
     """
     Merge the supplied metadata dict into the existing metadata of a payment event.
@@ -459,9 +499,7 @@ async def update_payment_metadata(
 
     Auth: Authorization: Bearer <WEBHOOK_API_KEY>
     """
-    result = await db.execute(
-        select(PaymentEvent).where(PaymentEvent.payment_id == payment_id)
-    )
+    result = await db.execute(select(PaymentEvent).where(PaymentEvent.payment_id == payment_id))
     event = result.scalar_one_or_none()
 
     if event is None:

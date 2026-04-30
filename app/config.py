@@ -145,6 +145,12 @@ class Settings(BaseSettings):
     cashfree_client_id: str = ""
     cashfree_client_secret: str = ""
 
+    # ── Stripe (coupon sync) ──────────────────────────────────────────────────
+    # Secret key from Stripe Dashboard → Developers → API keys.
+    # Leave empty to disable Stripe coupon sync.
+    stripe_api_key: str = ""
+    stripe_api_url: str = "https://api.stripe.com"
+
     # ── Webhook auth ─────────────────────────────────────────────────────────
     # Static secret for inbound webhook calls (e.g. payment provider callbacks).
     # Set WEBHOOK_API_KEY in .env. Requests must pass it as: Bearer <key>.

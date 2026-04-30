@@ -20,6 +20,7 @@ os.environ.setdefault("ENV", "dev")
 os.environ.setdefault("DATABASE_URL", "")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("WEBHOOK_API_KEY", "test-webhook-secret")
+os.environ.setdefault("STRIPE_API_KEY", "test-stripe-key")
 os.environ.setdefault("SUPABASE_JWT_SECRET", TEST_JWT_SECRET)
 os.environ.setdefault("SUPABASE_URL", "")  # prevent .env from injecting issuer check
 os.environ.setdefault("HEALTH_CHECK_SELF_URL", "http://localhost:8000")

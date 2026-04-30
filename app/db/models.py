@@ -566,11 +566,14 @@ class ModelPricing(Base):
             "request_cost IS NULL OR request_cost >= 0", name="model_pricing_request_cost_nonneg"
         ),
         CheckConstraint(
-            "(long_context_input_cost IS NULL AND long_context_output_cost IS NULL) OR standard_context_threshold IS NOT NULL",  # noqa: E501
+            "(long_context_input_cost IS NULL AND long_context_output_cost IS NULL)"  # noqa: E501
+            " OR standard_context_threshold IS NOT NULL",
             name="model_pricing_long_context_requires_threshold",
         ),
         CheckConstraint(
-            "(long_context_cache_read_input_cost IS NULL AND long_context_cache_write_input_cost IS NULL) OR standard_context_threshold IS NOT NULL",  # noqa: E501
+            "(long_context_cache_read_input_cost IS NULL"  # noqa: E501
+            " AND long_context_cache_write_input_cost IS NULL)"
+            " OR standard_context_threshold IS NOT NULL",
             name="model_pricing_long_context_cache_requires_threshold",
         ),
         CheckConstraint(
@@ -742,8 +745,7 @@ class PaymentEvent(Base):
     order_id         Provider-side order / invoice identifier.
     currency         ISO 4217 currency code (e.g. "USD", "EUR").
     amount           Charged amount in the smallest currency unit (e.g. cents).
-    amount_usd       Converted USD value in cents credited to the user's balance
-                     (post GST deduction).
+    amount_usd       Converted USD value in cents credited to the user's balance (post GST).
     metadata         Arbitrary provider-specific data (e.g. cashfree_importer_details_submitted).
     """
 
@@ -795,11 +797,22 @@ class CheckoutCoupon(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     discount_type: Mapped[str] = mapped_column(Text, nullable=False)
     discount_value: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(Text, nullable=False, server_default="INR")
     reuse_policy: Mapped[str] = mapped_column(Text, nullable=False, server_default="single_use")
     max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
     used_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     valid_till: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+
+    # stripe_synced_at IS NOT NULL → this coupon exists in Stripe
+    stripe_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # stripe_coupon_id IS NOT NULL AND stripe_coupon_id != code → this is a promo code row
+    # (code stores the promo code string; stripe_coupon_id points to parent Stripe coupon)
+    stripe_coupon_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -808,6 +821,9 @@ class CheckoutCoupon(Base):
     )
 
     users: Mapped[list["CouponUser"]] = relationship(
+        back_populates="coupon", cascade="all, delete-orphan"
+    )
+    sync_issues: Mapped[list["CouponSyncIssue"]] = relationship(
         back_populates="coupon", cascade="all, delete-orphan"
     )
 
@@ -833,6 +849,42 @@ class CouponUser(Base):
     )
 
     coupon: Mapped["CheckoutCoupon"] = relationship(back_populates="users")
+
+
+class CouponSyncIssue(Base):
+    """
+    Persisted log of coupon sync events — pull failures, auto-deactivations.
+    Written by the sync-all job or by the payment webhook (auto_deactivated).
+    Admin can review and dismiss via GET/PATCH /v1/admin/coupons/sync-issues.
+    """
+
+    __tablename__ = "coupon_sync_issues"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    # NULL when the coupon has been hard-deleted; coupon_code is denormalized for that case.
+    coupon_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("checkout_coupons.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    coupon_code: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)  # "stripe"
+    issue_type: Mapped[str] = mapped_column(Text, nullable=False)
+    # "fetch_failed" | "auto_deactivated" | "mismatch" (informational, no fix possible)
+    details: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="pending", index=True
+    )  # "pending" | "resolved" | "dismissed"
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    coupon: Mapped["CheckoutCoupon | None"] = relationship(back_populates="sync_issues")
 
 
 class GstinRecord(Base):
@@ -1096,4 +1148,7 @@ class ModelRequest(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<ModelRequest id={self.id} owner={self.owner!r} model_name={self.model_name!r} status={self.status!r}>"  # noqa: E501
+        return (
+            f"<ModelRequest id={self.id} owner={self.owner!r}"
+            f" model_name={self.model_name!r} status={self.status!r}>"
+        )
