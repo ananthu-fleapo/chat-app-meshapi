@@ -82,6 +82,15 @@ class ApiKey(Base):
     rpd_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     spend_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
 
+    # Phase 7 — model-level access control and per-model caps.
+    # allowed_models: if set, only models in this list may be called (403 otherwise).
+    # model_limits:   per-model caps e.g. {"openai/gpt-4o": {"max_cost_usd": 10.0,
+    #                 "max_tokens": 500000, "max_requests": 200}}. NULL = no per-model caps.
+    # tpm_limit:      max tokens per minute (soft cap, checked pre-request, incremented post).
+    allowed_models: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
+    model_limits: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    tpm_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # Phase 6 — per-owner upstream provider key.
     # NULL → system default (settings.openrouter_api_key).
     # Non-null → look up ProviderKey row for this owner's upstream key.

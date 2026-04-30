@@ -38,6 +38,9 @@ class CreateKeyRequest(BaseModel):
     default_model: str | None = None
     rpm: int | None = None
     rpd: int | None = None
+    tpm: int | None = None
+    allowed_models: list[str] | None = None
+    model_limits: dict | None = None
 
 
 class CreateKeyResponse(BaseModel):
@@ -56,6 +59,9 @@ class KeySummary(BaseModel):
     default_model: str | None
     rpm_limit: int | None
     rpd_limit: int | None
+    tpm_limit: int | None
+    allowed_models: list[str] | None
+    model_limits: dict | None
     created_at: str
 
 
@@ -93,6 +99,9 @@ def _to_summary(k: ApiKey) -> KeySummary:
         default_model=k.default_model,
         rpm_limit=k.rpm_limit,
         rpd_limit=k.rpd_limit,
+        tpm_limit=k.tpm_limit,
+        allowed_models=k.allowed_models,
+        model_limits=k.model_limits,
         created_at=k.created_at.isoformat(),
     )
 
@@ -124,6 +133,9 @@ async def create_key(
         provider_key_id=provider_key.id if provider_key else None,
         rpm_limit=body.rpm,
         rpd_limit=body.rpd,
+        tpm_limit=body.tpm,
+        allowed_models=body.allowed_models or None,
+        model_limits=body.model_limits or None,
     )
     db.add(key)
     await db.flush()

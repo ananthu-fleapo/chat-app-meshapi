@@ -5,6 +5,7 @@
 # Prerequisites:
 #   brew install cloud-sql-proxy   (or download from https://cloud.google.com/sql/docs/postgres/sql-proxy)
 #   gcloud auth application-default login
+# backend/scripts/cloud_sql_proxy.sh
 
 set -euo pipefail
 

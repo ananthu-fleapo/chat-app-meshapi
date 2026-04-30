@@ -167,6 +167,82 @@ async def check_rate_limits(
         )
 
 
+def _tpm_bucket_key(key_id: str) -> str:
+    """Key resets every calendar minute (UTC). Stores integer token count."""
+    bucket = int(time.time()) // 60
+    return f"{_PREFIX}:{key_id}:tpm:{bucket}"
+
+
+async def check_tpm_limit(key_id: str, tpm_limit: int | None) -> None:
+    """
+    Read the current minute's token counter and raise RateLimitError (429)
+    if the count has already reached tpm_limit.
+
+    Does NOT increment — incrementing happens after the response via
+    increment_tpm_counter(). Fails open on Redis errors.
+    """
+    if tpm_limit is None:
+        return
+
+    try:
+        r = get_redis()
+        bucket_key = _tpm_bucket_key(key_id)
+        current = await r.get(bucket_key)
+        token_count = int(current) if current else 0
+        logger.debug(
+            "tpm_check",
+            key_id=key_id,
+            bucket_key=bucket_key,
+            token_count=token_count,
+            tpm_limit=tpm_limit,
+        )
+    except Exception as exc:
+        logger.warning("redis_unavailable", source="tpm_check", key_id=key_id, error=str(exc))
+        return
+
+    if token_count >= tpm_limit:
+        retry = _seconds_until_next_minute()
+        logger.info("rate_limit_tpm_exceeded", key_id=key_id, count=token_count, limit=tpm_limit)
+        from app.metrics import RATE_LIMIT_HITS
+        RATE_LIMIT_HITS.labels(limit_type="tpm").inc()
+        raise RateLimitError(
+            f"TPM limit of {tpm_limit:,} tokens/min exceeded.",
+            limit_type="tpm",
+            retry_after=retry,
+        )
+
+
+async def increment_tpm_counter(key_id: str, total_tokens: int | None) -> None:
+    """
+    Increment the current minute's token counter by total_tokens.
+
+    Called after fire_usage_log() with the actual token count from the response.
+    Fails silently on errors — this is best-effort tracking; the check fails open
+    anyway, so a missed increment is not catastrophic.
+    """
+    if not total_tokens:
+        logger.debug("tpm_increment_skip", key_id=key_id, total_tokens=total_tokens)
+        return
+
+    try:
+        r = get_redis()
+        tpm_key = _tpm_bucket_key(key_id)
+        async with r.pipeline(transaction=False) as pipe:
+            pipe.incrby(tpm_key, total_tokens)
+            pipe.expire(tpm_key, 90)   # same 1.5× TTL as RPM
+            results = await pipe.execute()
+        new_count = results[0]
+        logger.debug(
+            "tpm_incremented",
+            key_id=key_id,
+            tpm_key=tpm_key,
+            added=total_tokens,
+            new_bucket_count=new_count,
+        )
+    except Exception as exc:
+        logger.warning("redis_unavailable", source="tpm_increment", key_id=key_id, error=str(exc))
+
+
 async def check_free_model_rate_limits(
     key_id: str,
     free_rpm: int,

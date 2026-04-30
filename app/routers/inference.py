@@ -9,6 +9,7 @@ Phase additions per phase:
   Phase 5 → spend cap enforcement, usage logging (non-stream + SSE-parsed stream)
 """
 
+import asyncio
 import json
 import time
 
@@ -26,7 +27,7 @@ from app.auto_router.service import (
     _is_auto,
     resolve_auto_model,
 )
-from app.cache.rate_limiter import check_free_model_rate_limits, check_rate_limits
+from app.cache.rate_limiter import check_free_model_rate_limits, check_rate_limits, check_tpm_limit, increment_tpm_counter
 from app.config import settings
 from app.db.models import ApiKey
 from app.db.session import get_db_session
@@ -39,6 +40,7 @@ from app.templates.renderer import render_template
 from app.templates.resolver import resolve_template
 from app.usage.balance import check_balance
 from app.usage.logger import fire_usage_log
+from app.usage.model_limits import check_allowed_models, check_model_limits
 from app.usage.spend_cap import check_spend_cap
 
 router = APIRouter()
@@ -357,6 +359,9 @@ async def chat_completions(
         max_rpd=settings.max_rpd,
     )
 
+    if key.tpm_limit is not None:
+        await check_tpm_limit(str(key.id), key.tpm_limit)
+
     # ── Phase 5: Spend cap (per-key hard limit, optional) ────────────────────
     if key.spend_cap_usd is not None:
         await check_spend_cap(str(key.id), key.spend_cap_usd, db)
@@ -405,6 +410,11 @@ async def chat_completions(
     # ─────────────────────────────────────────────────────────────────────────
     if not body.model:
         raise UnprocessableEntityError("'model' is required.", status_code=422)
+
+    # ── Phase 7: Model access control + per-model usage caps ─────────────────
+    check_allowed_models(body.model, key.allowed_models)
+    if key.model_limits:
+        await check_model_limits(str(key.id), body.model, key.model_limits, db)
 
     # ── Balance check + free-model rate limit ────────────────────────────────
     is_free_model = await check_balance(key.owner, body.model, db)
@@ -517,6 +527,9 @@ async def chat_completions(
                     status=status,
                     error_code=error_code_val,
                 )
+                if key.tpm_limit is not None:
+                    _stream_tokens = usage_data.get("total_tokens") if usage_data else None
+                    asyncio.create_task(increment_tpm_counter(str(key.id), _stream_tokens))
 
         return StreamingResponse(
             event_generator(),
@@ -567,6 +580,8 @@ async def chat_completions(
             status=status,
             error_code=error_code_val,
         )
+        if key.tpm_limit is not None:
+            asyncio.create_task(increment_tpm_counter(str(key.id), usage.get("total_tokens")))
 
     log.info(
         "inference_complete",

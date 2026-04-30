@@ -57,6 +57,9 @@ def _serialize(key: ApiKey) -> str:
         "rpm_limit": key.rpm_limit,
         "rpd_limit": key.rpd_limit,
         "spend_cap_usd": str(key.spend_cap_usd) if key.spend_cap_usd is not None else None,
+        "tpm_limit": key.tpm_limit,
+        "allowed_models": key.allowed_models,
+        "model_limits": key.model_limits,
     })
 
 
@@ -76,6 +79,9 @@ def _deserialize(raw: str) -> ApiKey:
         rpm_limit=data.get("rpm_limit"),
         rpd_limit=data.get("rpd_limit"),
         spend_cap_usd=Decimal(data["spend_cap_usd"]) if data.get("spend_cap_usd") else None,
+        tpm_limit=data.get("tpm_limit"),
+        allowed_models=data.get("allowed_models"),
+        model_limits=data.get("model_limits"),
     )
     return key
 

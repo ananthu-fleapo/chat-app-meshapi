@@ -124,6 +124,9 @@ class CreateKeyRequest(BaseModel):
     rpm_limit: int | None = None
     rpd_limit: int | None = None
     spend_cap_usd: float | None = None
+    allowed_models: list[str] | None = None
+    model_limits: dict | None = None
+    tpm_limit: int | None = None
 
 
 class CreateKeyResponse(BaseModel):
@@ -145,7 +148,10 @@ class KeySummary(BaseModel):
     default_params: dict | None
     rpm_limit: int | None
     rpd_limit: int | None
-    spend_cap_usd: str | None  # Decimal serialised as string to avoid float precision loss
+    spend_cap_usd: str | None   # Decimal serialised as string to avoid float precision loss
+    allowed_models: list[str] | None
+    model_limits: dict | None
+    tpm_limit: int | None
     created_at: str
     updated_at: str
 
@@ -158,6 +164,9 @@ class UpdateKeyRequest(BaseModel):
     rpm_limit: int | None = None
     rpd_limit: int | None = None
     spend_cap_usd: float | None = None
+    allowed_models: list[str] | None = None
+    model_limits: dict | None = None
+    tpm_limit: int | None = None
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -266,6 +275,9 @@ async def create_key(
         rpm_limit=rpm,
         rpd_limit=rpd,
         spend_cap_usd=spend_cap,
+        allowed_models=body.allowed_models or None,
+        model_limits=body.model_limits or None,
+        tpm_limit=body.tpm_limit,
         provider_key_id=provider_key.id if provider_key else None,
     )
     db.add(key)
@@ -330,6 +342,13 @@ async def update_key(
             key.rpd_limit = rpd
     if body.spend_cap_usd is not None:
         key.spend_cap_usd = Decimal(str(body.spend_cap_usd))
+    if "allowed_models" in body.model_fields_set:
+        # Empty list → clear restriction (store as NULL)
+        key.allowed_models = body.allowed_models or None
+    if "model_limits" in body.model_fields_set:
+        key.model_limits = body.model_limits or None
+    if body.tpm_limit is not None:
+        key.tpm_limit = body.tpm_limit
 
     await db.flush()
     await db.refresh(key)
@@ -670,6 +689,9 @@ def _to_summary(k: ApiKey, *, email: str | None = None) -> KeySummary:
         rpm_limit=k.rpm_limit,
         rpd_limit=k.rpd_limit,
         spend_cap_usd=str(k.spend_cap_usd) if k.spend_cap_usd is not None else None,
+        allowed_models=k.allowed_models,
+        model_limits=k.model_limits,
+        tpm_limit=k.tpm_limit,
         created_at=k.created_at.isoformat(),
         updated_at=k.updated_at.isoformat(),
     )

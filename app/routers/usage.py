@@ -10,6 +10,7 @@ Events      GET /v1/usage/events        Paginated per-request history
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query
@@ -134,13 +135,15 @@ def _parse_dt(value: str | None, *, end_of_day: bool = False) -> datetime | None
 async def get_usage_summary(
     since: str | None = Query(default=None, description="ISO 8601 start date, e.g. 2026-01-01"),
     until: str | None = Query(default=None, description="ISO 8601 end date, e.g. 2026-12-31"),
+    key_id: str | None = Query(default=None, description="Filter to a specific key UUID"),
     identity: ControlPlaneIdentity = Depends(get_control_plane_user),
     db: AsyncSession = Depends(get_db_session),
 ):
     """
     Aggregate usage stats for the authenticated user across all their keys.
 
-    Optionally filter by date range with `since` and `until` (ISO 8601).
+    Optionally filter by date range with `since` and `until` (ISO 8601),
+    or narrow to a single key with `key_id`.
     """
     key_map = await _owner_key_map(db, identity.owner)
     key_ids = list(key_map)
@@ -150,6 +153,23 @@ async def get_usage_summary(
             prompt_tokens=None, completion_tokens=None, total_tokens=None,
             total_cost_usd=None, by_model=[],
         )
+
+    if isinstance(key_id, str):
+        try:
+            filter_uid = uuid.UUID(key_id)
+        except ValueError:
+            return UsageSummary(
+                total_requests=0, successful_requests=0, error_requests=0,
+                prompt_tokens=None, completion_tokens=None, total_tokens=None,
+                total_cost_usd=None, by_model=[],
+            )
+        if filter_uid not in key_map:
+            return UsageSummary(
+                total_requests=0, successful_requests=0, error_requests=0,
+                prompt_tokens=None, completion_tokens=None, total_tokens=None,
+                total_cost_usd=None, by_model=[],
+            )
+        key_ids = [filter_uid]
 
     since_dt = _parse_dt(since)
     until_dt = _parse_dt(until, end_of_day=True)
@@ -229,18 +249,28 @@ async def get_usage_events(
     until: str | None = Query(default=None, description="ISO 8601 end date"),
     model: str | None = Query(default=None, description="Filter by model id"),
     status: str | None = Query(default=None, description="Filter by status: success | error"),
+    key_id: str | None = Query(default=None, description="Filter to a specific key UUID"),
     identity: ControlPlaneIdentity = Depends(get_control_plane_user),
     db: AsyncSession = Depends(get_db_session),
 ):
     """
     Paginated per-request event history for the authenticated user.
 
-    Ordered by most recent first. Filter by date range, model, or status.
+    Ordered by most recent first. Filter by date range, model, status, or key.
     """
     key_map = await _owner_key_map(db, identity.owner)
     key_ids = list(key_map)
     if not key_ids:
         return UsageEventsPage(events=[], total=0, limit=limit, offset=offset)
+
+    if isinstance(key_id, str):
+        try:
+            filter_uid = uuid.UUID(key_id)
+        except ValueError:
+            return UsageEventsPage(events=[], total=0, limit=limit, offset=offset)
+        if filter_uid not in key_map:
+            return UsageEventsPage(events=[], total=0, limit=limit, offset=offset)
+        key_ids = [filter_uid]
 
     since_dt = _parse_dt(since)
     until_dt = _parse_dt(until, end_of_day=True)
