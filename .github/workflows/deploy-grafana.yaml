@@ -1,0 +1,76 @@
+name: deploy-grafana
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - grafana/**
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGION: asia-southeast1
+  REPO: routersvc
+  PROJECT_ID: fair-myth-471110-j2
+
+jobs:
+  deploy:
+    name: Build and deploy Grafana
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build Grafana image
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO }}/grafana:latest"
+          docker build \
+            --tag "${IMAGE}" \
+            --cache-from "${IMAGE}" \
+            -f grafana/Dockerfile \
+            .
+
+      - name: Push Grafana image
+        run: |
+          docker push "${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO }}/grafana"
+
+      - name: Deploy Grafana to Cloud Run
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO }}/grafana:latest"
+          gcloud run deploy grafana \
+            --image="${IMAGE}" \
+            --region=${{ env.REGION }} \
+            --platform=managed
+
+      - name: Notify Slack
+        if: always()
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "${{ job.status == 'success' && ':white_check_mark:' || ':x:' }} *${{ github.workflow }}* ${{ job.status == 'success' && 'deployed' || 'failed on' }} `${{ github.ref_name }}`${{ job.status == 'success' && ' successfully' || '' }}",
+              "attachments": [
+                {
+                  "color": "${{ job.status == 'success' && 'good' || 'danger' }}",
+                  "fields": [
+                    { "title": "Repository", "value": "${{ github.repository }}", "short": true },
+                    { "title": "Triggered by", "value": "${{ github.actor }}", "short": true },
+                    { "title": "Run", "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View logs>", "short": false }
+                  ]
+                }
+              ]
+            }
