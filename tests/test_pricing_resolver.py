@@ -80,6 +80,8 @@ def _make_v1_orm(
     supports_responses_api=False,
     supports_embeddings_api=False,
     supports_batching=False,
+    is_active=True,
+    priority=None,
 ):
     row = MagicMock()
     row.model_id = model_id
@@ -97,6 +99,8 @@ def _make_v1_orm(
     row.supports_responses_api = supports_responses_api
     row.supports_embeddings_api = supports_embeddings_api
     row.supports_batching = supports_batching
+    row.is_active = is_active
+    row.priority = priority
     return row
 
 
@@ -168,6 +172,8 @@ def _make_v2_orm(
     supports_responses_api=False,
     supports_embeddings=False,
     supports_batching=False,
+    is_active=True,
+    priority=None,
 ):
     row = MagicMock()
     row.model_id = model_id
@@ -183,6 +189,8 @@ def _make_v2_orm(
     row.supports_responses_api = supports_responses_api
     row.supports_embeddings = supports_embeddings
     row.supports_batching = supports_batching
+    row.is_active = is_active
+    row.priority = priority
     return row
 
 
@@ -347,6 +355,184 @@ class TestGetDefaultPriceRow:
 
         assert row is None
         assert session.execute.call_count == 2  # tried both queries
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# get_default_price_row — priority-based failover
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestGetDefaultPriceRowFailover:
+    """
+    Priority-based failover: when the is_default=True row is disabled (or absent),
+    get_default_price_row falls back to the highest-priority active row.
+    """
+
+    def _make_result(self, orm_row):
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = orm_row
+        return result
+
+    # ── V1 path (pricing_v2=False) ────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_v1_disabled_default_falls_back_to_priority_row(self):
+        from app.pricing.resolver import get_default_price_row
+
+        fallback_orm = _make_v1_orm(is_default=False, provider="bedrock")
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[
+            self._make_result(None),
+            self._make_result(fallback_orm),
+        ])
+
+        with patch("app.pricing.resolver.settings") as mock_settings:
+            mock_settings.pricing_v2 = False
+            row = await get_default_price_row("openai/gpt-4o", session)
+
+        assert row is not None
+        assert row.provider == "bedrock"
+        assert session.execute.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_v1_logs_provider_failover_on_fallback(self):
+        from app.pricing.resolver import get_default_price_row
+
+        fallback_orm = _make_v1_orm(is_default=False, provider="bedrock")
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[
+            self._make_result(None),
+            self._make_result(fallback_orm),
+        ])
+
+        with (
+            patch("app.pricing.resolver.settings") as mock_settings,
+            patch("app.pricing.queries.logger") as mock_logger,
+        ):
+            mock_settings.pricing_v2 = False
+            await get_default_price_row("openai/gpt-4o", session)
+
+        mock_logger.info.assert_called_once_with(
+            "provider_failover",
+            model="openai/gpt-4o",
+            provider="bedrock",
+            priority=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_v1_all_disabled_returns_none(self):
+        from app.pricing.resolver import get_default_price_row
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[
+            self._make_result(None),
+            self._make_result(None),
+        ])
+
+        with patch("app.pricing.resolver.settings") as mock_settings:
+            mock_settings.pricing_v2 = False
+            row = await get_default_price_row("openai/gpt-4o", session)
+
+        assert row is None
+        assert session.execute.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_v1_null_priority_row_returned_as_last_resort(self):
+        from app.pricing.resolver import get_default_price_row
+
+        null_priority_orm = _make_v1_orm(is_default=False, provider="openrouter", priority=None)
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[
+            self._make_result(None),
+            self._make_result(null_priority_orm),
+        ])
+
+        with patch("app.pricing.resolver.settings") as mock_settings:
+            mock_settings.pricing_v2 = False
+            row = await get_default_price_row("openai/gpt-4o", session)
+
+        assert row is not None
+        assert row.provider == "openrouter"
+
+    # ── V2 path (pricing_v2=True) ─────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_v2_disabled_default_falls_back_to_priority_row(self):
+        from app.pricing.resolver import get_default_price_row
+
+        fallback_orm = _make_v2_orm(is_default=False, provider="bedrock")
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[
+            self._make_result(None),
+            self._make_result(fallback_orm),
+        ])
+
+        with patch("app.pricing.resolver.settings") as mock_settings:
+            mock_settings.pricing_v2 = True
+            row = await get_default_price_row("anthropic/claude-3-5-sonnet", session)
+
+        assert row is not None
+        assert row.provider == "bedrock"
+        assert session.execute.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_v2_logs_provider_failover_on_fallback(self):
+        from app.pricing.resolver import get_default_price_row
+
+        fallback_orm = _make_v2_orm(is_default=False, provider="bedrock")
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[
+            self._make_result(None),
+            self._make_result(fallback_orm),
+        ])
+
+        with (
+            patch("app.pricing.resolver.settings") as mock_settings,
+            patch("app.pricing.queries.logger") as mock_logger,
+        ):
+            mock_settings.pricing_v2 = True
+            await get_default_price_row("anthropic/claude-3-5-sonnet", session)
+
+        mock_logger.info.assert_called_once_with(
+            "provider_failover",
+            model="anthropic/claude-3-5-sonnet",
+            provider="bedrock",
+            priority=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_v2_all_disabled_returns_none(self):
+        from app.pricing.resolver import get_default_price_row
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[
+            self._make_result(None),
+            self._make_result(None),
+        ])
+
+        with patch("app.pricing.resolver.settings") as mock_settings:
+            mock_settings.pricing_v2 = True
+            row = await get_default_price_row("anthropic/claude-3-5-sonnet", session)
+
+        assert row is None
+        assert session.execute.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_v2_null_priority_row_returned_as_last_resort(self):
+        from app.pricing.resolver import get_default_price_row
+
+        null_priority_orm = _make_v2_orm(is_default=False, provider="openrouter", priority=None)
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[
+            self._make_result(None),
+            self._make_result(null_priority_orm),
+        ])
+
+        with patch("app.pricing.resolver.settings") as mock_settings:
+            mock_settings.pricing_v2 = True
+            row = await get_default_price_row("anthropic/claude-3-5-sonnet", session)
+
+        assert row is not None
+        assert row.provider == "openrouter"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

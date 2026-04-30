@@ -31,13 +31,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-import structlog
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-
-logger = structlog.get_logger()
+from app.pricing import queries
 
 # Pricing units whose costs map directly to "per 1k tokens"
 _PER_1K = "per_1k_tokens"
@@ -72,6 +69,7 @@ class PriceRow:
 
 # ── V1 helpers (read model_prices) ────────────────────────────────────────────
 
+
 def _row_from_v1(mp) -> PriceRow:
     return PriceRow(
         model_id=mp.model_id,
@@ -93,6 +91,7 @@ def _row_from_v1(mp) -> PriceRow:
 
 
 # ── V2 helpers (read model_pricing) ───────────────────────────────────────────
+
 
 def _normalise_cost(cost: Decimal | None, unit: str) -> Decimal | None:
     """Convert cost to per-1k-tokens equivalent, or None for non-token units."""
@@ -128,30 +127,18 @@ def _row_from_v2(mp) -> PriceRow:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-async def get_price_row(
-    model_id: str, provider: str, db: AsyncSession
-) -> PriceRow | None:
+
+async def get_price_row(model_id: str, provider: str, db: AsyncSession) -> PriceRow | None:
     """Return the price row for an exact (model_id, provider) pair."""
     if settings.pricing_v2:
-        from app.db.models import ModelPricing
-        result = await db.execute(
-            select(ModelPricing).where(
-                ModelPricing.model_id == model_id,
-                ModelPricing.provider == provider,
-                ModelPricing.is_active.is_(True),
-            )
-        )
-        row = result.scalar_one_or_none()
+        row = await queries._fetch_price_row_v2(model_id, provider, db)
         return _row_from_v2(row) if row is not None else None
     else:
-        from app.db.models import ModelPrice
-        row = await db.get(ModelPrice, (model_id, provider))
+        row = await queries._fetch_price_row_v1(model_id, provider, db)
         return _row_from_v1(row) if row is not None else None
 
 
-async def get_default_price_row(
-    model_id: str, db: AsyncSession
-) -> PriceRow | None:
+async def get_default_price_row(model_id: str, db: AsyncSession) -> PriceRow | None:
     """
     Return the is_default=True price row for model_id.
 
@@ -159,94 +146,38 @@ async def get_default_price_row(
     existing behaviour in balance.py / registry.py).
     """
     if settings.pricing_v2:
-        from app.db.models import ModelPricing
-
-        for where in [
-            (ModelPricing.model_id == model_id, ModelPricing.is_default.is_(True), ModelPricing.is_active.is_(True)),
-            (ModelPricing.model_id == model_id, ModelPricing.is_active.is_(True)),
-        ]:
-            result = await db.execute(select(ModelPricing).where(*where).limit(1))
-            row = result.scalar_one_or_none()
-            if row is not None:
-                return _row_from_v2(row)
-        return None
+        row = await queries._fetch_default_price_row_v2(model_id, db)
+        return _row_from_v2(row) if row is not None else None
     else:
-        from app.db.models import ModelPrice
-
-        for where in [
-            (ModelPrice.model_id == model_id, ModelPrice.is_default.is_(True)),
-            (ModelPrice.model_id == model_id,),
-        ]:
-            result = await db.execute(select(ModelPrice).where(*where).limit(1))
-            row = result.scalar_one_or_none()
-            if row is not None:
-                return _row_from_v1(row)
-        return None
+        row = await queries._fetch_default_price_row_v1(model_id, db)
+        return _row_from_v1(row) if row is not None else None
 
 
-async def get_all_provider_price_rows(
-    model_id: str, db: AsyncSession
-) -> list[PriceRow]:
+async def get_all_provider_price_rows(model_id: str, db: AsyncSession) -> list[PriceRow]:
     """Return all (model_id, provider) price rows — used by model health checks."""
     if settings.pricing_v2:
-        from app.db.models import ModelPricing
-        result = await db.execute(
-            select(ModelPricing).where(
-                ModelPricing.model_id == model_id,
-                ModelPricing.is_active.is_(True),
-            )
-        )
-        return [_row_from_v2(r) for r in result.scalars().all()]
+        rows = await queries._fetch_all_provider_rows_v2(model_id, db)
+        return [_row_from_v2(r) for r in rows]
     else:
-        from app.db.models import ModelPrice
-        result = await db.execute(
-            select(ModelPrice).where(ModelPrice.model_id == model_id)
-        )
-        return [_row_from_v1(r) for r in result.scalars().all()]
+        rows = await queries._fetch_all_provider_rows_v1(model_id, db)
+        return [_row_from_v1(r) for r in rows]
 
 
-async def list_default_price_rows(
-    db: AsyncSession,
-) -> list[tuple]:
+async def list_default_price_rows(db: AsyncSession) -> list[tuple]:
     """
     Return (Model, PriceRow) pairs for all enabled models with a default price.
 
     Used by GET /v1/models to build the model listing.
     """
-    from app.db.models import Model
-
     if settings.pricing_v2:
-        from app.db.models import ModelPricing
-        result = await db.execute(
-            select(Model, ModelPricing)
-            .join(
-                ModelPricing,
-                (ModelPricing.model_id == Model.model_id)
-                & ModelPricing.is_default.is_(True)
-                & ModelPricing.is_active.is_(True),
-            )
-            .where(Model.is_enabled.is_(True))
-            .order_by(Model.model_id)
-        )
-        return [(m, _row_from_v2(mp)) for m, mp in result.all()]
+        pairs = await queries._list_default_price_rows_v2(db)
+        return [(m, _row_from_v2(mp)) for m, mp in pairs]
     else:
-        from app.db.models import ModelPrice
-        result = await db.execute(
-            select(Model, ModelPrice)
-            .join(
-                ModelPrice,
-                (ModelPrice.model_id == Model.model_id)
-                & ModelPrice.is_default.is_(True),
-            )
-            .where(Model.is_enabled.is_(True))
-            .order_by(Model.model_id)
-        )
-        return [(m, _row_from_v1(mp)) for m, mp in result.all()]
+        pairs = await queries._list_default_price_rows_v1(db)
+        return [(m, _row_from_v1(mp)) for m, mp in pairs]
 
 
-async def resolve_canonical_model_id(
-    raw_model: str, db: AsyncSession
-) -> str | None:
+async def resolve_canonical_model_id(raw_model: str, db: AsyncSession) -> str | None:
     """
     Resolve a raw model string to the canonical model_id stored in the price table.
 
@@ -257,69 +188,13 @@ async def resolve_canonical_model_id(
 
     Returns None when no match is found (caller should raise UnsupportedModelError).
     """
-    from sqlalchemy import select as sa_select
-    from app.db.models import Model
-
     if settings.pricing_v2:
-        from app.db.models import ModelPricing
-
-        # 1. Exact model_id match
-        result = await db.execute(
-            sa_select(ModelPricing.model_id)
-            .join(Model, Model.model_id == ModelPricing.model_id)
-            .where(
-                ModelPricing.model_id == raw_model,
-                ModelPricing.is_active.is_(True),
-                Model.is_enabled.is_(True),
-            )
-            .limit(1)
-        )
-        row = result.one_or_none()
-        if row is not None:
-            return row.model_id
-
-        # 2. provider_model_id match
-        result = await db.execute(
-            sa_select(ModelPricing.model_id)
-            .join(Model, Model.model_id == ModelPricing.model_id)
-            .where(
-                ModelPricing.provider_model_id == raw_model,
-                ModelPricing.is_active.is_(True),
-                Model.is_enabled.is_(True),
-            )
-            .limit(1)
-        )
-        row = result.one_or_none()
-        return row.model_id if row is not None else None
-
+        return await queries._resolve_canonical_model_id_v2(raw_model, db)
     else:
-        from app.db.models import ModelPrice
-
-        # 1. Exact model_id match
-        result = await db.execute(
-            sa_select(ModelPrice.model_id)
-            .join(Model, Model.model_id == ModelPrice.model_id)
-            .where(ModelPrice.model_id == raw_model, Model.is_enabled.is_(True))
-            .limit(1)
-        )
-        row = result.one_or_none()
-        if row is not None:
-            return row.model_id
-
-        # 2. provider_model_id match
-        result = await db.execute(
-            sa_select(ModelPrice.model_id)
-            .join(Model, Model.model_id == ModelPrice.model_id)
-            .where(ModelPrice.provider_model_id == raw_model, Model.is_enabled.is_(True))
-            .limit(1)
-        )
-        row = result.one_or_none()
-        return row.model_id if row is not None else None
+        return await queries._resolve_canonical_model_id_v1(raw_model, db)
 
 
-async def list_all_provider_price_rows(
-    db: AsyncSession,
-) -> list[tuple]:
+async def list_all_provider_price_rows(db: AsyncSession) -> list[tuple]:
     """
     Return (Model, PriceRow | None) for every enabled model × every provider row.
 
@@ -329,36 +204,12 @@ async def list_all_provider_price_rows(
 
     Routes to model_prices or model_pricing based on settings.pricing_v2.
     """
-    from sqlalchemy import select as sa_select
-    from app.db.models import Model
-
     if settings.pricing_v2:
-        from app.db.models import ModelPricing
-        result = await db.execute(
-            sa_select(Model, ModelPricing)
-            .outerjoin(
-                ModelPricing,
-                (ModelPricing.model_id == Model.model_id) & ModelPricing.is_active.is_(True),
-            )
-            .where(Model.is_enabled.is_(True))
-            .order_by(Model.model_id, ModelPricing.provider)
-        )
-        return [
-            (m, _row_from_v2(mp) if mp is not None else None)
-            for m, mp in result.all()
-        ]
+        pairs = await queries._list_all_provider_rows_v2(db)
+        return [(m, _row_from_v2(mp) if mp is not None else None) for m, mp in pairs]
     else:
-        from app.db.models import ModelPrice
-        result = await db.execute(
-            sa_select(Model, ModelPrice)
-            .outerjoin(ModelPrice, Model.model_id == ModelPrice.model_id)
-            .where(Model.is_enabled.is_(True))
-            .order_by(Model.model_id, ModelPrice.provider)
-        )
-        return [
-            (m, _row_from_v1(mp) if mp is not None else None)
-            for m, mp in result.all()
-        ]
+        pairs = await queries._list_all_provider_rows_v1(db)
+        return [(m, _row_from_v1(mp) if mp is not None else None) for m, mp in pairs]
 
 
 async def resolve_routing_from_price(

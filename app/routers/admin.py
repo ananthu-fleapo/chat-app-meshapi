@@ -903,6 +903,8 @@ class ModelPriceIn(BaseModel):
     supports_completions_api: bool = True
     supports_responses_api: bool = False
     supports_batching: bool = False
+    is_active: bool = True
+    priority: int | None = None
 
     @model_validator(mode="after")
     def _validate_pricing_consistency(self) -> "ModelPriceIn":
@@ -975,6 +977,8 @@ class ModelPriceUpdateIn(BaseModel):
     supports_completions_api: bool | None = None
     supports_responses_api: bool | None = None
     supports_batching: bool | None = None
+    is_active: bool | None = None
+    priority: int | None = None  # pass -1 to clear (set to NULL)
 
     @model_validator(mode="after")
     def _validate_dual_units(self) -> "ModelPriceUpdateIn":
@@ -1025,6 +1029,8 @@ class ModelPriceOut(BaseModel):
     model_id: str
     provider: str
     is_default: bool
+    is_active: bool
+    priority: int | None
     prompt_usd_per_1k: str
     completion_usd_per_1k: str
     prompt_usd_per_1m: str
@@ -1056,6 +1062,8 @@ def _to_price_out(p: ModelPrice | ModelPricing) -> ModelPriceOut:
             model_id=p.model_id,
             provider=p.provider,
             is_default=p.is_default,
+            is_active=p.is_active,
+            priority=p.priority,
             prompt_usd_per_1k=str(prompt),
             completion_usd_per_1k=str(completion),
             prompt_usd_per_1m=_per_1m(prompt),
@@ -1075,6 +1083,8 @@ def _to_price_out(p: ModelPrice | ModelPricing) -> ModelPriceOut:
         model_id=p.model_id,
         provider=p.provider,
         is_default=p.is_default,
+        is_active=p.is_active,
+        priority=p.priority,
         prompt_usd_per_1k=str(p.prompt_usd_per_1k),
         completion_usd_per_1k=str(p.completion_usd_per_1k),
         prompt_usd_per_1m=_per_1m(p.prompt_usd_per_1k),
@@ -1161,6 +1171,8 @@ async def create_model_price(
             model_id=body.model_id,
             provider=body.provider,
             is_default=body.is_default,
+            is_active=body.is_active,
+            priority=body.priority,
             prompt_usd_per_1k=effective_prompt,
             completion_usd_per_1k=effective_completion,
             is_free=body.is_free,
@@ -1174,6 +1186,8 @@ async def create_model_price(
         db.add(price)
     else:
         price.is_default = body.is_default
+        price.is_active = body.is_active
+        price.priority = body.priority
         price.prompt_usd_per_1k = effective_prompt
         price.completion_usd_per_1k = effective_completion
         price.is_free = body.is_free
@@ -1206,7 +1220,8 @@ async def create_model_price(
             effective_date=_date.today(),
             is_default=body.is_default,
             is_free=body.is_free,
-            is_active=True,
+            is_active=body.is_active,
+            priority=body.priority,
             input_cost=effective_prompt,
             output_cost=effective_completion,
             supports_thinking=body.supports_thinking,
@@ -1218,6 +1233,8 @@ async def create_model_price(
     else:
         pricing_v2_row.is_default = body.is_default
         pricing_v2_row.is_free = body.is_free
+        pricing_v2_row.is_active = body.is_active
+        pricing_v2_row.priority = body.priority
         pricing_v2_row.input_cost = effective_prompt
         pricing_v2_row.output_cost = effective_completion
         pricing_v2_row.supports_thinking = body.supports_thinking
@@ -1345,6 +1362,10 @@ async def update_model_price(
     price.is_free = final_is_free_v1
     if body.is_default is not None:
         price.is_default = body.is_default
+    if body.is_active is not None:
+        price.is_active = body.is_active
+    if body.priority is not None:
+        price.priority = body.priority if body.priority != -1 else None
     if body.supports_thinking is not None:
         price.supports_thinking = body.supports_thinking
     if body.supports_completions_api is not None:
@@ -1355,12 +1376,14 @@ async def update_model_price(
         price.supports_batching = body.supports_batching
 
     # ── Update model_pricing (v2) — best-effort, skip if not found ─────────
+    # Query without is_active filter so we can re-enable a disabled row.
     result_v2 = await db.execute(
-        select(ModelPricing).where(
+        select(ModelPricing)
+        .where(
             ModelPricing.model_id == model_id,
             ModelPricing.provider == provider,
-            ModelPricing.is_active.is_(True),
         )
+        .limit(1)
     )
     pricing_v2_row = result_v2.scalar_one_or_none()
     if pricing_v2_row is not None:
@@ -1378,6 +1401,10 @@ async def update_model_price(
         pricing_v2_row.is_free = final_is_free_v2
         if body.is_default is not None:
             pricing_v2_row.is_default = body.is_default
+        if body.is_active is not None:
+            pricing_v2_row.is_active = body.is_active
+        if body.priority is not None:
+            pricing_v2_row.priority = body.priority if body.priority != -1 else None
         if body.supports_thinking is not None:
             pricing_v2_row.supports_thinking = body.supports_thinking
         if body.supports_completions_api is not None:

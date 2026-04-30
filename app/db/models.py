@@ -14,7 +14,20 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import ARRAY, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    ARRAY,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -220,9 +233,7 @@ class UsageEvent(Base):
     cached_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Provider that handled this request — matches model_prices.provider.
     # Populated from resolve_provider() in the inference router.
-    provider: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default="openrouter"
-    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False, server_default="openrouter")
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -264,9 +275,7 @@ class ProviderKey(Base):
     """
 
     __tablename__ = "provider_keys"
-    __table_args__ = (
-        Index("ix_provider_keys_owner_provider", "owner", "provider"),
-    )
+    __table_args__ = (Index("ix_provider_keys_owner_provider", "owner", "provider"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -312,9 +321,7 @@ class UserBalance(Base):
     __tablename__ = "user_balances"
 
     user_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    balance_usd: Mapped[Decimal] = mapped_column(
-        Numeric(12, 6), nullable=False, server_default="0"
-    )
+    balance_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, server_default="0")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -439,8 +446,7 @@ class Model(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<Model model_id={self.model_id!r} name={self.name!r} "
-            f"enabled={self.is_enabled}>"
+            f"<Model model_id={self.model_id!r} name={self.name!r} " f"enabled={self.is_enabled}>"
         )
 
 
@@ -473,31 +479,44 @@ class ModelPrice(Base):
 
     __tablename__ = "model_prices"
     __table_args__ = (
-        Index("ix_model_prices_one_default", "model_id", unique=True, postgresql_where="is_default = true"),
+        Index(
+            "ix_model_prices_one_default",
+            "model_id",
+            unique=True,
+            postgresql_where="is_default = true",
+        ),
     )
 
     model_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    provider: Mapped[str] = mapped_column(
-        Text, primary_key=True, server_default="openrouter"
-    )
+    provider: Mapped[str] = mapped_column(Text, primary_key=True, server_default="openrouter")
     provider_model_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     responses_provider_model_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    is_default: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default="false"
-    )
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     prompt_usd_per_1k: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False)
     completion_usd_per_1k: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False)
     is_free: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     # What the upstream provider charges us per 1 000 tokens.
     # NULL = not configured; logger cannot calculate upstream_cost_usd for this row.
-    upstream_prompt_usd_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(12, 8), nullable=True)
-    upstream_completion_usd_per_1k: Mapped[Decimal | None] = mapped_column(Numeric(12, 8), nullable=True)
+    upstream_prompt_usd_per_1k: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 8), nullable=True
+    )
+    upstream_completion_usd_per_1k: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 8), nullable=True
+    )
     # Capability flags — provider-specific (same model may behave differently per provider).
     supports_thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
-    supports_completions_api: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
-    supports_responses_api: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
-    supports_embeddings_api: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    supports_completions_api: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+    supports_responses_api: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    supports_embeddings_api: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
     supports_batching: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    priority: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -525,20 +544,33 @@ class ModelPricing(Base):
     __tablename__ = "model_pricing"
     __table_args__ = (
         UniqueConstraint("model_id", "provider", name="model_pricing_model_id_provider_unique"),
-        UniqueConstraint("model_id", "provider", "effective_date", name="model_pricing_history_unique"),
-        Index("ix_model_pricing_one_default", "model_id", unique=True, postgresql_where="is_default = TRUE"),
+        UniqueConstraint(
+            "model_id", "provider", "effective_date", name="model_pricing_history_unique"
+        ),
+        Index(
+            "ix_model_pricing_one_default",
+            "model_id",
+            unique=True,
+            postgresql_where="is_default = TRUE",
+        ),
         Index("idx_model_pricing_provider", "provider"),
         Index("idx_model_pricing_is_active", "is_active"),
         Index("idx_model_pricing_effective_date", "effective_date"),
-        CheckConstraint("input_cost IS NULL OR input_cost >= 0", name="model_pricing_input_cost_nonneg"),
-        CheckConstraint("output_cost IS NULL OR output_cost >= 0", name="model_pricing_output_cost_nonneg"),
-        CheckConstraint("request_cost IS NULL OR request_cost >= 0", name="model_pricing_request_cost_nonneg"),
         CheckConstraint(
-            "(long_context_input_cost IS NULL AND long_context_output_cost IS NULL) OR standard_context_threshold IS NOT NULL",
+            "input_cost IS NULL OR input_cost >= 0", name="model_pricing_input_cost_nonneg"
+        ),
+        CheckConstraint(
+            "output_cost IS NULL OR output_cost >= 0", name="model_pricing_output_cost_nonneg"
+        ),
+        CheckConstraint(
+            "request_cost IS NULL OR request_cost >= 0", name="model_pricing_request_cost_nonneg"
+        ),
+        CheckConstraint(
+            "(long_context_input_cost IS NULL AND long_context_output_cost IS NULL) OR standard_context_threshold IS NOT NULL",  # noqa: E501
             name="model_pricing_long_context_requires_threshold",
         ),
         CheckConstraint(
-            "(long_context_cache_read_input_cost IS NULL AND long_context_cache_write_input_cost IS NULL) OR standard_context_threshold IS NOT NULL",
+            "(long_context_cache_read_input_cost IS NULL AND long_context_cache_write_input_cost IS NULL) OR standard_context_threshold IS NOT NULL",  # noqa: E501
             name="model_pricing_long_context_cache_requires_threshold",
         ),
         CheckConstraint(
@@ -560,13 +592,23 @@ class ModelPricing(Base):
     input_modalities: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     output_modalities: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     supports_tools: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
-    supports_structured_output: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
-    supports_system_prompt: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    supports_structured_output: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    supports_system_prompt: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
     supports_thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     supports_batching: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
-    supports_completions_api: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
-    supports_responses_api: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
-    supports_embeddings: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    supports_completions_api: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+    supports_responses_api: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    supports_embeddings: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
 
     # Pricing unit & base costs
     pricing_unit: Mapped[str] = mapped_column(Text, nullable=False)  # pricing_unit_enum
@@ -586,8 +628,12 @@ class ModelPricing(Base):
     cache_write_input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
 
     # Prompt caching — long context
-    long_context_cache_read_input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
-    long_context_cache_write_input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    long_context_cache_read_input_cost: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 10), nullable=True
+    )
+    long_context_cache_write_input_cost: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 10), nullable=True
+    )
 
     # Batch pricing
     batch_input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
@@ -610,8 +656,11 @@ class ModelPricing(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     is_free: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    priority: Mapped[int | None] = mapped_column(Integer, nullable=True)
     effective_date: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
-    deprecated_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    deprecated_date: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True
+    )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -693,14 +742,13 @@ class PaymentEvent(Base):
     order_id         Provider-side order / invoice identifier.
     currency         ISO 4217 currency code (e.g. "USD", "EUR").
     amount           Charged amount in the smallest currency unit (e.g. cents).
-    amount_usd       Converted USD value in cents credited to the user's balance (post GST deduction).
+    amount_usd       Converted USD value in cents credited to the user's balance
+                     (post GST deduction).
     metadata         Arbitrary provider-specific data (e.g. cashfree_importer_details_submitted).
     """
 
     __tablename__ = "payment_events"
-    __table_args__ = (
-        Index("ix_payment_events_user_created", "user_id", "created_at"),
-    )
+    __table_args__ = (Index("ix_payment_events_user_created", "user_id", "created_at"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -735,9 +783,7 @@ class PaymentEvent(Base):
 
 class CheckoutCoupon(Base):
     __tablename__ = "checkout_coupons"
-    __table_args__ = (
-        Index("ix_checkout_coupons_active_valid_till", "is_active", "valid_till"),
-    )
+    __table_args__ = (Index("ix_checkout_coupons_active_valid_till", "is_active", "valid_till"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -761,14 +807,14 @@ class CheckoutCoupon(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
-    users: Mapped[list["CouponUser"]] = relationship(back_populates="coupon", cascade="all, delete-orphan")
+    users: Mapped[list["CouponUser"]] = relationship(
+        back_populates="coupon", cascade="all, delete-orphan"
+    )
 
 
 class CouponUser(Base):
     __tablename__ = "coupon_users"
-    __table_args__ = (
-        UniqueConstraint("coupon_id", "user_id", name="uq_coupon_users_coupon_user"),
-    )
+    __table_args__ = (UniqueConstraint("coupon_id", "user_id", name="uq_coupon_users_coupon_user"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -813,7 +859,9 @@ class GstinRecord(Base):
     )
     payment_event_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("payment_events.id", ondelete="CASCADE", name="gstin_records_payment_event_id_fkey"),
+        ForeignKey(
+            "payment_events.id", ondelete="CASCADE", name="gstin_records_payment_event_id_fkey"
+        ),
         nullable=False,
         index=True,
     )
@@ -829,7 +877,7 @@ class GstinRecord(Base):
         return (
             f"<GstinRecord id={self.id} payment_event_id={self.payment_event_id} "
             f"gstin={self.gstin!r} gst_amount={self.gst_amount}>"
-        )    
+        )
 
 
 class User(Base):
@@ -1015,7 +1063,9 @@ class BatchFile(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<BatchFile file_id={self.file_id!r} model={self.model!r} provider={self.provider!r}>"
+        return (
+            f"<BatchFile file_id={self.file_id!r} model={self.model!r} provider={self.provider!r}>"
+        )
 
 
 class ModelRequest(Base):
@@ -1046,4 +1096,4 @@ class ModelRequest(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<ModelRequest id={self.id} owner={self.owner!r} model_name={self.model_name!r} status={self.status!r}>"
+        return f"<ModelRequest id={self.id} owner={self.owner!r} model_name={self.model_name!r} status={self.status!r}>"  # noqa: E501
