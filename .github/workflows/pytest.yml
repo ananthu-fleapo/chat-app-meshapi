@@ -1,8 +1,8 @@
-name: run-tests
+name: pytest
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
   workflow_dispatch:
 
