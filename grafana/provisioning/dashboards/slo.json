@@ -88,13 +88,13 @@
           "unit": "none",
           "displayName": "RSS (MB)",
           "min": 0,
-          "max": 512,
+          "max": 2048,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               { "color": "green", "value": null },
-              { "color": "yellow", "value": 300 },
-              { "color": "red", "value": 410 }
+              { "color": "yellow", "value": 1400 },
+              { "color": "red", "value": 1700 }
             ]
           }
         }
@@ -124,8 +124,8 @@
             "mode": "absolute",
             "steps": [
               { "color": "green", "value": null },
-              { "color": "yellow", "value": 314572800 },
-              { "color": "red", "value": 429916160 }
+              { "color": "yellow", "value": 1468006400 },
+              { "color": "red", "value": 1782579200 }
             ]
           },
           "custom": {

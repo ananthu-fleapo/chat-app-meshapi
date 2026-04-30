@@ -270,7 +270,7 @@ groups:
                     type: last
 
       - uid: routerv-ram-high
-        title: "RouterV — RAM Usage > 80% (total machine)"
+        title: "RouterV — RAM Usage > 80% (Cloud Run 2 GB)"
         condition: threshold
         for: 5m
         noDataState: OK
@@ -278,7 +278,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "RAM usage is {{ $values.B.Value | printf \"%.1f\" }}% ({{ $values.rss.Value | printf \"%.0f\" }} MB of {{ $values.total.Value | printf \"%.0f\" }} MB)"
+          summary: "RAM usage is {{ $values.B.Value | printf \"%.1f\" }}% ({{ $values.rss.Value | printf \"%.0f\" }} MB of 2048 MB)"
           description: ""
           __dashboardUid__: routerv-slo
           __panelId__: "4"
@@ -292,20 +292,11 @@ groups:
               expr: process_resident_memory_bytes{job="routersvc"} / 1024 / 1024
               instant: false
               range: true
-          - refId: total
-            datasourceUid: prometheus
-            relativeTimeRange:
-              from: 600
-              to: 0
-            model:
-              expr: process_total_memory_bytes{job="routersvc"} / 1024 / 1024
-              instant: false
-              range: true
           - refId: usage
             datasourceUid: __expr__
             model:
               type: math
-              expression: "$rss / $total * 100"
+              expression: "$rss / 2048 * 100"
           - refId: B
             datasourceUid: __expr__
             model:
