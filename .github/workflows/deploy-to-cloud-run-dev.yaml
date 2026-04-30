@@ -3,6 +3,9 @@ name: deploy-to-cloud-run-dev
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - grafana/**
+      - .github/**
   workflow_dispatch:
 
 concurrency:

@@ -2,9 +2,10 @@ name: deploy-grafana
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
     paths:
       - grafana/**
+      - .github/**
   workflow_dispatch:
 
 concurrency:
