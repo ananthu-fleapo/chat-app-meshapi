@@ -39,7 +39,7 @@ dev = ["pytest>=8.2", "pytest-asyncio>=0.23", "httpx", "ruff>=0.3.0", "pyright>=
 gcp = ["google-cloud-secret-manager>=2.20.0", "google-cloud-storage>=3.10.1"]
 
 # Install for Vertex AI direct routing (google.oauth2 service-account token refresh).
-vertex = ["google-auth>=2.29.0"]
+vertex = ["google-auth>=2.29.0", "requests>=2.32.0"]
 
 # Install for AWS Bedrock direct routing (async boto3 wrapper).
 bedrock = ["aiobotocore>=2.13.0"]

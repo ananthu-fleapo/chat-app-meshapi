@@ -65,6 +65,7 @@ class PriceRow:
     supports_responses_api: bool
     supports_embeddings_api: bool
     supports_batching: bool
+    image_output_cost: Decimal | None = None
 
 
 # ── V1 helpers (read model_prices) ────────────────────────────────────────────
@@ -122,6 +123,7 @@ def _row_from_v2(mp) -> PriceRow:
         supports_responses_api=mp.supports_responses_api,
         supports_embeddings_api=mp.supports_embeddings,
         supports_batching=mp.supports_batching,
+        image_output_cost=mp.image_output_cost,
     )
 
 

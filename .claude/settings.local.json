@@ -58,10 +58,24 @@
       "Bash(alembic upgrade:*)",
       "Bash(grep *)",
       "Bash(python -c \":*)",
-      "Bash(python -m pytest *",
       "Bash(ruff check *)",
       "Bash(git checkout *)",
-      "Bash(pytest *)"
+      "Bash(pytest *)",
+      "Bash(python -m ruff check app/routers/coupons.py app/payments/stripe_client.py app/payments/cashfree_coupons.py app/config.py app/db/models.py)",
+      "Bash(/c/Users/anant/.vscode/extensions/charliermarsh.ruff-2025.0.0-win32-x64/bundled/libs/bin/ruff.exe check *)",
+      "Bash(git -C /c/Users/anant/OneDrive/Documents/work/meshapi/routersvc show HEAD:backend/app/routers/coupons.py)",
+      "Bash(git -C /c/Users/anant/OneDrive/Documents/work/meshapi/routersvc show aec3d33:app/routers/coupons.py)",
+      "Bash(python -m ruff check app/payments/cashfree_coupons.py app/routers/coupons.py app/routers/payments.py)",
+      "Bash(.venv/Scripts/ruff check *)",
+      "Bash(python -m pytest tests/test_coupons.py -v)",
+      "Bash(.venv/Scripts/pytest tests/test_coupons.py -v)",
+      "PowerShell(Get-Command pytest -ErrorAction SilentlyContinue)",
+      "PowerShell(python --version)",
+      "PowerShell(pip show pytest 2>&1)",
+      "PowerShell($py312 = \"C:\\\\Users\\\\anant\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\Scripts\\\\pip.exe\"; if \\(Test-Path $py312\\) { & $py312 show pytest 2>&1 | Select-Object -First 2 })",
+      "Read(//c/Users/anant/OneDrive/Documents/work/meshapi/routersvc-admin-client/**)",
+      "Bash(pnpm run *)",
+      "Bash(python -m ruff check app/routers/admin_test_completions.py)"
     ]
   }
 }

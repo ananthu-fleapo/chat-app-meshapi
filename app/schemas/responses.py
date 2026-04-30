@@ -14,12 +14,31 @@ fills them in from key.default_params using the same layering pattern as
 chat/completions.
 """
 
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.chat import Tool
 
 # Fields RouterV consumes internally; stripped before forwarding upstream.
 RESPONSES_ONLY_FIELDS: set[str] = {"template", "variables", "session_id"}
+
+# Known OpenAI built-in tool types that don't follow the function tool schema.
+_BuiltinToolType = Literal[
+    "image_generation",
+    "web_search_preview",
+    "web_search_preview_2025_03_11",
+    "file_search",
+    "computer_use_preview",
+    "code_interpreter",
+]
+
+
+class BuiltinTool(BaseModel):
+    """Represents an OpenAI built-in tool (non-function), e.g. {"type": "image_generation"}."""
+
+    model_config = ConfigDict(extra="allow")
+    type: _BuiltinToolType
 
 
 class ResponsesRequest(BaseModel):
@@ -45,7 +64,8 @@ class ResponsesRequest(BaseModel):
     # ── Responses API-specific fields ─────────────────────────────────────────
     # Enables chain-of-thought reasoning; effort controls depth vs. token cost.
     reasoning: dict | None = None  # {"effort": "minimal|low|medium|high"}
-    tools: list[Tool] | None = None  # function tool definitions (OpenAI format)
+    # function tools or built-in tools (e.g. {"type": "image_generation"})
+    tools: list[Tool | BuiltinTool] | None = None
     tool_choice: str | dict | None = None  # "auto" | "none" | specific tool
     response_format: dict | None = None  # {"type": "json_object"} or json_schema
 

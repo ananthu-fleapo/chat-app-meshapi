@@ -16,7 +16,22 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 # Fields that RouterV consumes internally and must never be forwarded upstream.
-ROUTERV_ONLY_FIELDS: set[str] = {"template", "variables", "session_id"}
+ROUTERV_ONLY_FIELDS: set[str] = {
+    "template",
+    "variables",
+    "session_id",
+    "modality",
+    "image",
+    "async_mode",
+}
+
+
+class ImageOptions(BaseModel):
+    n: int = Field(default=1, ge=1, le=10)
+    size: str = "1024x1024"
+    quality: str = "high"
+    response_format: Literal["url", "b64_json"] = "url"
+    """url (may expire) or b64_json (safer for persistence). Vertex always returns b64_json."""
 
 
 # ── Sub-models ────────────────────────────────────────────────────────────────
@@ -94,6 +109,14 @@ class ChatCompletionRequest(BaseModel):
     # Enforced to 256 chars here so oversized values 422 at our layer, not 400
     # from OpenRouter. Our code sets a default via setdefault if not provided.
     user: str | None = Field(default=None, max_length=256)
+
+    # ── Image generation ──────────────────────────────────────────────────────
+    modality: Literal["text", "image"] | None = None
+    """When 'image', routes to the provider image generation API."""
+    image: ImageOptions | None = None
+    """Image generation options (size, quality, n, response_format)."""
+    async_mode: bool = False
+    """Return {job_id, status: 'pending'} immediately instead of waiting for the result."""
 
 
 # ── Response ──────────────────────────────────────────────────────────────────

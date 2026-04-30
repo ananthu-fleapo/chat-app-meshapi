@@ -12,9 +12,10 @@ Phase additions per phase:
 import asyncio
 import json
 import time
+import uuid
 
 import structlog
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,15 +28,22 @@ from app.auto_router.service import (
     _is_auto,
     resolve_auto_model,
 )
-from app.cache.rate_limiter import check_free_model_rate_limits, check_rate_limits, check_tpm_limit, increment_tpm_counter
+from app.cache.rate_limiter import (
+    check_free_model_rate_limits,
+    check_rate_limits,
+    check_tpm_limit,
+    increment_tpm_counter,
+)
 from app.config import settings
 from app.db.models import ApiKey
 from app.db.session import get_db_session
 from app.exceptions import ModelCapabilityError, UnprocessableEntityError
 from app.pricing.resolver import get_price_row
+from app.providers.image_handler import _SUPPORTED_PROVIDERS, generate_images
 from app.providers.key_resolver import resolve_upstream_key
 from app.providers.registry import get_adapter, resolve_routing
-from app.schemas.chat import ChatCompletionRequest, ContentPart, Message
+from app.providers.response_formatter import format_image_as_chat_completion
+from app.schemas.chat import ChatCompletionRequest, ContentPart, ImageOptions, Message
 from app.templates.renderer import render_template
 from app.templates.resolver import resolve_template
 from app.usage.balance import check_balance
@@ -437,6 +445,80 @@ async def chat_completions(
 
     # ── Capability check: model+provider must support chat/completions ────────
     _price_row = await get_price_row(body.model, provider, db)
+
+    # ── Image generation path ─────────────────────────────────────────────────
+    if body.modality == "image":
+        if provider not in _SUPPORTED_PROVIDERS:
+            raise HTTPException(
+                status_code=501,
+                detail=f"Provider '{provider}' does not support image generation",
+            )
+
+        # Async job mode — return immediately, no upstream call yet
+        if body.async_mode:
+            job_id = f"imgjob-{uuid.uuid4().hex[:12]}"
+            return JSONResponse({"job_id": job_id, "status": "pending"})
+
+        # Extract and aggregate all user turn text as the prompt
+        prompt_parts: list[str] = []
+        for m in body.messages:
+            if m.role != "user":
+                continue
+            if isinstance(m.content, str):
+                prompt_parts.append(m.content)
+            elif isinstance(m.content, list):
+                prompt_parts.append(
+                    " ".join(p.text for p in m.content if p.type == "text" and p.text)
+                )
+        prompt = "\n".join(p for p in prompt_parts if p.strip())
+        if not prompt:
+            raise HTTPException(status_code=422, detail="No text content found in user messages")
+
+        upstream_key = await resolve_upstream_key(owner=key.owner, provider=provider, db=db)
+        opts = body.image or ImageOptions()
+        start = time.monotonic()
+
+        items = await generate_images(
+            prompt,
+            provider=provider,
+            provider_model_id=provider_model_id or (body.model or "").split("/")[-1],
+            opts=opts,
+            api_key=upstream_key,
+        )
+        latency_ms = int((time.monotonic() - start) * 1000)
+
+        # Usage log — image cost is per-image, not per-token
+        image_cost_usd = None
+        if _price_row is not None and _price_row.image_output_cost is not None:
+            from decimal import Decimal
+
+            image_cost_usd = float(_price_row.image_output_cost * Decimal(opts.n))
+
+        fire_usage_log(
+            owner=key.owner,
+            key_id=str(key.id),
+            request_id=request_id,
+            model=body.model,
+            provider=provider,
+            template_id=str(template.id) if template else None,
+            stream=False,
+            prompt_tokens=None,
+            completion_tokens=None,
+            cached_tokens=None,
+            upstream_cost=image_cost_usd,
+            latency_ms=latency_ms,
+            status="success",
+            error_code=None,
+        )
+
+        result = format_image_as_chat_completion(
+            items, model_id=body.model or provider_model_id or ""
+        )
+        log.info("image_generation_complete", count=len(items), latency_ms=latency_ms)
+        return JSONResponse(result)
+
+    # Skip completions_api guard for image modality (handled above);
+    # enforce it for all other modalities.
     if _price_row is not None and not _price_row.supports_completions_api:
         raise ModelCapabilityError(body.model, "chat/completions")
 
