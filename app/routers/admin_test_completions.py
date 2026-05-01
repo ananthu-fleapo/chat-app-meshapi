@@ -43,6 +43,8 @@ class TestModelItem(BaseModel):
     input_token_cost_per_1k: float | None = None
     output_token_cost_per_1k: float | None = None
 
+    model_type: str | None = None
+
     # ── V2 identity / modality ────────────────────────────────────────────────
     pricing_unit: str = "per_1k_tokens"
     """per_1k_tokens | per_1m_tokens | per_image | per_second | per_minute
@@ -93,6 +95,8 @@ class TestModelItem(BaseModel):
     # ── V2 modality-specific costs ────────────────────────────────────────────
     image_input_cost: float | None = None
     image_output_cost: float | None = None
+    input_cost: float | None = None
+    output_cost: float | None = None
     image_output_size: str | None = None
     """e.g. '1024x1024'"""
     audio_input_cost: float | None = None
@@ -133,7 +137,7 @@ class TestModelsRequest(BaseModel):
     prompt: str = "Reply with just the word OK and nothing else."
     image_prompt: str = "A red circle on a white background."
     """Prompt used when a model's test_modality is 'image'."""
-    timeout: float = 30.0
+    timeout: float = 500.0
 
 
 def _derive_model_name(model_id: str) -> str:
@@ -202,7 +206,7 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                         ),
                         timeout=body.timeout,
                     )
-                    if items and (items[0].url or items[0].b64_json):
+                    if items.items and (items.items[0].url or items.items[0].b64_json):
                         status = "pass"
                     else:
                         status = "fail"
@@ -257,7 +261,7 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
             failed += 1
 
         # ── DB writes (on pass, or skip_test bypasses is_dry_run) ────────────
-        if test_passed and (not body.is_dry_run or item.skip_test):
+        if test_passed and (not body.is_dry_run):
             name = _derive_model_name(model_id)
             # provider_model_id is NOT NULL in both pricing tables — fall back to model_id
             effective_provider_model_id = provider_model_id or model_id
@@ -279,6 +283,9 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                             brand=model_id.split("/")[0],
                             description=None,
                             is_enabled=False,
+                            model_type=item.model_type,
+                            input_modalities=item.input_modalities,
+                            output_modalities=item.output_modalities,
                         )
                         .on_conflict_do_nothing(index_elements=["model_id"])
                     )
@@ -322,8 +329,8 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                             # Pricing unit & base costs
                             pricing_unit=item.pricing_unit,
                             currency=item.currency,
-                            input_cost=prompt_usd_per_1k,
-                            output_cost=completion_usd_per_1k,
+                            input_cost=item.input_cost,
+                            output_cost=item.output_cost,
                             request_cost=item.request_cost,
                             # Context window & long-context tiers
                             context_window=item.context_window,
@@ -363,12 +370,20 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                         .on_conflict_do_nothing(constraint="model_pricing_model_id_provider_unique")
                     )
 
-                    # 3. Enable the model
+                    # 3. Enable the model + refresh display fields
                     await db.execute(
-                        update(Model).where(Model.model_id == model_id).values(is_enabled=True)
+                        update(Model)
+                        .where(Model.model_id == model_id)
+                        .values(
+                            is_enabled=True,
+                            name=name,
+                            model_type=item.model_type,
+                            input_modalities=item.input_modalities,
+                            output_modalities=item.output_modalities,
+                        )
                     )
 
-                    # 4. Clear any existing v1 default, then set this provider as default
+                    # 4. Clear any existing v1 default, then refresh + set this provider as default
                     await db.execute(
                         update(ModelPrice)
                         .where(ModelPrice.model_id == model_id)
@@ -382,12 +397,13 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                         )
                         .values(
                             is_default=True,
+                            provider_model_id=effective_provider_model_id,
                             prompt_usd_per_1k=effective_prompt_cost,
                             completion_usd_per_1k=effective_completion_cost,
                         )
                     )
 
-                    # 4b. Clear any existing v2 default, then set this provider as default
+                    # 4b. Clear any existing v2 default, then refresh + set this provider as default
                     await db.execute(
                         update(ModelPricing)
                         .where(ModelPricing.model_id == model_id)
@@ -402,8 +418,54 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                         )
                         .values(
                             is_default=True,
-                            input_cost=prompt_usd_per_1k,
-                            output_cost=completion_usd_per_1k,
+                            provider_model_id=effective_provider_model_id,
+                            model_name=name,
+                            # Modality & capabilities
+                            modality=item.modality,
+                            input_modalities=item.input_modalities,
+                            output_modalities=item.output_modalities,
+                            supports_tools=item.supports_tools,
+                            supports_structured_output=item.supports_structured_output,
+                            supports_system_prompt=item.supports_system_prompt,
+                            supports_thinking=item.supports_thinking,
+                            supports_batching=item.supports_batching,
+                            supports_completions_api=item.supports_completions_api,
+                            supports_responses_api=item.supports_responses_api,
+                            supports_embeddings=item.supports_embeddings,
+                            # Pricing unit & base costs
+                            pricing_unit=item.pricing_unit,
+                            currency=item.currency,
+                            input_cost=item.input_cost,
+                            output_cost=item.output_cost,
+                            request_cost=item.request_cost,
+                            # Context window & long-context tiers
+                            context_window=item.context_window,
+                            standard_context_threshold=item.standard_context_threshold,
+                            long_context_input_cost=item.long_context_input_cost,
+                            long_context_output_cost=item.long_context_output_cost,
+                            # Prompt caching — standard context
+                            cache_read_input_cost=item.cache_read_input_cost,
+                            cache_write_input_cost=item.cache_write_input_cost,
+                            # Prompt caching — long context
+                            long_context_cache_read_input_cost=item.long_context_cache_read_input_cost,
+                            long_context_cache_write_input_cost=item.long_context_cache_write_input_cost,
+                            # Batch pricing
+                            batch_input_cost=item.batch_input_cost,
+                            batch_output_cost=item.batch_output_cost,
+                            # Fine-tuning
+                            training_cost=item.training_cost,
+                            fine_tuned_input_cost=item.fine_tuned_input_cost,
+                            fine_tuned_output_cost=item.fine_tuned_output_cost,
+                            # Modality-specific costs
+                            image_input_cost=item.image_input_cost,
+                            image_output_cost=item.image_output_cost,
+                            image_output_size=item.image_output_size,
+                            audio_input_cost=item.audio_input_cost,
+                            audio_output_cost=item.audio_output_cost,
+                            transcription_cost=item.transcription_cost,
+                            # Lifecycle
+                            notes=item.notes,
+                            source_url=item.source_url,
                         )
                     )
                     is_default = True
