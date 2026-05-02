@@ -141,6 +141,40 @@ def _extract_completions_content(messages: list[Message]) -> str:
     return " ".join(parts)[:2000]
 
 
+def _compute_audio_cost(usage: dict, price_row) -> float | None:
+    """
+    Calculate the total cost for a response that may contain audio tokens.
+
+    Text tokens and audio tokens are billed at separate rates.  Text token
+    count is derived by subtracting audio tokens from the totals reported by
+    the provider.  Audio costs use the raw per-unit columns (audio_input_cost /
+    audio_output_cost) with the same divisor as the image handler.
+    """
+    if price_row is None or not usage:
+        return None
+
+    pricing_unit = price_row.pricing_unit
+    if pricing_unit not in ("per_1k_tokens", "per_1m_tokens"):
+        return None
+
+    divisor = Decimal(1_000_000) if pricing_unit == "per_1m_tokens" else Decimal(1_000)
+
+    # OpenAI nests audio token counts inside *_tokens_details sub-objects.
+    # Top-level input_audio_tokens / output_audio_tokens are not returned.
+    audio_in = Decimal((usage.get("prompt_tokens_details") or {}).get("audio_tokens") or 0)
+    audio_out = Decimal((usage.get("completion_tokens_details") or {}).get("audio_tokens") or 0)
+    text_in = Decimal(max(0, (usage.get("prompt_tokens") or 0) - int(audio_in)))
+    text_out = Decimal(max(0, (usage.get("completion_tokens") or 0) - int(audio_out)))
+
+    cost = (
+        (price_row.prompt_usd_per_1k or Decimal(0)) * text_in / divisor
+        + (price_row.completion_usd_per_1k or Decimal(0)) * text_out / divisor
+        + (price_row.audio_input_cost or Decimal(0)) * audio_in / divisor
+        + (price_row.audio_output_cost or Decimal(0)) * audio_out / divisor
+    )
+    return float(cost.quantize(Decimal("0.0000000001"), rounding=ROUND_HALF_UP))
+
+
 @router.post(
     "/v1/chat/completions",
     responses={
@@ -562,6 +596,25 @@ async def chat_completions(
         log.info("image_generation_complete", count=len(gen.items), latency_ms=latency_ms)
         return JSONResponse(result)
 
+    # ── Audio capability guard ────────────────────────────────────────────────
+    _has_audio_input = any(
+        isinstance(m.content, list) and any(p.type == "input_audio" for p in m.content)
+        for m in body.messages
+    )
+    _wants_audio_output = body.modalities is not None and "audio" in body.modalities
+    if (_has_audio_input or _wants_audio_output) and _price_row is not None:
+        if "audio" not in (_price_row.modality or []):
+            raise ModelCapabilityError(body.model, "audio")
+
+    # Streaming audio output only supports pcm16 — WAV/MP3/etc. require a
+    # file header that cannot be prepended to an already-started SSE stream.
+    if body.stream and _wants_audio_output and body.audio is not None:
+        if body.audio.format != "pcm16":
+            raise UnprocessableEntityError(
+                f"Audio format '{body.audio.format}' is not supported for streaming. "
+                "Use format='pcm16' when stream=true."
+            )
+
     # Skip completions_api guard for image modality (handled above);
     # enforce it for all other modalities.
     if _price_row is not None and not _price_row.supports_completions_api:
@@ -618,7 +671,15 @@ async def chat_completions(
                 status = "error"
                 error_code_val = getattr(exc, "error_code", "upstream_error")
                 msg = getattr(exc, "message", "An upstream error occurred.")
-                log.error("stream_error", error_code=error_code_val, error=str(exc))
+                log.exception(
+                    "stream_error",
+                    error_code=error_code_val,
+                    error_type=type(exc).__name__,
+                    error_repr=repr(exc),
+                    error_message=msg,
+                    upstream_status=getattr(exc, "status_code", None),
+                    upstream_body=getattr(exc, "body", None),
+                )
                 # Headers (200 + text/event-stream) already sent — can't change
                 # status code. Yield an SSE error frame so clients can handle it.
                 err_payload = json.dumps({"error": {"code": error_code_val, "message": msg}})
@@ -633,6 +694,11 @@ async def chat_completions(
                     status=status,
                     prompt_tokens=(usage_data.get("prompt_tokens") if usage_data else None),
                     completion_tokens=(usage_data.get("completion_tokens") if usage_data else None),
+                )
+                _stream_cost = (
+                    _compute_audio_cost(usage_data, _price_row)
+                    if usage_data and (_has_audio_input or _wants_audio_output)
+                    else (usage_data.get("cost") if usage_data else None)
                 )
                 fire_usage_log(
                     owner=key.owner,
@@ -649,7 +715,7 @@ async def chat_completions(
                         if usage_data
                         else None
                     ),
-                    upstream_cost=usage_data.get("cost") if usage_data else None,
+                    upstream_cost=_stream_cost,
                     latency_ms=latency_ms,
                     status=status,
                     error_code=error_code_val,
@@ -691,6 +757,11 @@ async def chat_completions(
         provider_latency_ms = int((time.monotonic() - provider_start) * 1000)
         latency_ms = int((time.monotonic() - start) * 1000)
         usage = (response_body or {}).get("usage") or {}
+        _nonstream_cost = (
+            _compute_audio_cost(usage, _price_row)
+            if usage and (_has_audio_input or _wants_audio_output)
+            else usage.get("cost")
+        )
         fire_usage_log(
             owner=key.owner,
             key_id=str(key.id),
@@ -702,7 +773,7 @@ async def chat_completions(
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
             cached_tokens=(usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
-            upstream_cost=usage.get("cost"),
+            upstream_cost=_nonstream_cost,
             latency_ms=latency_ms,
             status=status,
             error_code=error_code_val,

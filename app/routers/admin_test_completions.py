@@ -218,11 +218,19 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                     status = "fail"
                     error = str(exc)[:200]
         else:
+            from app.schemas.chat import AudioOutputOptions
+
+            _is_audio_model = "audio" in (item.modality or [])
             req = ChatCompletionRequest(
                 model=model_id,
                 messages=[Message(role="user", content=body.prompt)],
                 max_tokens=32,
                 stream=False,
+                # Audio models require audio in either input or output modality.
+                # Request text+audio output so the probe works without needing a
+                # real audio file as input.
+                modalities=["text", "audio"] if _is_audio_model else None,
+                audio=AudioOutputOptions(voice="alloy", format="wav") if _is_audio_model else None,
             )
             try:
                 resp = await asyncio.wait_for(
@@ -234,12 +242,14 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                     ),
                     timeout=body.timeout,
                 )
-                # Verify the model responded — check content OR finish_reason
-                # (reasoning models like gpt-5 may return null content)
+                # Verify the model responded — check content, audio transcript,
+                # OR finish_reason (audio responses may have null text content).
                 choice = (resp.get("choices") or [{}])[0]
-                text = (choice.get("message", {}).get("content") or "").strip()
+                msg = choice.get("message", {}) or {}
+                text = (msg.get("content") or "").strip()
+                audio_transcript = ((msg.get("audio") or {}).get("transcript") or "").strip()
                 finish_reason = choice.get("finish_reason") or ""
-                if text or finish_reason:
+                if text or audio_transcript or finish_reason:
                     status = "pass"
                 else:
                     status = "fail"
@@ -263,6 +273,12 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
         # ── DB writes (on pass, or skip_test bypasses is_dry_run) ────────────
         if test_passed and (not body.is_dry_run):
             name = _derive_model_name(model_id)
+            # model_type is NOT NULL — derive from modality when caller omits it.
+            # "audio" / "image" / "embedding" in modality → use that as type; else "text".
+            effective_model_type = item.model_type or next(
+                (m for m in (item.modality or []) if m in ("audio", "image", "embedding", "video")),
+                "text",
+            )
             # provider_model_id is NOT NULL in both pricing tables — fall back to model_id
             effective_provider_model_id = provider_model_id or model_id
             # prompt/completion costs are NOT NULL in model_prices — image models legitimately
@@ -283,7 +299,7 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                             brand=model_id.split("/")[0],
                             description=None,
                             is_enabled=False,
-                            model_type=item.model_type,
+                            model_type=effective_model_type,
                             input_modalities=item.input_modalities,
                             output_modalities=item.output_modalities,
                         )
@@ -377,7 +393,7 @@ async def _test_models_stream(body: TestModelsRequest) -> AsyncGenerator[bytes, 
                         .values(
                             is_enabled=True,
                             name=name,
-                            model_type=item.model_type,
+                            model_type=effective_model_type,
                             input_modalities=item.input_modalities,
                             output_modalities=item.output_modalities,
                         )

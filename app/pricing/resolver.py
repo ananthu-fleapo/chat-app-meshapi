@@ -69,6 +69,8 @@ class PriceRow:
     request_cost: Decimal | None = None
     pricing_unit: str | None = None
     modality: list[str] | None = None
+    audio_input_cost: Decimal | None = None
+    audio_output_cost: Decimal | None = None
 
 
 # ── V1 helpers (read model_prices) ────────────────────────────────────────────
@@ -130,6 +132,8 @@ def _row_from_v2(mp) -> PriceRow:
         request_cost=mp.request_cost,
         pricing_unit=mp.pricing_unit,
         modality=mp.modality,
+        audio_input_cost=mp.audio_input_cost,
+        audio_output_cost=mp.audio_output_cost,
     )
 
 

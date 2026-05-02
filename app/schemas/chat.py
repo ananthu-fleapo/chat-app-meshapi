@@ -25,6 +25,18 @@ ROUTERV_ONLY_FIELDS: set[str] = {
     "async_mode",
 }
 
+# ── Audio sub-models ──────────────────────────────────────────────────────────
+
+
+class InputAudio(BaseModel):
+    data: str  # base64-encoded audio bytes
+    format: Literal["wav", "mp3", "aiff", "aac", "ogg", "flac", "m4a", "pcm16", "pcm24"]
+
+
+class AudioOutputOptions(BaseModel):
+    voice: str = "alloy"  # alloy, echo, fable, onyx, nova, shimmer
+    format: Literal["wav", "mp3", "flac", "opus", "pcm16"] = "wav"
+
 
 class ImageOptions(BaseModel):
     n: int = Field(default=1, ge=1, le=10)
@@ -43,9 +55,10 @@ class ImageUrl(BaseModel):
 
 
 class ContentPart(BaseModel):
-    type: Literal["text", "image_url"]
+    type: Literal["text", "image_url", "input_audio"]
     text: str | None = None
     image_url: ImageUrl | None = None
+    input_audio: InputAudio | None = None
 
 
 class ToolFunction(BaseModel):
@@ -117,6 +130,12 @@ class ChatCompletionRequest(BaseModel):
     """Image generation options (size, quality, n, response_format)."""
     async_mode: bool = False
     """Return {job_id, status: 'pending'} immediately instead of waiting for the result."""
+
+    # ── Audio output (forwarded to provider) ─────────────────────────────────
+    modalities: list[Literal["text", "audio"]] | None = None
+    """Request audio output alongside text. Forwarded to the upstream provider."""
+    audio: AudioOutputOptions | None = None
+    """Audio output config (voice + format). Forwarded to the upstream provider."""
 
 
 # ── Response ──────────────────────────────────────────────────────────────────
