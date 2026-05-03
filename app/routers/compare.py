@@ -384,7 +384,7 @@ def _build_streaming_response(
                 "model_chunk",
                 {
                     "model": result.model,
-                    "content": result.content,
+                    "delta": result.content,
                     "latency_ms": result.latency_ms,
                     "error": result.error,
                     "error_code": result.error_code,

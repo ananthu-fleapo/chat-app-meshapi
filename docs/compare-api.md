@@ -161,7 +161,7 @@ Fan-out is non-streaming (full response collected per model), then the compariso
 | Event | When | Payload |
 |---|---|---|
 | `meta` | Immediately after auth | `{"comparison_id", "models", "comparison_model", "skip_comparison": false}` |
-| `model_chunk` | As each fan-out model finishes (live, out of order) | `{"model", "content", "latency_ms", "error", "error_code", "usage"}` |
+| `model_chunk` | As each fan-out model finishes (live, out of order) | `{"model", "delta", "latency_ms", "error", "error_code", "usage"}` |
 | `model_done` | All fan-out results collected | `{"results": [...]}` (full results array) |
 | `comparison_chunk` | During comparison LLM streaming | `{"delta": "<token>", "finish_reason": null \| "stop"}` |
 | `done` | All complete | `{"comparison_id", "total_latency_ms", "partial", "comparison_model", "comparison_fallback_used"}` |
@@ -186,10 +186,10 @@ event: meta
 data: {"comparison_id": "cmp_abc...", "models": ["gpt-4o", "claude-3-5-sonnet"], "comparison_model": "gpt-4o-mini", "skip_comparison": false}
 
 event: model_chunk
-data: {"model": "gpt-4o", "content": "...", "latency_ms": 1800, "error": null, "usage": {...}}
+data: {"model": "gpt-4o", "delta": "...", "latency_ms": 1800, "error": null, "usage": {...}}
 
 event: model_chunk
-data: {"model": "claude-3-5-sonnet", "content": "...", "latency_ms": 2100, "error": null, "usage": {...}}
+data: {"model": "claude-3-5-sonnet", "delta": "...", "latency_ms": 2100, "error": null, "usage": {...}}
 
 event: model_done
 data: {"results": [...]}
