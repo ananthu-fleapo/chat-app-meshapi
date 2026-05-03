@@ -31,6 +31,7 @@ from app.routers import (
     auth,
     balance,
     batch,
+    compare,
     coupons,
     embeddings,
     error_logs,
@@ -286,6 +287,7 @@ def create_app() -> FastAPI:
     # ── Routers ───────────────────────────────────────────────────────────────
     app.include_router(auth.router)
     app.include_router(inference.router)
+    app.include_router(compare.router)
     app.include_router(batch.router)
     app.include_router(responses.router)
     app.include_router(embeddings.router)

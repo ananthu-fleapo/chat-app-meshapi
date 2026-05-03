@@ -44,6 +44,7 @@ from app.providers.image_handler import _SUPPORTED_PROVIDERS, generate_images
 from app.providers.key_resolver import resolve_upstream_key
 from app.providers.registry import get_adapter, resolve_routing
 from app.providers.response_formatter import format_image_as_chat_completion
+from app.providers.sse_utils import scan_sse_buf
 from app.schemas.chat import ChatCompletionRequest, ContentPart, ImageOptions, Message
 from app.templates.renderer import render_template
 from app.templates.resolver import resolve_template
@@ -91,30 +92,7 @@ def _augment_usage_chunk(chunk: bytes, classifier_usages: list) -> bytes:
 
 
 def _scan_sse_buf(buf: bytes, current_usage: dict | None) -> tuple[dict | None, bytes]:
-    """
-    Process all complete SSE frames (\n\n-delimited) in buf.
-
-    Returns (updated_usage, remaining_buf).  Regular streaming chunks carry
-    "usage": null which is falsy, so only a real usage object updates the
-    return value.  The caller should not filter on choices — some providers
-    (e.g. Claude via OpenRouter) bundle usage with a non-empty choices array
-    in the final content chunk.
-    """
-    while b"\n\n" in buf:
-        frame, buf = buf.split(b"\n\n", 1)
-        for line in frame.split(b"\n"):
-            if not line.startswith(b"data: "):
-                continue
-            payload = line[6:].strip()
-            if payload == b"[DONE]":
-                continue
-            try:
-                obj = json.loads(payload)
-                if obj.get("usage"):
-                    current_usage = obj["usage"]
-            except (json.JSONDecodeError, KeyError):
-                pass
-    return current_usage, buf
+    return scan_sse_buf(buf, current_usage)
 
 
 def _extract_completions_content(messages: list[Message]) -> str:

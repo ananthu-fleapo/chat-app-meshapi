@@ -75,7 +75,14 @@
       "PowerShell($py312 = \"C:\\\\Users\\\\anant\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\Scripts\\\\pip.exe\"; if \\(Test-Path $py312\\) { & $py312 show pytest 2>&1 | Select-Object -First 2 })",
       "Read(//c/Users/anant/OneDrive/Documents/work/meshapi/routersvc-admin-client/**)",
       "Bash(pnpm run *)",
-      "Bash(python -m ruff check app/routers/admin_test_completions.py)"
+      "Bash(python -m ruff check app/routers/admin_test_completions.py)",
+      "Bash(python -m ruff check app/routers/inference.py app/providers/response_formatter.py app/providers/image_handler_openai.py app/providers/image_handler_vertex.py app/providers/image_handler.py app/pricing/resolver.py)",
+      "Bash(.venv\\\\Scripts\\\\ruff check *)",
+      "Bash(.venv/Scripts/pytest tests/ -x -q)",
+      "Bash(python -m ruff check app/schemas/chat.py app/pricing/resolver.py app/routers/inference.py)",
+      "Bash(python -m pytest tests/test_compare_prompt.py tests/test_compare_engine.py tests/test_compare_router.py -v)",
+      "Bash(.venv/Scripts/pytest tests/test_compare_prompt.py tests/test_compare_engine.py tests/test_compare_router.py -v)",
+      "Bash(.venv/Scripts/pytest tests/test_compare_prompt.py tests/test_compare_engine.py tests/test_compare_router.py -q)"
     ]
   }
 }

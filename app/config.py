@@ -251,6 +251,22 @@ class Settings(BaseSettings):
     # Leave empty to disable Slack alerts.
     slack_webhook_url: str = ""
 
+    # ── Multi-model comparison ────────────────────────────────────────────────
+    # Default model used to synthesize the comparison when caller omits comparison_model.
+    compare_default_model: str = "openai/gpt-4o-mini"
+    # Hard ceiling on models per comparison request.
+    compare_max_models: int = 10
+    # Per-model timeout in seconds for fan-out calls.
+    compare_model_timeout_s: float = 120.0
+    # Comma-separated fallback models tried in order when the primary comparison
+    # model fails. Chosen for provider diversity: Haiku (Anthropic) → Gemini Flash
+    # (Google) so a single-provider outage doesn't break synthesis entirely.
+    compare_fallback_models: str = "anthropic/claude-3-5-haiku,google/gemini-2.0-flash-001"
+
+    @property
+    def compare_fallback_models_list(self) -> list[str]:
+        return [m.strip() for m in self.compare_fallback_models.split(",") if m.strip()]
+
     # ── Mailmodo ──────────────────────────────────────────────────────────────
     mailmodo_webhook_url: str = ""
 
