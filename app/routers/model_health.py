@@ -503,18 +503,36 @@ async def run_model_health(
     run_ts = datetime.now(UTC)
     csv_url = await _upload_results_csv(results, run_ts)
 
-    # Build Slack message — group by status for clarity
+    # Build Slack message — summary first, then first 10 individual failures
+    _MAX_SHOWN = 10
     non_passing = not_working + degraded
     slack_lines: list[str] = []
     if non_passing:
-        for r in non_passing:
+        summary_parts = []
+        if pure_fails:
+            summary_parts.append(f"{len(pure_fails)} failed")
+        if timeouts:
+            summary_parts.append(f"{len(timeouts)} timed out")
+        if degraded:
+            summary_parts.append(f"{len(degraded)} rate-limited (429)")
+        slack_lines.append(f"*Issues:* {', '.join(summary_parts)}")
+        slack_lines.append("")
+        for r in non_passing[:_MAX_SHOWN]:
             detail = f" {r.provider}" if r.provider else ""
             if r.upstream_status:
                 detail += f" → HTTP {r.upstream_status}"
             if r.status == "timeout":
                 detail += f" ({_TIMEOUT_S}s timeout)"
-            err_str = f": {r.error}" if r.error and r.status not in ("timeout", "degraded") else ""
+            err_raw = r.error or ""
+            mdn_idx = err_raw.find("For more information check:")
+            if mdn_idx != -1:
+                err_raw = err_raw[:mdn_idx].strip()
+            show_err = err_raw and r.status not in ("timeout", "degraded")
+            err_str = f": {err_raw[:120]}" if show_err else ""
             slack_lines.append(f"• `{r.model_id}` [{r.test_type}] [{r.status}]{detail}{err_str}")
+        if len(non_passing) > _MAX_SHOWN:
+            remaining = len(non_passing) - _MAX_SHOWN
+            slack_lines.append(f"_…and {remaining} more — check CSV for full details._")
 
     if slowest:
         slack_lines.append("")

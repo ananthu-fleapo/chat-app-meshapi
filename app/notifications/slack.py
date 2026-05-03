@@ -12,6 +12,10 @@ from app.config import settings
 
 logger = structlog.get_logger()
 
+_MAX_BLOCKS = 50
+_MAX_SECTION_TEXT = 3000
+_MAX_FIELD_TEXT = 2000
+
 
 async def send_slack_alert(
     title: str,
@@ -45,12 +49,29 @@ async def send_slack_alert(
     if notify_here:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "<!here>"}})
 
-    rendered = [{"type": "mrkdwn", "text": f"*{f['label']}*\n`{f['value']}`"} for f in fields]
+    rendered = [
+        {"type": "mrkdwn", "text": f"*{f['label']}*\n`{f['value']}`"[:_MAX_FIELD_TEXT]}
+        for f in fields
+    ]
     for i in range(0, max(len(rendered), 1), 10):
         blocks.append({"type": "section", "fields": rendered[i : i + 10]})
 
     if message:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": message}})
+        for i in range(0, len(message), _MAX_SECTION_TEXT):
+            chunk = message[i : i + _MAX_SECTION_TEXT]
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": chunk}})
+
+    if len(blocks) > _MAX_BLOCKS:
+        blocks = blocks[: _MAX_BLOCKS - 1]
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "_Alert truncated: too many blocks. Check logs or CSV._",
+                },
+            }
+        )
 
     try:
         logger.info("slack_alert_body", blocks=blocks)

@@ -45,3 +45,5 @@ alembic/__pycache__/
 
 # Script test outputs
 scripts/outputs/
+
+my-scripts
