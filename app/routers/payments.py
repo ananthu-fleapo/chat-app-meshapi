@@ -357,23 +357,31 @@ async def create_payment(
                             used_count=coupon.used_count,
                             max_uses=coupon.max_uses,
                         )
-                        db.add(
-                            CouponSyncIssue(
-                                coupon_id=coupon.id,
-                                coupon_code=coupon.code,
-                                provider="stripe",
-                                issue_type="auto_deactivated",
-                                details={
-                                    "used_count": coupon.used_count,
-                                    "max_uses": coupon.max_uses,
-                                    "trigger": "webhook",
-                                    "note": (
-                                        "Coupon deactivated locally. "
-                                        "Deactivate manually in the Stripe dashboard."
-                                    ),
-                                },
+                        existing_issue = await db.scalar(
+                            select(CouponSyncIssue).where(
+                                CouponSyncIssue.coupon_id == coupon.id,
+                                CouponSyncIssue.issue_type == "auto_deactivated",
+                                CouponSyncIssue.status == "pending",
                             )
                         )
+                        if existing_issue is None:
+                            db.add(
+                                CouponSyncIssue(
+                                    coupon_id=coupon.id,
+                                    coupon_code=coupon.code,
+                                    provider="stripe",
+                                    issue_type="auto_deactivated",
+                                    details={
+                                        "used_count": coupon.used_count,
+                                        "max_uses": coupon.max_uses,
+                                        "trigger": "webhook",
+                                        "note": (
+                                            "Coupon deactivated locally. "
+                                            "Deactivate manually in the Stripe dashboard."
+                                        ),
+                                    },
+                                )
+                            )
 
                     # pick one payload (or last valid one)
                     coupon_payload = {

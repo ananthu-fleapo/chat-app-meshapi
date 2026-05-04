@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from app.analytics.payment_exprs import fx_rate_subquery
+from app.analytics.payment_exprs import discount_usd_expr, usd_amount_expr
 from app.auth.dependencies import verify_webhook_key
 from app.db.engine import get_session_factory
 from app.db.models import Model, PaymentEvent, UsageEvent, User
@@ -147,20 +147,8 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
         )
         revenue_usd = float(revenue_result.scalar() or 0)
 
-        # Query 5: Payments received
-        # fx_rate_subquery() returns the FX rate in effect at each payment's
-        # created_at, matching the approach used across admin.py analytics.
-        # For currencies not in the table (e.g. already-USD rows) it returns
-        # NULL; coalesce(..., 1.0) below treats those as a 1:1 rate.
-        fx_rate_sq = fx_rate_subquery()
-
-        net_amount_usd = (
-            (PaymentEvent.amount - func.coalesce(PaymentEvent.discount_amount, 0))
-            / 100.0
-            / func.coalesce(fx_rate_sq, 1.0)
-        )
-
-        payments_query = select(func.sum(net_amount_usd)).where(
+        # Query 5: Payments received (gross credited amount in USD, pre-discount)
+        payments_query = select(func.sum(usd_amount_expr())).where(
             PaymentEvent.created_at >= today_start,
             PaymentEvent.created_at < today_end,
         )
@@ -169,11 +157,7 @@ async def _get_daily_metrics() -> DailySummaryMetrics:
         payments_received_usd = float(payments_result.scalar() or 0)
 
         # Query 5b: Coupon discount credits (sum of discount_amount for couponed transactions)
-        discount_amount_usd = (
-            func.coalesce(PaymentEvent.discount_amount, 0) / 100.0 / func.coalesce(fx_rate_sq, 1.0)
-        )
-
-        coupon_discounts_query = select(func.sum(discount_amount_usd)).where(
+        coupon_discounts_query = select(func.sum(discount_usd_expr())).where(
             PaymentEvent.created_at >= today_start,
             PaymentEvent.created_at < today_end,
             PaymentEvent.coupon_code.isnot(None),

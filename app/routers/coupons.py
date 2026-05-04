@@ -269,13 +269,22 @@ async def _get_coupon_for_user(
     return coupon, (_calculate_discount_amount(coupon, amount) if amount is not None else None)
 
 
-def _log_issue(
+async def _log_issue(
     db: AsyncSession,
     coupon: CheckoutCoupon,
     provider: str,
     issue_type: str,
     details: dict[str, Any],
 ) -> None:
+    existing = await db.scalar(
+        select(CouponSyncIssue).where(
+            CouponSyncIssue.coupon_id == coupon.id,
+            CouponSyncIssue.issue_type == issue_type,
+            CouponSyncIssue.status == "pending",
+        )
+    )
+    if existing is not None:
+        return
     db.add(
         CouponSyncIssue(
             coupon_id=coupon.id,
@@ -662,7 +671,7 @@ async def sync_all_coupons(db: AsyncSession = Depends(get_db_session)):  # noqa:
                 max_uses=coupon.max_uses,
             )
             coupon.is_active = False
-            _log_issue(
+            await _log_issue(
                 db,
                 coupon,
                 "stripe",
@@ -814,12 +823,16 @@ def _apply_stripe_promo_data(
     duration = coupon_data.get("duration")
     if duration:
         coupon.reuse_policy = "single_use" if duration == "once" else "reusable"
-    coupon.is_active = bool(promo.get("active", True))
     if promo.get("max_redemptions") is not None:
         coupon.max_uses = promo["max_redemptions"]
     stripe_redeemed = promo.get("times_redeemed", 0)
     if stripe_redeemed > (coupon.used_count or 0):
         coupon.used_count = stripe_redeemed
+    stripe_active = bool(promo.get("active", True))
+    fully_redeemed = coupon.max_uses is not None and (coupon.used_count or 0) >= coupon.max_uses
+    if stripe_active and fully_redeemed:
+        stripe_active = False
+    coupon.is_active = stripe_active
     expires_at = promo.get("expires_at")
     if expires_at is not None:
         coupon.valid_till = datetime.fromtimestamp(expires_at, tz=UTC)

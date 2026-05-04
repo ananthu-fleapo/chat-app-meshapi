@@ -148,7 +148,7 @@ class KeySummary(BaseModel):
     default_params: dict | None
     rpm_limit: int | None
     rpd_limit: int | None
-    spend_cap_usd: str | None   # Decimal serialised as string to avoid float precision loss
+    spend_cap_usd: str | None  # Decimal serialised as string to avoid float precision loss
     allowed_models: list[str] | None
     model_limits: dict | None
     tpm_limit: int | None
@@ -2609,6 +2609,7 @@ class PaymentTransactionOut(BaseModel):
     coupon_code: str | None = None
     discount_amount_raw: int | None = None
     discount_amount_display: str | None = None
+    discount_amount_usd_display: str | None = None
     created_at: str
 
 
@@ -2991,6 +2992,15 @@ def _payment_to_out(
 ) -> PaymentTransactionOut:
     normalized_coupon_code = str(e.coupon_code).strip().upper() if e.coupon_code else None
     discount_amount_raw = _extract_discount_amount_raw(e)
+    discount_amount_usd_display: str | None = None
+    if (
+        discount_amount_raw is not None
+        and e.amount_usd is not None
+        and e.amount is not None
+        and e.amount > 0
+    ):
+        discount_usd_minor = round(discount_amount_raw * e.amount_usd / e.amount)
+        discount_amount_usd_display = f"{discount_usd_minor / 100:.2f}"
     return PaymentTransactionOut(
         id=str(e.id),
         user_id=e.user_id,
@@ -3005,6 +3015,7 @@ def _payment_to_out(
         coupon_code=(coupon_code_map or {}).get(normalized_coupon_code, normalized_coupon_code),
         discount_amount_raw=discount_amount_raw,
         discount_amount_display=_format_minor_amount(discount_amount_raw),
+        discount_amount_usd_display=discount_amount_usd_display,
         created_at=e.created_at.isoformat(),
     )
 
