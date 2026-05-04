@@ -8,6 +8,7 @@ Requires SUPABASE_URL and SUPABASE_ANON_KEY to be set.
 """
 
 import asyncio
+from datetime import datetime, timezone
 import structlog
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -99,6 +100,25 @@ async def _send_welcome_email(email: str) -> None:
         logger.exception("mailmodo_welcome_error", email=email)
 
 
+async def _notify_crm_signup(user_id: str, email: str) -> None:
+    if not settings.crm_webhook_url:
+        return
+    payload = {
+        "id": user_id,
+        "email": email,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(settings.crm_webhook_url, json=payload, timeout=10.0)
+        if resp.status_code not in (200, 201):
+            logger.warning("crm_signup_webhook_failed", status=resp.status_code, user_id=user_id, body=resp.text)
+        else:
+            logger.info("crm_signup_webhook_sent", user_id=user_id, email=email)
+    except Exception:
+        logger.exception("crm_signup_webhook_error", user_id=user_id, email=email)
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/send-otp")
@@ -183,6 +203,7 @@ async def verify_otp(
         if user is None:
             db.add(User(id=session.user.id, email=session.user.email))
             asyncio.create_task(_send_welcome_email(session.user.email))
+            asyncio.create_task(_notify_crm_signup(session.user.id, session.user.email))
         else:
             user.email = session.user.email
 

@@ -270,5 +270,10 @@ class Settings(BaseSettings):
     # ── Mailmodo ──────────────────────────────────────────────────────────────
     mailmodo_webhook_url: str = ""
 
+    # ── CRM ───────────────────────────────────────────────────────────────────
+    # Webhook URL to notify on first user signup. POST with JSON: id, email, created_at.
+    # Leave empty to disable.
+    crm_webhook_url: str = ""
+
 
 settings = Settings()
