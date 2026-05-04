@@ -173,26 +173,50 @@ export function ModelResponse({ messageId, modelId, response }: Props) {
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.2, delay: 0.1 }}
-                className="flex items-center gap-3 mt-3 pt-2 border-t border-gray-100"
+                className="mt-3 pt-2 border-t border-gray-100"
               >
-                <span className="text-xs text-gray-400 flex items-center gap-1">
-                  <span className="text-gray-300">↑</span>
-                  {response.usage.prompt_tokens.toLocaleString()}
-                </span>
-                <span className="text-xs text-gray-400 flex items-center gap-1">
-                  <span className="text-gray-300">↓</span>
-                  {response.usage.completion_tokens.toLocaleString()}
-                </span>
-                <span className="text-xs text-gray-400">
-                  {response.usage.total_tokens.toLocaleString()} tokens
-                </span>
-                {response.usage.cost !== undefined && response.usage.cost > 0 && (
-                  <>
-                    <span className="text-gray-200">·</span>
-                    <span className="text-xs text-gray-400">
-                      {formatCost(response.usage.cost)}
+                {/* Image generation usage — show full block */}
+                {response.usage.images_generated !== undefined ? (
+                  <div className="flex flex-wrap gap-x-4 gap-y-1">
+                    {response.usage.images_generated > 0 && (
+                      <span className="text-xs text-gray-500">
+                        🖼️ {response.usage.images_generated} image{response.usage.images_generated !== 1 ? "s" : ""} generated
+                      </span>
+                    )}
+                    {response.usage.prompt_tokens > 0 && (
+                      <span className="text-xs text-gray-400">
+                        <span className="text-gray-300">↑</span> {response.usage.prompt_tokens.toLocaleString()} tokens
+                      </span>
+                    )}
+                    {(response.usage.cost_usd ?? response.usage.cost) !== undefined && (response.usage.cost_usd ?? response.usage.cost)! > 0 && (
+                      <span className="text-xs font-medium text-gray-600">
+                        {formatCost(response.usage.cost_usd ?? response.usage.cost!)}
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  /* Standard text usage */
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-gray-400 flex items-center gap-1">
+                      <span className="text-gray-300">↑</span>
+                      {response.usage.prompt_tokens.toLocaleString()}
                     </span>
-                  </>
+                    <span className="text-xs text-gray-400 flex items-center gap-1">
+                      <span className="text-gray-300">↓</span>
+                      {response.usage.completion_tokens.toLocaleString()}
+                    </span>
+                    <span className="text-xs text-gray-400">
+                      {response.usage.total_tokens.toLocaleString()} tokens
+                    </span>
+                    {(response.usage.cost_usd ?? response.usage.cost) !== undefined && (response.usage.cost_usd ?? response.usage.cost)! > 0 && (
+                      <>
+                        <span className="text-gray-200">·</span>
+                        <span className="text-xs text-gray-400">
+                          {formatCost(response.usage.cost_usd ?? response.usage.cost!)}
+                        </span>
+                      </>
+                    )}
+                  </div>
                 )}
               </motion.div>
             )}

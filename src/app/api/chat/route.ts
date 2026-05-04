@@ -1,13 +1,7 @@
 import { NextRequest } from "next/server";
-import OpenAI from "openai";
 
 const MESH_API_URL = process.env.MESH_API_URL ?? "http://localhost:8000/v1";
 const MESH_API_KEY = process.env.MESH_API_KEY ?? "";
-
-const meshClient = new OpenAI({
-  baseURL: MESH_API_URL,
-  apiKey: MESH_API_KEY,
-});
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
@@ -27,17 +21,31 @@ export async function POST(req: NextRequest) {
         if (modalities?.includes("audio")) {
           console.log("[/api/chat] Audio output mode — using non-streaming");
 
-          const completion = await meshClient.chat.completions.create({
-            model,
-            messages,
-            modalities,
-            audio: audio ?? { voice: "alloy", format: "mp3" },
-            stream: false,
-          } as Parameters<typeof meshClient.chat.completions.create>[0]);
+          const upstream = await fetch(`${MESH_API_URL}/chat/completions`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${MESH_API_KEY}`,
+            },
+            body: JSON.stringify({
+              model,
+              messages,
+              modalities,
+              audio: audio ?? { voice: "alloy", format: "mp3" },
+              stream: false,
+            }),
+          });
 
-          const chatCompletion = completion as unknown as OpenAI.Chat.ChatCompletion;
-          const choice = chatCompletion.choices?.[0];
-          const message = choice?.message as unknown as Record<string, unknown> | undefined;
+          if (!upstream.ok) {
+            const errText = await upstream.text().catch(() => upstream.statusText);
+            throw new Error(`Upstream error ${upstream.status}: ${errText}`);
+          }
+
+          const json = await upstream.json() as Record<string, unknown>;
+          console.log("[/api/chat] Audio response:", JSON.stringify(json).slice(0, 300));
+
+          const choices = json.choices as Array<Record<string, unknown>> | undefined;
+          const message = choices?.[0]?.message as Record<string, unknown> | undefined;
           const textContent = typeof message?.content === "string" ? message.content : "";
           const audioPayload = message?.audio as Record<string, unknown> | undefined;
 
@@ -53,8 +61,8 @@ export async function POST(req: NextRequest) {
               },
             });
           }
-          if (chatCompletion.usage) {
-            enqueue({ usage: chatCompletion.usage });
+          if (json.usage) {
+            enqueue({ usage: json.usage });
           }
         } else if (image) {
           // Image generation — non-streaming (imagen/dall-e return a single JSON response)

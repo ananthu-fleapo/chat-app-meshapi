@@ -95,6 +95,8 @@ async function streamChat(
             completion_tokens: (u.completion_tokens as number) ?? 0,
             total_tokens: (u.total_tokens as number) ?? 0,
             cost: u.cost as number | undefined,
+            images_generated: u.images_generated as number | undefined,
+            cost_usd: u.cost_usd as number | undefined,
           });
         }
       }
@@ -103,10 +105,16 @@ async function streamChat(
 }
 
 const IMAGE_GEN_PATTERNS = ["dall-e", "imagen", "gpt-image", "flux", "stable-diffusion"];
+const AUDIO_MODEL_PATTERNS = ["audio-preview", "audio-latest", "tts", "whisper"];
 
 function isImageGenModel(modelId: string): boolean {
   const lower = modelId.toLowerCase();
   return IMAGE_GEN_PATTERNS.some((p) => lower.includes(p));
+}
+
+function isAudioModel(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  return AUDIO_MODEL_PATTERNS.some((p) => lower.includes(p));
 }
 
 function buildContentParts(text: string, attachments: Attachment[]): ContentPart[] {
@@ -197,10 +205,15 @@ export function useChatStream() {
       }
 
       const streamPromises = effectiveModels.map(async (modelId) => {
-        // Build per-model options — image gen models need image options
+        // Build per-model options
         const modelOptions: StreamChatOptions = { ...options };
         if (isImageGenModel(modelId)) {
           modelOptions.image = { n: 1, size: "1024x1024", quality: "high", response_format: "b64_json" };
+        }
+        // Audio models always require modalities: ["text", "audio"]
+        if (isAudioModel(modelId) && !modelOptions.modalities?.includes("audio")) {
+          modelOptions.modalities = ["text", "audio"];
+          if (!modelOptions.audio) modelOptions.audio = { voice: "alloy", format: "mp3" };
         }
 
         let usage: ResponseUsage | undefined;

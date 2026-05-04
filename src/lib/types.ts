@@ -21,6 +21,9 @@ export interface ResponseUsage {
   completion_tokens: number;
   total_tokens: number;
   cost?: number;
+  // image generation
+  images_generated?: number;
+  cost_usd?: number;
 }
 
 export interface ContentPartText {
