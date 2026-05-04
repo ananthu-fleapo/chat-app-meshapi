@@ -60,6 +60,38 @@ async def main(dry_run: bool, batch_size: int) -> None:
         )
         print(f"Rows to backfill: {total_null:,}")
 
+        # Diagnostics: show currency breakdown and rate availability
+        diag_rows = await conn.fetch(
+            """
+            SELECT
+                pe.currency,
+                COUNT(*) AS payment_count,
+                MIN(pe.created_at) AS earliest_payment,
+                MAX(pe.created_at) AS latest_payment,
+                (SELECT MIN(ccr.created_at) FROM currency_conversion_rates ccr
+                 WHERE UPPER(ccr.currency) = UPPER(pe.currency)) AS earliest_rate,
+                (SELECT MAX(ccr.created_at) FROM currency_conversion_rates ccr
+                 WHERE UPPER(ccr.currency) = UPPER(pe.currency)) AS latest_rate,
+                (SELECT ccr.total_rate FROM currency_conversion_rates ccr
+                 WHERE UPPER(ccr.currency) = UPPER(pe.currency)
+                 ORDER BY ccr.created_at ASC LIMIT 1) AS earliest_rate_value
+            FROM payment_events pe
+            WHERE pe.discount_amount IS NOT NULL
+              AND pe.discount_amount > 0
+              AND pe.discount_amount_usd IS NULL
+            GROUP BY pe.currency
+            """
+        )
+        print("\nDiagnostics:")
+        for row in diag_rows:
+            print(
+                f"  currency={row['currency']!r}  payments={row['payment_count']}"
+                f"  payment_range=[{row['earliest_payment']} → {row['latest_payment']}]"
+                f"  rate_range=[{row['earliest_rate']} → {row['latest_rate']}]"
+                f"  earliest_rate_value={row['earliest_rate_value']}"
+            )
+        print()
+
         if total_null == 0:
             print("Nothing to backfill.")
             return
@@ -80,20 +112,32 @@ async def main(dry_run: bool, batch_size: int) -> None:
             #      85000 paisa / 85 (INR/USD) = 1000 USD cents = $10.00
             # We intentionally do NOT use the amount_usd/amount ratio because
             # amount_usd is net of GST (credited amount), which would distort the rate.
-            count_str = await conn.fetchval(
+            status = await conn.execute(
                 """
                 WITH batch AS (
                     SELECT pe.id,
                            pe.discount_amount,
                            pe.currency,
                            pe.created_at,
-                           (
-                               SELECT ccr.total_rate
-                               FROM currency_conversion_rates ccr
-                               WHERE ccr.currency = pe.currency
-                                 AND ccr.created_at <= pe.created_at
-                               ORDER BY ccr.created_at DESC
-                               LIMIT 1
+                           COALESCE(
+                               -- Exact: most recent rate at or before payment time
+                               (
+                                   SELECT ccr.total_rate
+                                   FROM currency_conversion_rates ccr
+                                   WHERE UPPER(ccr.currency) = UPPER(pe.currency)
+                                     AND ccr.created_at <= pe.created_at
+                                   ORDER BY ccr.created_at DESC
+                                   LIMIT 1
+                               ),
+                               -- Fallback: earliest available rate for payments
+                               -- that predate the rate table
+                               (
+                                   SELECT ccr.total_rate
+                                   FROM currency_conversion_rates ccr
+                                   WHERE UPPER(ccr.currency) = UPPER(pe.currency)
+                                   ORDER BY ccr.created_at ASC
+                                   LIMIT 1
+                               )
                            ) AS fx_rate
                     FROM payment_events pe
                     WHERE pe.discount_amount IS NOT NULL
@@ -104,7 +148,7 @@ async def main(dry_run: bool, batch_size: int) -> None:
                 )
                 UPDATE payment_events pe
                 SET discount_amount_usd = CASE
-                    WHEN batch.currency = 'USD'
+                    WHEN UPPER(batch.currency) = 'USD'
                         THEN batch.discount_amount
                     WHEN batch.fx_rate IS NOT NULL AND batch.fx_rate > 0
                         THEN ROUND(batch.discount_amount::numeric / batch.fx_rate)
@@ -113,13 +157,14 @@ async def main(dry_run: bool, batch_size: int) -> None:
                 FROM batch
                 WHERE pe.id = batch.id
                   AND (
-                      batch.currency = 'USD'
+                      UPPER(batch.currency) = 'USD'
                       OR (batch.fx_rate IS NOT NULL AND batch.fx_rate > 0)
                   )
                 """,
                 batch_size,
             )
-            count = int(str(count_str).split()[-1]) if count_str else 0
+            # conn.execute() returns a command tag string like "UPDATE 21"
+            count = int(status.split()[-1])
             updated_total += count
 
             print(f"  Batch {batch_num}: updated {count:,}  (total so far: {updated_total:,})")
