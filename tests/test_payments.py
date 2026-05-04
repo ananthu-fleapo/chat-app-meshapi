@@ -284,6 +284,7 @@ class TestListPayments:
         event.coupon_code = "COUPON123"
         event.payment_metadata = None
         event.discount_amount = 5900
+        event.discount_amount_usd = None
         event.created_at = datetime(2026, 4, 9, tzinfo=timezone.utc)
 
         mock_db_session.execute.side_effect = [
@@ -310,6 +311,7 @@ class TestListPayments:
                 "coupon_name": "Summer Offer",
                 "discount_amount_raw": 5900,
                 "discount_amount_display": "59.00",
+                "discount_amount_usd_display": None,
                 "created_at": "2026-04-09T00:00:00+00:00",
             }
         ]
@@ -327,6 +329,7 @@ class TestListPayments:
         event.coupon_code = "MISSING"
         event.payment_metadata = None
         event.discount_amount = 200
+        event.discount_amount_usd = None
         event.created_at = datetime(2026, 4, 9, tzinfo=timezone.utc)
 
         mock_db_session.execute.side_effect = [

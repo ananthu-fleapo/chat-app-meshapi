@@ -2992,15 +2992,9 @@ def _payment_to_out(
 ) -> PaymentTransactionOut:
     normalized_coupon_code = str(e.coupon_code).strip().upper() if e.coupon_code else None
     discount_amount_raw = _extract_discount_amount_raw(e)
-    discount_amount_usd_display: str | None = None
-    if (
-        discount_amount_raw is not None
-        and e.amount_usd is not None
-        and e.amount is not None
-        and e.amount > 0
-    ):
-        discount_usd_minor = round(discount_amount_raw * e.amount_usd / e.amount)
-        discount_amount_usd_display = f"{discount_usd_minor / 100:.2f}"
+    discount_amount_usd_display = (
+        f"{e.discount_amount_usd / 100:.2f}" if e.discount_amount_usd is not None else None
+    )
     return PaymentTransactionOut(
         id=str(e.id),
         user_id=e.user_id,

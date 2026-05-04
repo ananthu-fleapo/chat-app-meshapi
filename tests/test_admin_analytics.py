@@ -474,6 +474,7 @@ class TestPaymentTransactions:
         event.amount = 59000
         event.amount_usd = 600
         event.coupon_code = "COUPON123"
+        event.discount_amount_usd = None
         event.payment_metadata = {"coupon": {"discount_amount": 5900}}
         event.created_at = datetime(2026, 4, 9, tzinfo=timezone.utc)
 
@@ -507,6 +508,7 @@ class TestPaymentTransactions:
         event.amount = 1000
         event.amount_usd = 1000
         event.coupon_code = None
+        event.discount_amount_usd = None
         event.payment_metadata = None
         event.created_at = datetime(2026, 4, 9, tzinfo=timezone.utc)
 
@@ -544,6 +546,7 @@ class TestPaymentTransactions:
         event.amount = 1000
         event.amount_usd = 1000
         event.coupon_code = None
+        event.discount_amount_usd = None
         event.payment_metadata = None
         event.created_at = created_at
         return event

@@ -55,11 +55,14 @@ def usd_amount_expr():
 def discount_usd_expr():
     """SQLAlchemy expression: coupon discount value in USD for a payment_events row.
 
-    Uses fx_rate_subquery() for FX conversion.  Returns 0.0 for rows with no
-    discount_amount set.
+    Priority:
+      1. discount_amount_usd column (pre-computed in USD cents at webhook ingestion time).
+      2. Fallback for older rows: discount_amount / 100 / fx_rate.
+    Returns 0.0 for rows with no discount.
     """
     rate_sq = fx_rate_subquery()
     return case(
+        (PaymentEvent.discount_amount_usd.isnot(None), PaymentEvent.discount_amount_usd / 100.0),
         (
             PaymentEvent.discount_amount.isnot(None),
             PaymentEvent.discount_amount / 100.0 / func.coalesce(rate_sq, 1.0),

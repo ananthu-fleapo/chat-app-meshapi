@@ -76,6 +76,7 @@ class PaymentEventOut(BaseModel):
     coupon_name: str | None = None
     discount_amount_raw: int | None = None
     discount_amount_display: str | None = None
+    discount_amount_usd_display: str | None = None
     created_at: str
 
 
@@ -116,6 +117,7 @@ def _to_out(event: PaymentEvent) -> PaymentEventOut:
         coupon_name=None,
         discount_amount_raw=discount_amount_raw,
         discount_amount_display=_format_minor_amount(discount_amount_raw),
+        discount_amount_usd_display=_format_minor_amount(event.discount_amount_usd),
         created_at=event.created_at.isoformat(),
     )
 
@@ -148,6 +150,27 @@ def _format_minor_amount(amount_raw: int | None) -> str | None:
     if amount_raw is None:
         return None
     return f"{Decimal(amount_raw) / Decimal('100'):.2f}"
+
+
+def _compute_discount_amount_usd(
+    discount_minor: int | float | None,
+    currency: str,
+    effective_rate: Decimal | None,
+) -> int | None:
+    """Compute discount_amount_usd (USD cents) from the original minor-unit discount.
+
+    USD:  discount_minor is already cents — store as-is.
+    INR:  discount_minor is paisa. Dividing paisa by the INR/USD rate yields USD cents
+          directly (both scales are ×100, so they cancel).
+          e.g. 85000 paisa / 85 (INR/USD) = 1000 USD cents = $10.00
+    """
+    if not discount_minor:
+        return None
+    if currency == "USD":
+        return int(discount_minor)
+    if effective_rate is None or effective_rate <= 0:
+        return None
+    return int((Decimal(str(discount_minor)) / effective_rate).quantize(Decimal("1")))
 
 
 def _extract_discount_amount_raw(event: PaymentEvent) -> int | None:
@@ -212,6 +235,7 @@ async def create_payment(
 
     # Resolve conversion rate and compute USD amount before persisting.
     amount_usd: Decimal | None = None
+    effective_rate: Decimal | None = None
     if body.amount and body.amount > 0:
         currency = (body.currency or "USD").upper()
         charged_amount_major = _minor_to_major(body.amount)
@@ -287,6 +311,11 @@ async def create_payment(
         currency=body.currency,
         amount=body.amount,
         amount_usd=int(amount_usd * 100) if amount_usd is not None else None,
+        discount_amount_usd=_compute_discount_amount_usd(
+            body.couponDiscountAmount,
+            (body.currency or "USD").upper(),
+            effective_rate,
+        ),
         ip_address=body.ipAddress,
         country=body.country,
         coupon_code=normalized_coupon_code,
