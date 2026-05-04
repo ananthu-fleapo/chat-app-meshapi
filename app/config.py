@@ -275,5 +275,10 @@ class Settings(BaseSettings):
     # Leave empty to disable.
     crm_webhook_url: str = ""
 
+    # ── Internal tooling ──────────────────────────────────────────────────────
+    # Static bearer token for internal ops endpoints (/internal/*).
+    # Leave empty to disable (routes return 403).
+    internal_api_key: str = ""
+
 
 settings = Settings()

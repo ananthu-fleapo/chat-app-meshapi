@@ -184,3 +184,27 @@ async def verify_webhook_key(
         raise UnauthorizedError("Invalid webhook API key.")
 
     logger.debug("webhook_auth_ok")
+
+
+async def verify_internal_key(
+    authorization: str = Header(..., alias="Authorization"),
+) -> None:
+    """
+    Validates internal tooling requests against the static INTERNAL_API_KEY setting.
+
+    Expects: Authorization: Bearer <INTERNAL_API_KEY>
+
+    Raises 403 if INTERNAL_API_KEY is not configured.
+    Raises 401 if the key is wrong.
+    """
+    if not settings.internal_api_key:
+        logger.error("internal_auth_not_configured")
+        raise ForbiddenError("Internal auth is not configured.")
+
+    token = _extract_bearer(authorization)
+
+    if not hmac.compare_digest(token, settings.internal_api_key):
+        logger.warning("internal_auth_invalid_key")
+        raise UnauthorizedError("Invalid internal API key.")
+
+    logger.debug("internal_auth_ok")

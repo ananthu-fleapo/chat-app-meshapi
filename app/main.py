@@ -45,6 +45,7 @@ from app.routers import (
     payments,
     reconcile,
     responses,
+    internal,
     usage,
 )
 
@@ -346,6 +347,7 @@ def create_app() -> FastAPI:
     # Admin router: JWT-gated. Caller must have app_metadata.permissions
     # containing "mesh_api:admin".
     app.include_router(admin.router)
+    app.include_router(internal.router)
     app.include_router(error_logs.router)
 
     # Test endpoints — dev only (returns 404 in prod)
