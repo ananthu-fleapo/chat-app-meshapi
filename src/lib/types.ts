@@ -23,17 +23,44 @@ export interface ResponseUsage {
   cost?: number;
 }
 
+export interface ContentPartText {
+  type: "text";
+  text: string;
+}
+
+export interface ContentPartImage {
+  type: "image_url";
+  image_url: { url: string };
+}
+
+export interface ContentPartAudio {
+  type: "input_audio";
+  input_audio: { data: string; format: string };
+}
+
+export type ContentPart = ContentPartText | ContentPartImage | ContentPartAudio;
+
+export interface Attachment {
+  type: "image" | "audio";
+  name: string;
+  mimeType: string;
+  data: string; // base64 data URL
+}
+
 export interface ModelResponseState {
   content: string;
   done: boolean;
   error?: string;
   usage?: ResponseUsage;
+  imageUrls?: string[];
+  audioData?: string; // base64
+  audioFormat?: string;
 }
 
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
-  content: string;
+  content: string | ContentPart[];
   responses: Record<string, ModelResponseState>;
   createdAt: number;
 }

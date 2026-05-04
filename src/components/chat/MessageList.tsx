@@ -4,6 +4,7 @@ import { useEffect, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
 import { useChatStore } from "@/store/chatStore";
 import { ModelResponse } from "./ModelResponse";
+import type { ContentPart } from "@/lib/types";
 
 export function MessageList() {
   const { activeRoom, selectedModelIds } = useChatStore();
@@ -76,7 +77,31 @@ export function MessageList() {
                 className="flex justify-end mb-4"
               >
                 <div className="max-w-[75%] px-4 py-3 bg-indigo-600 text-white rounded-2xl rounded-tr-sm text-sm leading-relaxed">
-                  {message.content}
+                  {typeof message.content === "string" ? (
+                    message.content
+                  ) : (
+                    <div className="flex flex-col gap-2">
+                      {(message.content as ContentPart[]).map((part, i) => {
+                        if (part.type === "image_url") {
+                          return (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              key={i}
+                              src={part.image_url.url}
+                              alt="Attached image"
+                              className="max-w-[220px] rounded-lg object-cover"
+                            />
+                          );
+                        }
+                        if (part.type === "input_audio") {
+                          return (
+                            <span key={i} className="text-indigo-200 text-xs">🎵 Audio attached</span>
+                          );
+                        }
+                        return <span key={i}>{part.text}</span>;
+                      })}
+                    </div>
+                  )}
                 </div>
               </motion.div>
             )}

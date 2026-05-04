@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import { nanoid } from "nanoid";
-import type { ChatRoom, ChatMessage, ModelResponseState, ResponseUsage } from "@/lib/types";
+import type { ChatRoom, ChatMessage, ModelResponseState, ResponseUsage, ContentPart } from "@/lib/types";
 import { loadRooms, saveRooms, loadSelectedModels, saveSelectedModels } from "@/lib/storage";
 
 interface ChatStore {
@@ -25,10 +25,12 @@ interface ChatStore {
   clearModels: () => void;
 
   // Message actions
-  addUserMessage: (content: string) => string;
+  addUserMessage: (content: string | ContentPart[]) => string;
   initModelResponse: (messageId: string, modelId: string) => void;
   appendModelContent: (messageId: string, modelId: string, chunk: string) => void;
   finalizeModelResponse: (messageId: string, modelId: string, error?: string, usage?: ResponseUsage) => void;
+  setModelAudio: (messageId: string, modelId: string, audioData: string, audioFormat: string) => void;
+  appendModelImageUrl: (messageId: string, modelId: string, url: string) => void;
   setStreaming: (streaming: boolean) => void;
 
   // Computed
@@ -101,12 +103,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       createdAt: Date.now(),
     };
 
+    const titleSnippet = typeof content === "string"
+      ? content.slice(0, 40)
+      : (content.find((p) => p.type === "text") as { type: "text"; text: string } | undefined)?.text?.slice(0, 40) ?? "New Chat";
+
     const rooms = get().rooms.map((room) => {
       if (room.id !== get().activeRoomId) return room;
       const isFirst = room.messages.length === 0;
       return {
         ...room,
-        title: isFirst ? content.slice(0, 40) : room.title,
+        title: isFirst ? titleSnippet : room.title,
         messages: [...room.messages, message],
       };
     });
@@ -174,6 +180,48 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       };
     });
     saveRooms(rooms);
+    set({ rooms });
+  },
+
+  setModelAudio: (messageId, modelId, audioData, audioFormat) => {
+    const rooms = get().rooms.map((room) => {
+      if (room.id !== get().activeRoomId) return room;
+      return {
+        ...room,
+        messages: room.messages.map((msg) => {
+          if (msg.id !== messageId) return msg;
+          const existing = msg.responses[modelId] ?? { content: "", done: false };
+          return {
+            ...msg,
+            responses: {
+              ...msg.responses,
+              [modelId]: { ...existing, audioData, audioFormat },
+            },
+          };
+        }),
+      };
+    });
+    set({ rooms });
+  },
+
+  appendModelImageUrl: (messageId, modelId, url) => {
+    const rooms = get().rooms.map((room) => {
+      if (room.id !== get().activeRoomId) return room;
+      return {
+        ...room,
+        messages: room.messages.map((msg) => {
+          if (msg.id !== messageId) return msg;
+          const existing = msg.responses[modelId] ?? { content: "", done: false };
+          return {
+            ...msg,
+            responses: {
+              ...msg.responses,
+              [modelId]: { ...existing, imageUrls: [...(existing.imageUrls ?? []), url] },
+            },
+          };
+        }),
+      };
+    });
     set({ rooms });
   },
 

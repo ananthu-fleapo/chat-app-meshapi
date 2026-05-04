@@ -140,6 +140,33 @@ export function ModelResponse({ messageId, modelId, response }: Props) {
               </div>
             )}
 
+            {/* Generated images */}
+            {response.imageUrls && response.imageUrls.length > 0 && (
+              <div className="flex flex-wrap gap-3 mt-3">
+                {response.imageUrls.map((url, i) => (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    key={i}
+                    src={url}
+                    alt={`Generated image ${i + 1}`}
+                    className="max-w-full rounded-xl border border-gray-200 object-contain"
+                    style={{ maxHeight: 512 }}
+                  />
+                ))}
+              </div>
+            )}
+
+            {/* Audio player */}
+            {response.audioData && (
+              <div className="mt-3">
+                <audio
+                  controls
+                  src={`data:audio/${response.audioFormat ?? "mp3"};base64,${response.audioData}`}
+                  className="w-full rounded-lg"
+                />
+              </div>
+            )}
+
             {/* Usage footer — shown after completion */}
             {response.done && response.usage && (
               <motion.div

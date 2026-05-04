@@ -9,6 +9,7 @@ export async function GET() {
   });
 
   if (!res.ok) {
+    console.log(JSON.stringify(res))
     return NextResponse.json(
       { error: "Failed to fetch models" },
       { status: res.status }
