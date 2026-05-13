@@ -96,3 +96,35 @@ export interface ProviderInfo {
   color: string;
   bgColor: string;
 }
+export interface ImageGenerationRequest {
+  prompt: string;
+  model: string;
+  n?: number;
+  quality?: "low" | "medium" | "high" | "auto";
+  size?: string;
+  output_format?: "png" | "jpeg" | "webp";
+  output_compression?: number;
+  background?: "transparent" | "opaque" | "auto";
+  moderation?: "auto" | "low";
+  partial_images?: number;
+  stream?: boolean;
+}
+
+export interface ImageGenerationResponse {
+  created: number;
+  data: Array<{
+    url?: string;
+    b64_json?: string;
+  }>;
+}
+
+export interface ImageChunkResponse {
+  id: string;
+  object: "image.chunk";
+  status: "processing" | "completed" | "failed";
+  created?: number;
+  data?: Array<{
+    url?: string;
+    b64_json?: string;
+  }>;
+}
