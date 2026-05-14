@@ -2,12 +2,33 @@ import { NextRequest } from "next/server";
 
 const MESH_API_URL = process.env.MESH_API_URL ?? "http://localhost:8000/v1";
 const MESH_API_KEY = process.env.MESH_API_KEY ?? "";
+const LOG_PREVIEW_LIMIT = 500;
+
+function logUpstreamResponse(label: string, response: Response) {
+  console.log(`[/api/chat] ${label} status`, {
+    status: response.status,
+    statusText: response.statusText,
+    contentType: response.headers.get("content-type"),
+    transferEncoding: response.headers.get("transfer-encoding"),
+  });
+}
+
+function previewValue(value: unknown, limit = LOG_PREVIEW_LIMIT): string {
+  const raw = typeof value === "string" ? value : JSON.stringify(value);
+  return raw.length > limit ? `${raw.slice(0, limit)}...` : raw;
+}
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
   const { model, messages, modalities, audio, image } = body;
 
-  console.log("[/api/chat] POST received", { model, messageCount: messages?.length, modalities, hasImage: !!image });
+  console.log("[/api/chat] POST received", {
+    model,
+    messageCount: messages?.length,
+    modalities,
+    hasImage: !!image,
+    messagePreview: previewValue(messages, 800),
+  });
 
   const encoder = new TextEncoder();
 
@@ -35,6 +56,7 @@ export async function POST(req: NextRequest) {
               stream: false,
             }),
           });
+          logUpstreamResponse("Audio upstream", upstream);
 
           if (!upstream.ok) {
             const errText = await upstream.text().catch(() => upstream.statusText);
@@ -42,7 +64,7 @@ export async function POST(req: NextRequest) {
           }
 
           const json = await upstream.json() as Record<string, unknown>;
-          console.log("[/api/chat] Audio response:", JSON.stringify(json).slice(0, 300));
+          console.log("[/api/chat] Audio response preview:", previewValue(json));
 
           const choices = json.choices as Array<Record<string, unknown>> | undefined;
           const message = choices?.[0]?.message as Record<string, unknown> | undefined;
@@ -76,6 +98,7 @@ export async function POST(req: NextRequest) {
             },
             body: JSON.stringify({ model, messages, image, stream: false }),
           });
+          logUpstreamResponse("Image upstream", upstream);
 
           if (!upstream.ok) {
             const errText = await upstream.text().catch(() => upstream.statusText);
@@ -83,7 +106,7 @@ export async function POST(req: NextRequest) {
           }
 
           const json = await upstream.json() as Record<string, unknown>;
-          console.log("[/api/chat] Image response:", JSON.stringify(json).slice(0, 300));
+          console.log("[/api/chat] Image response preview:", previewValue(json));
 
           const choices = json.choices as Array<Record<string, unknown>> | undefined;
           const msgContent = (choices?.[0]?.message as Record<string, unknown> | undefined)?.content;
@@ -101,7 +124,7 @@ export async function POST(req: NextRequest) {
           if (json.usage) enqueue({ usage: json.usage });
 
         } else {
-          // Standard streaming path — raw SSE passthrough
+          // Standard streaming path — raw OpenAI-compatible SSE passthrough
           const upstream = await fetch(`${MESH_API_URL}/chat/completions`, {
             method: "POST",
             headers: {
@@ -110,6 +133,7 @@ export async function POST(req: NextRequest) {
             },
             body: JSON.stringify({ model, messages, stream: true }),
           });
+          logUpstreamResponse("Streaming upstream", upstream);
 
           if (!upstream.ok) {
             const errText = await upstream.text().catch(() => upstream.statusText);
@@ -120,37 +144,20 @@ export async function POST(req: NextRequest) {
 
           const reader = upstream.body.getReader();
           const dec = new TextDecoder();
-          let buf = "";
-          let chunkCount = 0;
+          let readCount = 0;
 
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+            readCount++;
 
-            buf += dec.decode(value, { stream: true });
-            const parts = buf.split("\n\n");
-            buf = parts.pop() ?? "";
-
-            for (const part of parts) {
-              for (const line of part.split("\n")) {
-                if (!line.startsWith("data: ")) continue;
-                const payload = line.slice(6).trim();
-                if (payload === "[DONE]") continue;
-
-                let parsed: Record<string, unknown>;
-                try { parsed = JSON.parse(payload); } catch { continue; }
-
-                chunkCount++;
-                if (chunkCount <= 3) {
-                  console.log(`[/api/chat] upstream chunk #${chunkCount}:`, JSON.stringify(parsed).slice(0, 200));
-                }
-
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
-              }
-            }
+            const decodedChunk = dec.decode(value, { stream: true });
+            console.log(`[/api/chat] upstream read #${readCount}:`, previewValue(decodedChunk));
+            controller.enqueue(value);
           }
 
-          console.log(`[/api/chat] Stream complete. upstream chunks: ${chunkCount}`);
+          console.log(`[/api/chat] Stream complete. upstream reads: ${readCount}`);
+          return;
         }
 
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));

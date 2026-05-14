@@ -70,9 +70,23 @@ async function streamChat(
 
         if (chunk.error) throw new Error(chunk.error as string);
 
-        // Text delta
-        const delta = (chunk.choices as Array<{ delta?: { content?: string } }>)?.[0]?.delta?.content;
-        if (delta) callbacks.onChunk(delta);
+        // Text/Image delta
+        const deltaObj = (chunk.choices as Array<{ delta?: { content?: unknown } }>)?.[0]?.delta;
+        if (deltaObj?.content) {
+          if (typeof deltaObj.content === "string") {
+            callbacks.onChunk(deltaObj.content);
+          } else if (Array.isArray(deltaObj.content)) {
+            for (const part of deltaObj.content) {
+              if (part?.type === "text" && typeof part.text === "string") {
+                callbacks.onChunk(part.text);
+              } else if (part?.type === "image_url" && typeof part.image_url?.url === "string") {
+                if (callbacks.onImageUrl) {
+                  callbacks.onImageUrl(part.image_url.url);
+                }
+              }
+            }
+          }
+        }
 
         // Audio response (non-streaming path)
         if (chunk.audio) {
@@ -104,8 +118,20 @@ async function streamChat(
   }
 }
 
-const IMAGE_GEN_PATTERNS = ["dall-e", "imagen", "gpt-image", "flux", "stable-diffusion"];
+const IMAGE_GEN_PATTERNS = ["dall-e", "imagen", "gpt-image", "gpt-5-image", "flux", "stable-diffusion"];
 const AUDIO_MODEL_PATTERNS = ["audio-preview", "audio-latest", "tts", "whisper"];
+const IMAGE_FILE_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "svg",
+  "avif",
+  "tiff",
+  "tif",
+]);
 
 function isImageGenModel(modelId: string): boolean {
   const lower = modelId.toLowerCase();
@@ -117,8 +143,66 @@ function isAudioModel(modelId: string): boolean {
   return AUDIO_MODEL_PATTERNS.some((p) => lower.includes(p));
 }
 
+function normalizeUrlCandidate(value: string): string {
+  return value.replace(/[),.;!?]+$/, "");
+}
+
+function isLikelyImageUrl(value: string): boolean {
+  if (value.startsWith("data:image/")) return true;
+
+  try {
+    const url = new URL(value);
+    if (!["http:", "https:"].includes(url.protocol)) return false;
+
+    const lastSegment = url.pathname.split("/").pop() ?? "";
+    const extension = lastSegment.split(".").pop()?.toLowerCase();
+    return !!extension && IMAGE_FILE_EXTENSIONS.has(extension);
+  } catch {
+    return false;
+  }
+}
+
+function extractInlineImageUrls(text: string): { cleanText: string; imageUrls: string[] } {
+  const imageUrls: string[] = [];
+  const seen = new Set<string>();
+  let cleanText = text;
+
+  cleanText = cleanText.replace(/!\[[^\]]*]\(([^)\s]+)\)/g, (match, url: string) => {
+    const normalized = normalizeUrlCandidate(url);
+    if (!seen.has(normalized) && isLikelyImageUrl(normalized)) {
+      seen.add(normalized);
+      imageUrls.push(normalized);
+      return "";
+    }
+    return match;
+  });
+
+  cleanText = cleanText.replace(/https?:\/\/[^\s<>"')]+/g, (match) => {
+    const normalized = normalizeUrlCandidate(match);
+    if (!seen.has(normalized) && isLikelyImageUrl(normalized)) {
+      seen.add(normalized);
+      imageUrls.push(normalized);
+      return "";
+    }
+    return match;
+  });
+
+  cleanText = cleanText.replace(/\n{3,}/g, "\n\n").trim();
+
+  return { cleanText, imageUrls };
+}
+
 function buildContentParts(text: string, attachments: Attachment[]): ContentPart[] {
   const parts: ContentPart[] = [];
+  const { cleanText, imageUrls } = extractInlineImageUrls(text);
+
+  if (cleanText) {
+    parts.push({ type: "text", text: cleanText });
+  }
+
+  for (const imageUrl of imageUrls) {
+    parts.push({ type: "image_url", image_url: { url: imageUrl } });
+  }
 
   for (const attachment of attachments) {
     if (attachment.type === "image") {
@@ -129,10 +213,6 @@ function buildContentParts(text: string, attachments: Attachment[]): ContentPart
       const format = attachment.mimeType.split("/")[1]?.split(";")[0] ?? "mp3";
       parts.push({ type: "input_audio", input_audio: { data: base64, format } });
     }
-  }
-
-  if (text.trim()) {
-    parts.push({ type: "text", text });
   }
 
   return parts;
@@ -178,10 +258,10 @@ export function useChatStream() {
       let roomId = store.activeRoomId;
       if (!roomId) roomId = store.createRoom();
 
-      const hasAttachments = attachments.length > 0;
-      const messageContent: string | ContentPart[] = hasAttachments
-        ? buildContentParts(text, attachments)
-        : text;
+      const messageParts = buildContentParts(text, attachments);
+      const messageContent: string | ContentPart[] = messageParts.length === 1 && messageParts[0]?.type === "text"
+        ? messageParts[0].text
+        : messageParts;
 
       const messageId = store.addUserMessage(messageContent);
       store.setStreaming(true);

@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Composite Image Chat Tester</title>
+    <style>
+        :root {
+            --bg: #f0f0f0;
+            --sidebar: #e0e0e0;
+            --text: #1a1a1a;
+            --accent: #000;
+            --border: #333;
+            --card: #fff;
+            --user-bubble: #e2e8f0;
+            --bot-bubble: #fff;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: 'SF Mono', 'Fira Code', monospace; 
+            background: var(--bg); 
+            color: var(--text);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Sidebar for config */
+        aside {
+            width: 320px;
+            background: var(--sidebar);
+            border-right: 2px solid var(--border);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        h1 { font-size: 1.2rem; font-weight: 800; text-transform: uppercase; border-bottom: 2px solid var(--border); padding-bottom: 10px; }
+        
+        .field { display: flex; flex-direction: column; gap: 5px; }
+        label { font-size: 0.7rem; font-weight: bold; text-transform: uppercase; }
+        input, select, textarea {
+            padding: 8px;
+            background: #fff;
+            border: 2px solid var(--border);
+            font-family: inherit;
+            font-size: 0.9rem;
+            outline: none;
+        }
+        input:focus { background: #fafafa; border-color: #000; }
+
+        button {
+            padding: 10px;
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            font-weight: bold;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+        button:active { transform: scale(0.98); }
+        button.secondary { background: transparent; color: var(--text); border: 2px solid var(--border); }
+
+        /* Main Chat Area */
+        main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg);
+        }
+
+        #chat-window {
+            flex: 1;
+            overflow-y: auto;
+            padding: 40px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .message {
+            max-width: 80%;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .message.user { align-self: flex-end; }
+        .message.assistant { align-self: flex-start; }
+
+        .bubble {
+            padding: 15px;
+            border: 2px solid var(--border);
+            box-shadow: 4px 4px 0px var(--border);
+            position: relative;
+        }
+        .user .bubble { background: var(--user-bubble); }
+        .assistant .bubble { background: var(--bot-bubble); }
+
+        .meta { font-size: 0.6rem; color: #666; margin-bottom: -5px; }
+        .user .meta { text-align: right; }
+
+        .img-preview {
+            max-width: 100%;
+            border: 2px solid var(--border);
+            display: block;
+        }
+
+        /* Input Area */
+        #input-area {
+            padding: 20px 40px;
+            background: var(--sidebar);
+            border-top: 2px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .controls { display: flex; gap: 10px; align-items: flex-end; }
+        .controls textarea { flex: 1; height: 60px; resize: none; }
+        
+        #pending-image {
+            display: none;
+            width: 100px;
+            height: 100px;
+            object-fit: cover;
+            border: 2px solid var(--border);
+        }
+
+        .loader {
+            display: none;
+            font-size: 0.8rem;
+            font-weight: bold;
+            animation: blink 1s infinite;
+        }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+        .latency-badge {
+            background: #ff0;
+            padding: 2px 5px;
+            font-weight: bold;
+            font-size: 0.7rem;
+            margin-top: 5px;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body>
+
+    <aside>
+        <h1>Composite Tester</h1>
+        
+        <div class="field">
+            <label>API Base URL</label>
+            <input type="text" id="base-url" value="http://localhost:8000/v1">
+        </div>
+
+        <div class="field">
+            <label>API Key</label>
+            <input type="password" id="api-key" placeholder="rsk_...">
+        </div>
+
+        <div class="field">
+            <label>Model ID</label>
+            <input type="text" id="model-id" value="meshapi/creative-imagen">
+        </div>
+
+        <div class="field">
+            <label>Options</label>
+            <div style="font-size: 0.7rem; color: #666; margin-top: 5px;">
+                CORS: Ensure your server allows requests from this page.
+            </div>
+        </div>
+
+        <button onclick="clearChat()" class="secondary" style="margin-top: auto;">Clear Conversation</button>
+    </aside>
+
+    <main>
+        <div id="chat-window">
+            <!-- Messages appear here -->
+            <div class="message assistant">
+                <div class="meta">SYSTEM</div>
+                <div class="bubble">
+                    Ready. Upload an image and tell me how to refine it, or just describe what you want to see.
+                </div>
+            </div>
+        </div>
+
+        <div id="input-area">
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <img id="pending-image" src="" alt="Pending">
+                <div id="image-status" style="font-size: 0.7rem; font-weight: bold;"></div>
+            </div>
+            
+            <div class="controls">
+                <button onclick="document.getElementById('file-input').click()" class="secondary">📷 Upload</button>
+                <input type="file" id="file-input" style="display:none" accept="image/*" onchange="handleFile(this)">
+                
+                <textarea id="user-input" placeholder="Type your instruction... (Shift+Enter for newline)"></textarea>
+                
+                <button id="send-btn" onclick="sendMessage()">Send</button>
+            </div>
+            <div id="loading" class="loader">REFINING PROMPT & GENERATING IMAGE...</div>
+        </div>
+    </main>
+
+    <script>
+        let conversation = [];
+        let pendingImageData = null;
+
+        const chatWindow = document.getElementById('chat-window');
+        const userInput = document.getElementById('user-input');
+        const sendBtn = document.getElementById('send-btn');
+        const loading = document.getElementById('loading');
+
+        userInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        function handleFile(input) {
+            const file = input.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                pendingImageData = e.target.result;
+                document.getElementById('pending-image').src = pendingImageData;
+                document.getElementById('pending-image').style.display = 'block';
+                document.getElementById('image-status').innerText = 'IMAGE ATTACHED';
+            };
+            reader.readAsDataURL(file);
+        }
+
+        async function sendMessage() {
+            const text = userInput.value.trim();
+            if (!text && !pendingImageData) return;
+
+            const baseUrl = document.getElementById('base-url').value.trim();
+            const apiKey = document.getElementById('api-key').value.trim();
+            const model = document.getElementById('model-id').value.trim();
+
+            if (!apiKey) {
+                alert("Please enter an API Key");
+                return;
+            }
+
+            // Create user message object
+            const contentParts = [];
+            if (text) contentParts.push({ type: "text", text: text });
+            if (pendingImageData) contentParts.push({ type: "image_url", image_url: { url: pendingImageData } });
+
+            const userMsg = { role: "user", content: contentParts };
+            conversation.push(userMsg);
+
+            // UI: Add user message
+            appendMessage("user", text, pendingImageData);
+            
+            // Clear input
+            userInput.value = "";
+            pendingImageData = null;
+            document.getElementById('pending-image').style.display = 'none';
+            document.getElementById('image-status').innerText = '';
+            
+            loading.style.display = 'block';
+            sendBtn.disabled = true;
+
+            const startTime = performance.now();
+
+            try {
+                const response = await fetch(`${baseUrl}/chat/completions`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        model: model,
+                        messages: conversation,
+                        temperature: 0.7
+                    })
+                });
+
+                const data = await response.json();
+                const endTime = performance.now();
+                const latency = Math.round(endTime - startTime);
+
+                if (response.ok) {
+                    const assistantMsg = data.choices[0].message;
+                    conversation.push(assistantMsg);
+
+                    // Extract image from assistant response
+                    let resultImg = null;
+                    if (Array.isArray(assistantMsg.content)) {
+                        const part = assistantMsg.content.find(p => p.type === 'image_url');
+                        if (part) resultImg = part.image_url.url;
+                    }
+
+                    appendMessage("assistant", null, resultImg, latency);
+                } else {
+                    const errorMsg = data.error ? data.error.message : "An error occurred";
+                    appendMessage("assistant", `ERROR: ${errorMsg}`);
+                }
+            } catch (err) {
+                appendMessage("assistant", `NETWORK ERROR: ${err.message}`);
+            } finally {
+                loading.style.display = 'none';
+                sendBtn.disabled = false;
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+            }
+        }
+
+        function appendMessage(role, text, imageUrl, latency) {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${role}`;
+            
+            let html = `<div class="meta">${role.toUpperCase()}</div>`;
+            html += `<div class="bubble">`;
+            if (text) html += `<div>${text.replace(/\n/g, '<br>')}</div>`;
+            if (imageUrl) {
+                if (text) html += `<br>`;
+                html += `<img src="${imageUrl}" class="img-preview">`;
+            }
+            if (latency) {
+                html += `<div class="latency-badge">LATENCY: ${latency}ms</div>`;
+            }
+            html += `</div>`;
+            
+            msgDiv.innerHTML = html;
+            chatWindow.appendChild(msgDiv);
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+        }
+
+        function clearChat() {
+            conversation = [];
+            chatWindow.innerHTML = `
+                <div class="message assistant">
+                    <div class="meta">SYSTEM</div>
+                    <div class="bubble">Conversation cleared. Ready for next prompt.</div>
+                </div>
+            `;
+        }
+    </script>
+</body>
+</html>
