@@ -119,7 +119,7 @@ async function streamChat(
 }
 
 const IMAGE_GEN_PATTERNS = ["dall-e", "imagen", "gpt-image", "gpt-5-image", "flux", "stable-diffusion"];
-const AUDIO_MODEL_PATTERNS = ["audio-preview", "audio-latest", "tts", "whisper"];
+const AUDIO_MODEL_PATTERNS = ["audio", "tts", "whisper"];
 const IMAGE_FILE_EXTENSIONS = new Set([
   "png",
   "jpg",

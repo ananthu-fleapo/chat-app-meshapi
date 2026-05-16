@@ -137,6 +137,61 @@ export async function POST(req: NextRequest) {
 
           if (!upstream.ok) {
             const errText = await upstream.text().catch(() => upstream.statusText);
+            
+            // Fallback for audio models that require audio modalities
+            if (errText.includes("This model requires that either input content or output modality contain audio.")) {
+              console.log("[/api/chat] Detected audio model error in streaming path, retrying non-streaming with audio modalities");
+              
+              const retryUpstream = await fetch(`${MESH_API_URL}/chat/completions`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${MESH_API_KEY}`,
+                },
+                body: JSON.stringify({
+                  model,
+                  messages,
+                  modalities: ["text", "audio"],
+                  audio: audio ?? { voice: "alloy", format: "mp3" },
+                  stream: false,
+                }),
+              });
+              
+              logUpstreamResponse("Retry Audio upstream", retryUpstream);
+
+              if (!retryUpstream.ok) {
+                const retryErrText = await retryUpstream.text().catch(() => retryUpstream.statusText);
+                throw new Error(`Upstream error ${retryUpstream.status}: ${retryErrText}`);
+              }
+
+              const json = await retryUpstream.json() as Record<string, unknown>;
+              console.log("[/api/chat] Retry Audio response preview:", previewValue(json));
+
+              const choices = json.choices as Array<Record<string, unknown>> | undefined;
+              const message = choices?.[0]?.message as Record<string, unknown> | undefined;
+              const textContent = typeof message?.content === "string" ? message.content : "";
+              const audioPayload = message?.audio as Record<string, unknown> | undefined;
+
+              if (textContent) {
+                enqueue({ choices: [{ delta: { content: textContent } }] });
+              }
+              if (audioPayload?.data) {
+                enqueue({
+                  audio: {
+                    data: audioPayload.data,
+                    format: audio?.format ?? "mp3",
+                    transcript: audioPayload.transcript ?? null,
+                  },
+                });
+              }
+              if (json.usage) {
+                enqueue({ usage: json.usage });
+              }
+              
+              controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+              return;
+            }
+            
             throw new Error(`Upstream error ${upstream.status}: ${errText}`);
           }
 
